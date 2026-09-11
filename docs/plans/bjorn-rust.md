@@ -104,7 +104,7 @@ right-aligned counts), notes list (4-row items, lead line), reader with the
 native renderer, column cycle `c`, poll loop, `r`, help, quit confirm,
 `--demo`, `--tag`. The `Harness` lands here with the first UI tests.
 Verify: `cargo test`
-Status: [ ] pending
+Status: [x] done 2026-09-11 (87 passed: 48 unit, 10 client, 29 UI; demo checked in tmux)
 
 ### Phase 24 — Writes, export, search
 Editor round trip with hash guard and kept temp file on conflict, duplicate
