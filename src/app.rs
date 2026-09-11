@@ -26,11 +26,16 @@ use crate::export::{
 };
 use crate::icons::IconSet;
 use crate::model::{Selection, View, duplicate_titles, select_notes, today};
+use crate::reminders::{
+    RemctlClient, Status, join as join_reminders, remctl_found, resolve_remctl,
+};
 use crate::search::{query_pattern, rewrite_subtags};
+use crate::todos::{TodoScan, scan_rows};
 use crate::ui::modals::{Field, Overlay, Pending, Severity, TextPurpose, Toast};
 use crate::ui::note_list::{NoteList, ROW_HEIGHT};
 use crate::ui::note_view::Reader;
 use crate::ui::sidebar::{Row, Sidebar};
+use crate::ui::triage::{Triage, TriageRow};
 
 /// Delay between the list cursor moving and the note being fetched and rendered.
 pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
@@ -92,6 +97,20 @@ pub enum Msg {
     },
     Opened(Result<(), BearError>),
     Exported(Result<PathBuf, String>),
+    TriageLoaded {
+        scan: TodoScan,
+        statuses: HashMap<String, (Status, i64)>,
+        error: String,
+    },
+    TriageTicked {
+        ticked: Vec<String>,
+        failures: Vec<String>,
+    },
+    TriageAdded {
+        added: usize,
+        failures: Vec<String>,
+        keys: Vec<String>,
+    },
 }
 
 /// Where the last frame put each pane, for mouse events.
@@ -142,6 +161,10 @@ pub struct App {
     editor_job: Option<EditorJob>,
     /// A note just created, to open in the editor once the reload shows it.
     pending_edit: Option<String>,
+    /// The triage screen while it is up; it covers the three columns.
+    pub triage: Option<Triage>,
+    pub remctl: Option<Arc<RemctlClient>>,
+    reminders_notice_shown: bool,
     reader_width: usize,
     reader_height: usize,
 }
@@ -162,6 +185,13 @@ impl App {
         let ws = normalize_tag(workspace.unwrap_or(&config.workspace));
         let mut sidebar = Sidebar::new(icons.clone());
         sidebar.set_workspace(&ws);
+        let remctl = if config.reminders.enabled && remctl_found(&config.reminders.remctl) {
+            Some(Arc::new(RemctlClient::new(vec![resolve_remctl(
+                &config.reminders.remctl,
+            )])))
+        } else {
+            None
+        };
         let app = App {
             selection: Selection {
                 workspace: ws,
@@ -197,6 +227,9 @@ impl App {
             written_titles: Vec::new(),
             editor_job: None,
             pending_edit: None,
+            triage: None,
+            remctl,
+            reminders_notice_shown: false,
             reader_width: 80,
             reader_height: 24,
         };
@@ -495,6 +528,21 @@ impl App {
                     self.error("Open in Bear failed", &err);
                 }
             }
+            Msg::TriageLoaded {
+                scan,
+                statuses,
+                error,
+            } => {
+                if let Some(triage) = self.triage.as_mut() {
+                    triage.show(scan, &statuses, &error);
+                }
+            }
+            Msg::TriageTicked { ticked, failures } => self.on_triage_ticked(ticked, failures),
+            Msg::TriageAdded {
+                added,
+                failures,
+                keys,
+            } => self.on_triage_added(added, failures, keys),
             Msg::Exported(result) => match result {
                 Ok(path) => self.notify(
                     &format!("Exported to {}", path.display()),
@@ -953,6 +1001,7 @@ impl App {
     fn run_pending(&mut self, action: Pending) {
         match action {
             Pending::Quit => self.running = false,
+            Pending::Tick(rows) => self.tick_rows(rows),
             Pending::Trash(note) => {
                 let client = self.client.clone();
                 let tx = self.tx.clone();
@@ -1291,6 +1340,10 @@ impl App {
             self.handle_overlay_key(overlay, key);
             return;
         }
+        if self.triage.is_some() {
+            self.triage_key(key);
+            return;
+        }
         if self.focus == Pane::Search {
             self.search_key(key);
             return;
@@ -1315,6 +1368,7 @@ impl App {
             KeyCode::Char('p') => self.toggle_pin(),
             KeyCode::Char('x') => self.export_note_action(),
             KeyCode::Char('b') => self.open_in_bear(),
+            KeyCode::Char('t') => self.open_triage(),
             KeyCode::Char('c') => self.cycle_columns(),
             KeyCode::Char('w') => self.toggle_workspace(),
             KeyCode::Char('W') => {
@@ -1570,5 +1624,296 @@ impl App {
 
     pub fn reader_viewport(&self) -> (usize, usize) {
         (self.reader_width, self.reader_height)
+    }
+}
+
+// -- triage ------------------------------------------------------------------------
+
+impl App {
+    pub fn reminders_enabled(&self) -> bool {
+        self.config.reminders.enabled && self.remctl.is_some()
+    }
+
+    /// `t`: every open todo in the workspace (all notes when none is set).
+    pub fn open_triage(&mut self) {
+        if self.triage.is_some() {
+            return;
+        }
+        let scope = if self.selection.workspace.is_empty() {
+            "all notes".to_string()
+        } else {
+            display_tag(&self.selection.workspace)
+        };
+        if self.config.reminders.enabled && self.remctl.is_none() && !self.reminders_notice_shown {
+            self.reminders_notice_shown = true;
+            self.notify_titled(
+                "Reminders",
+                "Reminders mode is configured but remctl was not found; triage runs Bear-only.",
+                Severity::Warning,
+                Duration::from_secs(6),
+            );
+        }
+        self.triage = Some(Triage::new(&scope, self.reminders_enabled()));
+        self.triage_load();
+    }
+
+    fn triage_load(&mut self) {
+        let client = self.client.clone();
+        let remctl = if self.reminders_enabled() {
+            self.remctl.clone()
+        } else {
+            None
+        };
+        let tx = self.tx.clone();
+        let workspace = self.selection.workspace.clone();
+        tokio::spawn(async move {
+            let rows = match client.todo_rows(&workspace).await {
+                Ok(rows) => rows,
+                Err(err) => {
+                    let _ = tx.send(Msg::TriageLoaded {
+                        scan: TodoScan::default(),
+                        statuses: HashMap::new(),
+                        error: format!("Triage: {err}"),
+                    });
+                    return;
+                }
+            };
+            let scan = scan_rows(&rows);
+            let mut statuses = HashMap::new();
+            let mut error = String::new();
+            if let Some(remctl) = remctl {
+                match remctl.linked_reminders().await {
+                    Ok(reminders) => statuses = join_reminders(&scan.todos, &reminders),
+                    Err(err) => error = format!("Reminders unavailable: {err}"),
+                }
+            }
+            let _ = tx.send(Msg::TriageLoaded {
+                scan,
+                statuses,
+                error,
+            });
+        });
+    }
+
+    fn close_triage(&mut self) {
+        self.triage = None;
+    }
+
+    fn triage_key(&mut self, key: KeyEvent) {
+        let Some(triage) = self.triage.as_mut() else {
+            return;
+        };
+        if let Some(field) = triage.filter.as_mut() {
+            match key.code {
+                KeyCode::Esc => triage.close_filter(),
+                KeyCode::Enter => triage.apply_filter(),
+                _ => {
+                    Self::field_key(field, &key);
+                }
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if !triage.filter_text.is_empty() {
+                    triage.clear_filter();
+                } else {
+                    self.close_triage();
+                }
+            }
+            KeyCode::Char('?') => self.overlay = Some(Overlay::Help { scroll: 0 }),
+            KeyCode::Char('j') | KeyCode::Down => triage.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => triage.move_cursor(-1),
+            KeyCode::Char(' ') => triage.toggle_mark(),
+            KeyCode::Char('/') => triage.open_filter(),
+            KeyCode::Char('r') => {
+                triage.status = "reloading…".into();
+                self.triage_load();
+            }
+            KeyCode::Char('x') => {
+                let rows = triage.targets();
+                if rows.is_empty() {
+                    return;
+                }
+                if rows.len() > 1 {
+                    self.overlay = Some(Overlay::Confirm {
+                        message: format!("Tick {} todos in Bear?", rows.len()),
+                        confirm_label: "Tick".into(),
+                        action: Pending::Tick(rows),
+                    });
+                } else {
+                    self.tick_rows(rows);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(row) = triage.current_row().cloned() {
+                    self.triage_goto(&row.todo.note_id);
+                }
+            }
+            KeyCode::Char('b') => {
+                if let Some(row) = triage.current_row().cloned() {
+                    let header = if row.todo.section.starts_with("# ") {
+                        String::new()
+                    } else {
+                        row.todo.header()
+                    };
+                    self.open_note_in_bear(&row.todo.note_id, &header);
+                }
+            }
+            KeyCode::Char('a') => self.triage_add(),
+            _ => {}
+        }
+    }
+
+    fn tick_rows(&mut self, rows: Vec<TriageRow>) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let mut ticked = Vec::new();
+            let mut failures = Vec::new();
+            for row in rows {
+                let todo = row.todo;
+                match client
+                    .tick_todo(&todo.note_id, &todo.line, &todo.done_line(), &todo.section)
+                    .await
+                {
+                    Ok(()) => ticked.push(todo.key()),
+                    Err(err) => failures.push(format!(
+                        "{}: {err}",
+                        todo.text.chars().take(40).collect::<String>()
+                    )),
+                }
+            }
+            let _ = tx.send(Msg::TriageTicked { ticked, failures });
+        });
+    }
+
+    fn on_triage_ticked(&mut self, ticked: Vec<String>, failures: Vec<String>) {
+        if let Some(triage) = self.triage.as_mut()
+            && !ticked.is_empty()
+        {
+            triage.note_removed(&ticked);
+        }
+        if !failures.is_empty() {
+            self.notify_titled(
+                "Some todos were not ticked (the line changed in Bear?)",
+                &failures.join("\n"),
+                Severity::Warning,
+                Duration::from_secs(10),
+            );
+        } else if !ticked.is_empty() {
+            self.notify(
+                &format!("Ticked {} in Bear.", ticked.len()),
+                Duration::from_secs(2),
+            );
+        }
+        self.start_reload(None, None, false);
+        if self.triage.is_some() {
+            self.triage_load();
+        }
+    }
+
+    fn triage_goto(&mut self, note_id: &str) {
+        self.close_triage();
+        if !self.notes.select_id(note_id) {
+            self.drop_search();
+            self.selection = Selection {
+                view: View::All,
+                workspace: self.selection.workspace.clone(),
+                ..Selection::default()
+            };
+            self.sidebar.select_view(View::All);
+            self.apply_selection(Some(note_id), false);
+            self.notes.select_id(note_id);
+        }
+        self.focus = Pane::Notes;
+        if let Some(note) = self.notes.current().cloned() {
+            self.schedule_preview(note, true, false);
+        }
+    }
+
+    fn triage_add(&mut self) {
+        let Some(triage) = self.triage.as_mut() else {
+            return;
+        };
+        if !triage.reminders_enabled {
+            self.notify_titled(
+                "Add to Reminders",
+                "Reminders mode is off. Add to ~/.config/bjorn/config.toml:\n[reminders]\nenabled = true\nlist = \"<your list>\"",
+                Severity::Warning,
+                Duration::from_secs(8),
+            );
+            return;
+        }
+        let rows: Vec<TriageRow> = triage
+            .targets()
+            .into_iter()
+            .filter(|r| r.status == Status::New)
+            .collect();
+        if rows.is_empty() {
+            self.notify(
+                "Mark rows that are not in Reminders yet.",
+                Duration::from_secs(3),
+            );
+            return;
+        }
+        let Some(remctl) = self.remctl.clone() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let (list, due) = (
+            self.config.reminders.list.clone(),
+            self.config.reminders.due.clone(),
+        );
+        tokio::spawn(async move {
+            let mut added = 0;
+            let mut failures = Vec::new();
+            let mut keys = Vec::new();
+            for row in rows {
+                keys.push(row.todo.key());
+                match remctl.add(&row.todo, &list, &due).await {
+                    Ok(_) => added += 1,
+                    Err(err) => failures.push(format!(
+                        "{}: {err}",
+                        row.todo.text.chars().take(40).collect::<String>()
+                    )),
+                }
+            }
+            let _ = tx.send(Msg::TriageAdded {
+                added,
+                failures,
+                keys,
+            });
+        });
+    }
+
+    fn on_triage_added(&mut self, added: usize, failures: Vec<String>, keys: Vec<String>) {
+        if !failures.is_empty() {
+            self.notify_titled(
+                "Some reminders were not created",
+                &failures.join("\n"),
+                Severity::Warning,
+                Duration::from_secs(10),
+            );
+        }
+        if added > 0 {
+            let list = self.config.reminders.list.clone();
+            let where_ = if list.is_empty() {
+                String::new()
+            } else {
+                format!(" to “{list}”")
+            };
+            self.notify(
+                &format!(
+                    "Added {added} reminder{}{where_}.",
+                    if added == 1 { "" } else { "s" }
+                ),
+                Duration::from_secs(3),
+            );
+        }
+        if let Some(triage) = self.triage.as_mut() {
+            triage.unmark(&keys);
+            self.triage_load();
+        }
     }
 }

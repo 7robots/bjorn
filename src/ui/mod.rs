@@ -7,6 +7,7 @@ pub mod note_list;
 pub mod note_view;
 pub mod sidebar;
 pub mod theme;
+pub mod triage;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -46,6 +47,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let [body, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
     let mut rects = Rects::default();
+
+    if app.triage.is_some() {
+        draw_triage(frame, app, body);
+        draw_footer_entries(frame, footer, TRIAGE_FOOTER);
+        app.rects = rects;
+        draw_toasts(frame, app, body);
+        if let Some(overlay) = app.overlay.clone() {
+            draw_overlay(frame, app, area, &overlay);
+        }
+        return;
+    }
 
     let columns: Vec<Constraint> = match app.columns {
         3 => vec![
@@ -335,9 +347,129 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
     );
 }
 
+pub const TRIAGE_FOOTER: &[(&str, &str)] = &[
+    ("esc", "Close"),
+    ("space", "Mark"),
+    ("x", "Tick in Bear"),
+    ("b", "Bear"),
+    ("a", "Add to Reminders"),
+    ("/", "Filter"),
+    ("r", "Reload"),
+    ("?", "Help"),
+];
+
+fn draw_triage(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(triage) = app.triage.as_mut() else {
+        return;
+    };
+    let filter_rows = if triage.filter.is_some() { 3 } else { 0 };
+    let [header, filter, list, status] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(filter_rows),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    frame.render_widget(Clear, area);
+    let head = format!(" {}", triage.header());
+    let pad = (header.width as usize).saturating_sub(UnicodeWidthStr::width(head.as_str()));
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{head}{}", " ".repeat(pad)),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        header,
+    );
+    if let Some(field) = &triage.filter {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT));
+        let inner = block.inner(filter);
+        frame.render_widget(block, filter);
+        let shown = if field.value.is_empty() {
+            Line::from(Span::styled(
+                "Filter todos — enter to apply, esc to clear",
+                theme::muted(),
+            ))
+        } else {
+            Line::from(field.value.clone())
+        };
+        frame.render_widget(Paragraph::new(shown), inner);
+        field_cursor(frame, field, inner.x, inner.y, inner.width);
+    }
+    let lines = triage.lines();
+    if lines.is_empty() && triage.loaded {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "No open todos in scope",
+                theme::muted(),
+            )))
+            .block(Block::default().padding(Padding::new(3, 3, 2, 0))),
+            list,
+        );
+    } else {
+        let cursor_line = lines.iter().position(|l| matches!(l, crate::ui::triage::TriageLine::Todo(i) if triage.items.get(triage.cursor) == Some(i)));
+        let height = list.height as usize;
+        if let Some(c) = cursor_line {
+            if c < triage.scroll {
+                triage.scroll = c.saturating_sub(2);
+            } else if c >= triage.scroll + height {
+                triage.scroll = c + 1 - height;
+            }
+        }
+        triage.scroll = triage.scroll.min(lines.len().saturating_sub(height));
+        let mut rendered: Vec<Line<'static>> = Vec::new();
+        for line in lines.iter().skip(triage.scroll).take(height) {
+            let mut row = match line {
+                crate::ui::triage::TriageLine::Blank => Line::default(),
+                crate::ui::triage::TriageLine::Header { title, count, tags } => {
+                    crate::ui::triage::Triage::render_header(title, *count, tags)
+                }
+                crate::ui::triage::TriageLine::Todo(i) => {
+                    let is_cursor = triage.items.get(triage.cursor) == Some(i);
+                    let style = if is_cursor {
+                        Some(theme::cursor_focused())
+                    } else {
+                        None
+                    };
+                    let mut r = triage.render_row(&triage.rows[*i], style);
+                    if let Some(base) = style {
+                        let used: usize = r
+                            .spans
+                            .iter()
+                            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                            .sum();
+                        r.spans.push(Span::styled(
+                            " ".repeat((list.width as usize).saturating_sub(used + 2)),
+                            base,
+                        ));
+                    }
+                    r
+                }
+            };
+            row.spans.insert(0, Span::raw("  "));
+            rendered.push(row);
+        }
+        frame.render_widget(Paragraph::new(rendered), list);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {}", triage.status),
+            theme::muted(),
+        ))),
+        status,
+    );
+}
+
 fn draw_footer(frame: &mut Frame, area: Rect) {
+    draw_footer_entries(frame, area, FOOTER);
+}
+
+fn draw_footer_entries(frame: &mut Frame, area: Rect, entries: &[(&str, &str)]) {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for (key, label) in FOOTER {
+    for (key, label) in entries {
         spans.push(Span::styled(
             format!(" {key} "),
             Style::default()

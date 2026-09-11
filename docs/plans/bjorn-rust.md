@@ -120,7 +120,7 @@ Todo parser and key scheme, triage screen (mark, tick via `edit`, go to note,
 open in Bear at section, filter, reload), `[reminders]` mode with remctl
 add/read-back and the ⏰/✓ glyphs; demo forces reminders on with the fake.
 Verify: `cargo test`
-Status: [ ] pending
+Status: [x] done 2026-09-11 (153 passed: 73 unit, 10 client, 29 UI, 13 search, 16 writes, 12 triage)
 
 ### Phase 26 — Acceptance gate
 1. `cargo run --release --bin bjorn-gate` against live Bear: bjorn's

@@ -78,6 +78,11 @@ async fn main() -> anyhow::Result<()> {
     let client = Arc::new(BearClient::new(command));
     let environ: std::collections::HashMap<String, String> = std::env::vars().collect();
     let (mut app, mut rx) = App::new(config, client, cli.tag.as_deref(), environ);
+    if cli.demo {
+        app.remctl = Some(Arc::new(bjorn::reminders::RemctlClient::new(vec![
+            sibling("fake-remctl")?.to_string_lossy().into_owned(),
+        ])));
+    }
 
     let mut guard = Some(TerminalGuard::enter()?);
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;

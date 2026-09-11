@@ -43,6 +43,7 @@ Edits are hash-guarded: if the note changed in Bear while you were in the editor
 pub enum Pending {
     Quit,
     Trash(Note),
+    Tick(Vec<crate::ui::triage::TriageRow>),
 }
 
 /// What a submitted text prompt goes on to do.
