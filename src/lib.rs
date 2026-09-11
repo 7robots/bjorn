@@ -6,10 +6,15 @@
 pub mod app;
 pub mod bear;
 pub mod config;
+pub mod editor;
+pub mod export;
 pub mod fake;
 pub mod harness;
 pub mod icons;
 pub mod model;
 pub mod render;
+pub mod render_html;
+pub mod search;
+pub mod search_box;
 pub mod ui;
 pub mod util;

@@ -2,6 +2,7 @@
 //! draw into, and a wait loop that runs the message and timer plumbing the
 //! real main loop would. Tests read the drawn buffer as text.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,7 +29,19 @@ impl Harness {
         workspace: Option<&str>,
         size: (u16, u16),
     ) -> Harness {
-        let (mut app, rx) = App::new(config, client, workspace, None);
+        Self::with_env(config, client, workspace, size, HashMap::new())
+    }
+
+    /// A harness whose app sees `environ` instead of the process environment
+    /// (`EDITOR`, `VISUAL`, `TERM_PROGRAM`).
+    pub fn with_env(
+        config: Config,
+        client: Arc<BearClient>,
+        workspace: Option<&str>,
+        size: (u16, u16),
+        environ: HashMap<String, String>,
+    ) -> Harness {
+        let (mut app, rx) = App::new(config, client, workspace, environ);
         app.start();
         let terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("test backend");
         let mut harness = Harness { app, rx, terminal };
@@ -43,17 +56,18 @@ impl Harness {
             .expect("draw");
     }
 
-    /// Deliver pending messages and timers, then redraw. Returns whether
-    /// anything arrived.
-    fn pump(&mut self) -> bool {
-        let mut any = false;
+    /// Deliver pending messages, editor sessions and timers, then redraw.
+    fn pump(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             self.app.handle_msg(msg);
-            any = true;
+        }
+        // Editors run inline here; the real main loop suspends the terminal first.
+        if let Some(job) = self.app.take_editor_job() {
+            let outcome = crate::editor::run(&job, true);
+            self.app.editor_done(job, outcome);
         }
         self.app.tick(Instant::now());
         self.draw();
-        any
     }
 
     /// Run the plumbing until `pred` holds or `timeout` passes.
@@ -218,6 +232,28 @@ impl Harness {
 
     pub fn cell_fg(&self, x: u16, y: u16) -> Color {
         self.terminal.backend().buffer()[(x, y)].fg
+    }
+
+    /// The x of the first cell where `needle` starts on row `y`, looking only
+    /// between `x_from` and `x_to`. Wide glyphs take two cells; this maps
+    /// through the cells rather than counting characters.
+    pub fn find_cell(&self, y: u16, needle: &str, x_from: u16, x_to: u16) -> Option<u16> {
+        let buffer = self.terminal.backend().buffer();
+        let mut text = String::new();
+        let mut starts: Vec<(usize, u16)> = Vec::new();
+        for x in x_from..x_to.min(buffer.area.width) {
+            starts.push((text.len(), x));
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        let offset = text.find(needle)?;
+        starts.iter().find(|(o, _)| *o == offset).map(|(_, x)| *x)
+    }
+
+    /// Does the cell carry the reversed+bold search-match style?
+    pub fn cell_is_match(&self, x: u16, y: u16) -> bool {
+        let cell = &self.terminal.backend().buffer()[(x, y)];
+        cell.modifier.contains(ratatui::style::Modifier::REVERSED)
+            && cell.modifier.contains(ratatui::style::Modifier::BOLD)
     }
 
     pub fn size(&self) -> (u16, u16) {

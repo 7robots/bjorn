@@ -1,6 +1,9 @@
-//! Overlays: confirm dialog, help, and the toast queue.
+//! Overlays: confirm dialog, format picker, text prompt, new-note prompt,
+//! help, and the toast queue.
 
 use std::time::{Duration, Instant};
+
+use crate::bear::Note;
 
 pub const HELP_TEXT: &str = "# Bjorn
 
@@ -39,6 +42,74 @@ Edits are hash-guarded: if the note changed in Bear while you were in the editor
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pending {
     Quit,
+    Trash(Note),
+}
+
+/// What a submitted text prompt goes on to do.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TextPurpose {
+    ExportPath { format_id: &'static str, note: Note },
+}
+
+/// A one-line text field with a cursor, shared by the prompts.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Field {
+    pub value: String,
+    pub cursor: usize,
+}
+
+impl Field {
+    pub fn new(value: &str) -> Field {
+        Field {
+            value: value.to_string(),
+            cursor: value.chars().count(),
+        }
+    }
+
+    fn byte_index(&self, chars: usize) -> usize {
+        self.value
+            .char_indices()
+            .nth(chars)
+            .map(|(i, _)| i)
+            .unwrap_or(self.value.len())
+    }
+
+    pub fn insert(&mut self, ch: char) {
+        let at = self.byte_index(self.cursor);
+        self.value.insert(at, ch);
+        self.cursor += 1;
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            let at = self.byte_index(self.cursor - 1);
+            self.value.remove(at);
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.cursor < self.value.chars().count() {
+            let at = self.byte_index(self.cursor);
+            self.value.remove(at);
+        }
+    }
+
+    pub fn left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.value.chars().count());
+    }
+
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.cursor = self.value.chars().count();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +122,24 @@ pub enum Overlay {
     Help {
         scroll: usize,
     },
+    /// Pick an export format: one key per format, or arrows and enter.
+    Format {
+        index: usize,
+        note: Note,
+    },
+    /// One line of text; escape cancels.
+    Text {
+        title: String,
+        field: Field,
+        hint: String,
+        purpose: TextPurpose,
+    },
+    /// Title and tags for a new note; `field` is 0 for the title, 1 for the tags.
+    NewNote {
+        title: Field,
+        tags: Field,
+        field: usize,
+    },
 }
 
 impl Overlay {
@@ -58,6 +147,9 @@ impl Overlay {
         match self {
             Overlay::Confirm { .. } => "Confirm",
             Overlay::Help { .. } => "Help",
+            Overlay::Format { .. } => "Format",
+            Overlay::Text { .. } => "Text",
+            Overlay::NewNote { .. } => "NewNote",
         }
     }
 }

@@ -7,6 +7,7 @@ use regex::Regex;
 use unicode_width::UnicodeWidthStr;
 
 use crate::bear::Note;
+use crate::search_box::SearchBox;
 use crate::ui::markdown::{RLine, wrap};
 use crate::ui::theme;
 
@@ -44,6 +45,7 @@ pub struct NoteList {
     pub scroll: usize,
     pub header: String,
     pub pattern: Option<Regex>,
+    pub search: SearchBox,
     /// How many times the list has been rebuilt, for tests that assert a
     /// focus change rebuilt nothing.
     pub rebuilds: usize,

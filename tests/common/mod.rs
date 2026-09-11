@@ -1,4 +1,5 @@
 //! Shared fixtures: a fake bearcli with its own state file, and a harness.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -46,6 +47,16 @@ impl Fake {
 
     pub fn harness_with(&self, config: Config, workspace: Option<&str>) -> Harness {
         Harness::new(config, Arc::new(self.client()), workspace, (120, 40))
+    }
+
+    pub fn harness_env(&self, environ: std::collections::HashMap<String, String>) -> Harness {
+        Harness::with_env(
+            self.config(),
+            Arc::new(self.client()),
+            None,
+            (120, 40),
+            environ,
+        )
     }
 }
 

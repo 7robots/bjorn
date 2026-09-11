@@ -45,6 +45,7 @@ fn sibling(name: &str) -> anyhow::Result<PathBuf> {
     Ok(dir.join(name))
 }
 
+/// Raw mode plus the alternate screen, undone on drop (also on panic).
 struct TerminalGuard;
 
 impl TerminalGuard {
@@ -75,10 +76,10 @@ async fn main() -> anyhow::Result<()> {
         vec![resolve_bearcli(&config.bearcli)]
     };
     let client = Arc::new(BearClient::new(command));
-    let term_program = std::env::var("TERM_PROGRAM").ok();
-    let (mut app, mut rx) = App::new(config, client, cli.tag.as_deref(), term_program.as_deref());
+    let environ: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let (mut app, mut rx) = App::new(config, client, cli.tag.as_deref(), environ);
 
-    let _guard = TerminalGuard::enter()?;
+    let mut guard = Some(TerminalGuard::enter()?);
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut events = EventStream::new();
     app.start();
@@ -110,7 +111,16 @@ async fn main() -> anyhow::Result<()> {
         while let Ok(msg) = rx.try_recv() {
             app.handle_msg(msg);
         }
+        // An editor takes the terminal: leave the alternate screen, run it, come back.
+        if let Some(job) = app.take_editor_job() {
+            drop(guard.take());
+            let outcome = bjorn::editor::run(&job, false);
+            guard = Some(TerminalGuard::enter()?);
+            terminal.clear()?;
+            app.editor_done(job, outcome);
+        }
         app.tick(Instant::now());
     }
+    drop(guard);
     Ok(())
 }

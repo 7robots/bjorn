@@ -113,7 +113,7 @@ title warning, `n` create, `d` trash, `u` restore, `p` pin, `b` open,
 with operator and tag completion, sub-tag rewrite, reader and row highlighting,
 `]`/`[`, `enter` to first match.
 Verify: `cargo test`
-Status: [ ] pending
+Status: [x] done 2026-09-11 (134 passed: 66 unit, 10 client, 29 UI, 13 search, 16 writes)
 
 ### Phase 25 — Triage and Reminders
 Todo parser and key scheme, triage screen (mark, tick via `edit`, go to note,

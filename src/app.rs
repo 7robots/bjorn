@@ -6,7 +6,8 @@
 //! terminal. Results are tagged with a generation number and a stale one is
 //! dropped, never cancelled mid-flight.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,10 +19,15 @@ use crate::bear::{
     BearClient, BearError, Note, NoteContent, Probe, Snapshot, display_tag, normalize_tag,
     recently_modified,
 };
-use crate::config::Config;
+use crate::config::{Config, editor_available, resolve_editor};
+use crate::editor::{self, EditorJob};
+use crate::export::{
+    FORMATS, Format, default_export_path, export_note, extension_for, format_by_id,
+};
 use crate::icons::IconSet;
 use crate::model::{Selection, View, duplicate_titles, select_notes, today};
-use crate::ui::modals::{Overlay, Pending, Severity, Toast};
+use crate::search::{query_pattern, rewrite_subtags};
+use crate::ui::modals::{Field, Overlay, Pending, Severity, TextPurpose, Toast};
 use crate::ui::note_list::{NoteList, ROW_HEIGHT};
 use crate::ui::note_view::Reader;
 use crate::ui::sidebar::{Row, Sidebar};
@@ -37,6 +43,7 @@ pub enum Pane {
     Sidebar,
     Notes,
     Reader,
+    Search,
 }
 
 /// What the background tasks send back.
@@ -56,6 +63,35 @@ pub enum Msg {
         epoch: u64,
         result: Result<NoteContent, BearError>,
     },
+    SearchDone {
+        query: String,
+        result: Result<Vec<String>, BearError>,
+    },
+    Created {
+        result: Result<String, BearError>,
+    },
+    EditContent {
+        note: Note,
+        result: Result<NoteContent, BearError>,
+    },
+    Written {
+        job: EditorJob,
+        result: Result<(), BearError>,
+    },
+    Trashed {
+        note: Note,
+        result: Result<(), BearError>,
+    },
+    Restored {
+        note: Note,
+        result: Result<(), BearError>,
+    },
+    Pinned {
+        note_id: String,
+        result: Result<(), BearError>,
+    },
+    Opened(Result<(), BearError>),
+    Exported(Result<PathBuf, String>),
 }
 
 /// Where the last frame put each pane, for mouse events.
@@ -64,6 +100,7 @@ pub struct Rects {
     pub sidebar_header: Rect,
     pub sidebar_rows: Rect,
     pub notes_header: Rect,
+    pub search_box: Rect,
     pub notes_rows: Rect,
     pub note_bar: Rect,
     pub glyph: Rect,
@@ -74,6 +111,7 @@ pub struct App {
     pub config: Config,
     pub client: Arc<BearClient>,
     pub icons: IconSet,
+    pub environ: HashMap<String, String>,
     pub snapshot: Snapshot,
     pub selection: Selection,
     pub search_query: String,
@@ -100,7 +138,10 @@ pub struct App {
     /// Set while the terminal is handed to an editor; the poll waits.
     pub busy: bool,
     written_titles: Vec<String>,
-    /// The width the reader was last drawn at, so jumps can find a block's row.
+    /// An editor session the main loop must run with the terminal suspended.
+    editor_job: Option<EditorJob>,
+    /// A note just created, to open in the editor once the reload shows it.
+    pending_edit: Option<String>,
     reader_width: usize,
     reader_height: usize,
 }
@@ -110,10 +151,14 @@ impl App {
         config: Config,
         client: Arc<BearClient>,
         workspace: Option<&str>,
-        term_program: Option<&str>,
+        environ: HashMap<String, String>,
     ) -> (App, UnboundedReceiver<Msg>) {
         let (tx, rx) = unbounded_channel();
-        let icons = IconSet::new(&config.icon_style, &config.icons, term_program);
+        let icons = IconSet::new(
+            &config.icon_style,
+            &config.icons,
+            environ.get("TERM_PROGRAM").map(String::as_str),
+        );
         let ws = normalize_tag(workspace.unwrap_or(&config.workspace));
         let mut sidebar = Sidebar::new(icons.clone());
         sidebar.set_workspace(&ws);
@@ -125,6 +170,7 @@ impl App {
             config,
             client,
             icons,
+            environ,
             snapshot: Snapshot::default(),
             search_query: String::new(),
             loaded: false,
@@ -149,6 +195,8 @@ impl App {
             reload_inflight: false,
             busy: false,
             written_titles: Vec::new(),
+            editor_job: None,
+            pending_edit: None,
             reader_width: 80,
             reader_height: 24,
         };
@@ -161,6 +209,10 @@ impl App {
         if self.config.poll_seconds > 0 {
             self.next_poll = Some(Instant::now() + Duration::from_secs(self.config.poll_seconds));
         }
+    }
+
+    fn env(&self, name: &str) -> Option<String> {
+        self.environ.get(name).cloned()
     }
 
     // -- notifications -------------------------------------------------------------
@@ -179,6 +231,15 @@ impl App {
     ) {
         self.toasts
             .push(Toast::new(title, message, severity, timeout));
+    }
+
+    fn error(&mut self, title: &str, err: &BearError) {
+        self.notify_titled(
+            title,
+            &err.message,
+            Severity::Error,
+            Duration::from_secs(10),
+        );
     }
 
     /// Messages of the toasts currently showing, for tests.
@@ -256,12 +317,7 @@ impl App {
         let snapshot = match result {
             Ok(snapshot) => snapshot,
             Err(err) => {
-                self.notify_titled(
-                    "bearcli",
-                    &err.message,
-                    Severity::Error,
-                    Duration::from_secs(10),
-                );
+                self.error("bearcli", &err);
                 if !self.loaded {
                     self.reader.clear(&format!("Could not read Bear: {err}"));
                 }
@@ -291,6 +347,11 @@ impl App {
             self.schedule_preview(note, true, false);
         }
         self.warn_duplicates();
+        if let Some(id) = self.pending_edit.take()
+            && let Some(note) = self.snapshot.by_id(&id).cloned()
+        {
+            self.edit_note(note);
+        }
     }
 
     /// Rebuild the notes list for the current selection and line the reader up
@@ -304,6 +365,13 @@ impl App {
             format!("“{}”", self.search_query)
         };
         self.notes.header = format!("{header} · {}", notes.len());
+        let pattern = if self.search_query.is_empty() {
+            None
+        } else {
+            query_pattern(&self.search_query)
+        };
+        self.reader.set_pattern(pattern.clone());
+        self.notes.pattern = pattern;
         match self.notes.show_notes(notes, keep_id) {
             Some(note) => self.schedule_preview(note, force, force),
             None => {
@@ -373,8 +441,6 @@ impl App {
             } => {
                 if generation == self.reload_gen {
                     self.on_loaded(result, probe, keep_id, focus_id, force);
-                } else if generation < self.reload_gen && result.is_ok() {
-                    // An older reload finishing after a newer one started: the newer result will follow.
                 }
             }
             Msg::Probed(result) => self.on_probed(result),
@@ -383,6 +449,64 @@ impl App {
                 epoch,
                 result,
             } => self.on_content(generation, epoch, result),
+            Msg::SearchDone { query, result } => self.on_search_done(query, result),
+            Msg::Created { result } => match result {
+                Ok(id) => {
+                    self.pending_edit = Some(id.clone());
+                    self.start_reload(None, Some(id), false);
+                }
+                Err(err) => self.error("Create failed", &err),
+            },
+            Msg::EditContent { note, result } => match result {
+                Ok(before) => self.open_editor(note, before),
+                Err(err) => self.error("Read failed", &err),
+            },
+            Msg::Written { job, result } => self.on_written(job, result),
+            Msg::Trashed { note, result } => match result {
+                Ok(()) => {
+                    self.forget_content(Some(&note.id));
+                    self.start_reload(None, None, false);
+                    self.notify(
+                        &format!(
+                            "Trashed “{}” — restore it from the Trash view with u.",
+                            note.title
+                        ),
+                        Duration::from_secs(4),
+                    );
+                }
+                Err(err) => self.error("Trash failed", &err),
+            },
+            Msg::Restored { note, result } => match result {
+                Ok(()) => {
+                    self.start_reload(None, None, false);
+                    self.notify(
+                        &format!("Restored “{}”.", note.title),
+                        Duration::from_secs(3),
+                    );
+                }
+                Err(err) => self.error("Restore failed", &err),
+            },
+            Msg::Pinned { note_id, result } => match result {
+                Ok(()) => self.start_reload(Some(note_id), None, false),
+                Err(err) => self.error("Pin failed", &err),
+            },
+            Msg::Opened(result) => {
+                if let Err(err) = result {
+                    self.error("Open in Bear failed", &err);
+                }
+            }
+            Msg::Exported(result) => match result {
+                Ok(path) => self.notify(
+                    &format!("Exported to {}", path.display()),
+                    Duration::from_secs(5),
+                ),
+                Err(message) => self.notify_titled(
+                    "Export failed",
+                    &message,
+                    Severity::Error,
+                    Duration::from_secs(10),
+                ),
+            },
         }
     }
 
@@ -516,7 +640,7 @@ impl App {
     // -- selection -----------------------------------------------------------------
 
     fn select_view(&mut self, view: View) {
-        self.search_query.clear();
+        self.drop_search();
         self.selection = Selection {
             view,
             workspace: self.selection.workspace.clone(),
@@ -526,7 +650,7 @@ impl App {
     }
 
     fn select_tag(&mut self, tag: &str) {
-        self.search_query.clear();
+        self.drop_search();
         self.selection = Selection {
             view: View::All,
             tag: tag.to_string(),
@@ -534,6 +658,17 @@ impl App {
             search_ids: None,
         };
         self.apply_selection(None, false);
+    }
+
+    /// A new view or tag replaces the search: forget the query and close the box.
+    fn drop_search(&mut self) {
+        self.search_query.clear();
+        if self.notes.search.open {
+            self.notes.search.close();
+            if self.focus == Pane::Search {
+                self.focus = Pane::Notes;
+            }
+        }
     }
 
     /// The sidebar cursor moved (or the column got focus): apply what it points
@@ -561,13 +696,132 @@ impl App {
         self.select_view(view);
     }
 
+    // -- search --------------------------------------------------------------------
+
+    pub fn open_search(&mut self) {
+        let query = self.search_query.clone();
+        self.notes.search.open_with(&query);
+        let tags = self.query_tags();
+        self.notes.search.refresh_suggestion(&tags);
+        self.focus = Pane::Search;
+    }
+
+    /// `esc`: close the box and drop the search and its highlights.
+    pub fn clear_search(&mut self) {
+        if self.notes.search.open {
+            self.notes.search.close();
+            if self.focus == Pane::Search {
+                self.focus = Pane::Notes;
+            }
+        }
+        if !self.search_query.is_empty() || self.selection.search_ids.is_some() {
+            self.search_query.clear();
+            self.selection.search_ids = None;
+            self.apply_selection(None, false);
+        }
+    }
+
+    fn submit_search(&mut self) {
+        let typed = self.notes.search.value.trim().to_string();
+        if typed.is_empty() {
+            self.clear_search();
+            return;
+        }
+        let query = rewrite_subtags(&typed, &self.query_tags());
+        if query != typed {
+            self.notes.search.value = query.clone();
+            self.notes.search.cursor = query.chars().count();
+            self.notify(&format!("Sub-tag search: {query}"), Duration::from_secs(3));
+        }
+        self.notes.search.suggestion = None;
+        self.search_query = query.clone();
+        self.focus = Pane::Notes;
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let location = self.selection.view.location().as_str().to_string();
+        tokio::spawn(async move {
+            let result = client.search_ids(&query, &location).await;
+            let _ = tx.send(Msg::SearchDone { query, result });
+        });
+    }
+
+    fn on_search_done(&mut self, query: String, result: Result<Vec<String>, BearError>) {
+        if self.search_query != query {
+            return;
+        }
+        match result {
+            Ok(ids) => {
+                self.selection.search_ids = Some(ids);
+                self.apply_selection(None, false);
+            }
+            Err(err) => self.error("Search", &err),
+        }
+    }
+
+    fn search_key(&mut self, key: KeyEvent) {
+        let box_ = &mut self.notes.search;
+        let mut edited = false;
+        match key.code {
+            KeyCode::Esc => {
+                self.clear_search();
+                return;
+            }
+            KeyCode::Enter => {
+                self.submit_search();
+                return;
+            }
+            KeyCode::Tab => {
+                if box_.accept() {
+                    edited = true;
+                } else {
+                    self.focus = Pane::Notes;
+                    return;
+                }
+            }
+            KeyCode::BackTab => {
+                self.focus = Pane::Notes;
+                return;
+            }
+            KeyCode::Right => edited = box_.right(),
+            KeyCode::Left => box_.left(),
+            KeyCode::Home => box_.home(),
+            KeyCode::End => box_.end(),
+            KeyCode::Backspace => {
+                box_.backspace();
+                edited = true;
+            }
+            KeyCode::Delete => {
+                box_.delete();
+                edited = true;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                box_.insert(c);
+                edited = true;
+            }
+            _ => {}
+        }
+        if edited {
+            let tags = self.query_tags();
+            self.notes.search.refresh_suggestion(&tags);
+        }
+    }
+
+    /// `]` / `[`: the next or previous matching block in the reader.
+    fn jump_match(&mut self, delta: i64) {
+        if self.reader.pattern.is_none() {
+            return;
+        }
+        self.reader.jump(delta, self.reader_width);
+        self.focus = Pane::Reader;
+    }
+
     // -- columns and focus ----------------------------------------------------------
 
     pub fn set_columns(&mut self, count: u8) {
         self.columns = count.clamp(1, 3);
         let hidden = match self.focus {
             Pane::Sidebar => self.columns < 3,
-            Pane::Notes => self.columns < 2,
+            Pane::Notes | Pane::Search => self.columns < 2,
             Pane::Reader => false,
         };
         if hidden {
@@ -618,7 +872,7 @@ impl App {
 
     pub fn set_workspace(&mut self, tag: &str) {
         let tag = normalize_tag(tag);
-        self.search_query.clear();
+        self.drop_search();
         self.selection = Selection {
             view: View::All,
             workspace: tag.clone(),
@@ -681,7 +935,7 @@ impl App {
         );
     }
 
-    // -- actions -------------------------------------------------------------------
+    // -- actions: navigation -------------------------------------------------------
 
     fn refresh(&mut self) {
         self.forget_content(None);
@@ -699,6 +953,14 @@ impl App {
     fn run_pending(&mut self, action: Pending) {
         match action {
             Pending::Quit => self.running = false,
+            Pending::Trash(note) => {
+                let client = self.client.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = client.trash(&note.id).await;
+                    let _ = tx.send(Msg::Trashed { note, result });
+                });
+            }
         }
     }
 
@@ -721,6 +983,7 @@ impl App {
                 self.reader
                     .scroll_by(delta as i64, self.reader_width, self.reader_height)
             }
+            Pane::Search => {}
         }
     }
 
@@ -736,6 +999,291 @@ impl App {
         self.set_focus(Pane::Reader);
     }
 
+    // -- actions: writes -----------------------------------------------------------
+
+    fn new_note(&mut self) {
+        let default_tags = if self.selection.tag.is_empty() {
+            self.selection.workspace.clone()
+        } else {
+            self.selection.tag.clone()
+        };
+        self.overlay = Some(Overlay::NewNote {
+            title: Field::new(""),
+            tags: Field::new(&default_tags),
+            field: 0,
+        });
+    }
+
+    fn create_note(&mut self, title: String, tags: String) {
+        let tag_list: Vec<String> = tags
+            .split(',')
+            .map(normalize_tag)
+            .filter(|t| !t.is_empty())
+            .collect();
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.create(&title, &tag_list, "").await;
+            let _ = tx.send(Msg::Created { result });
+        });
+    }
+
+    /// Round-trip the note through the editor, writing back hash-guarded.
+    pub fn edit_note(&mut self, note: Note) {
+        if note.locked {
+            self.notify_titled(
+                "",
+                "Locked notes cannot be edited here.",
+                Severity::Warning,
+                Duration::from_secs(5),
+            );
+            return;
+        }
+        let editor = resolve_editor(&self.config, &|name| self.env(name));
+        if !editor_available(&editor) {
+            self.notify_titled(
+                "",
+                &format!("Editor “{editor}” not found. Set $EDITOR or `editor` in config."),
+                Severity::Error,
+                Duration::from_secs(10),
+            );
+            return;
+        }
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let id = note.id.clone();
+        tokio::spawn(async move {
+            let result = client.cat(&id).await;
+            let _ = tx.send(Msg::EditContent { note, result });
+        });
+    }
+
+    fn open_editor(&mut self, note: Note, before: NoteContent) {
+        let editor = resolve_editor(&self.config, &|name| self.env(name));
+        match editor::prepare(&note, &before, &editor) {
+            Ok(job) => {
+                self.busy = true;
+                self.editor_job = Some(job);
+            }
+            Err(err) => self.notify_titled(
+                "Edit failed",
+                &format!("Could not write the temp file: {err}"),
+                Severity::Error,
+                Duration::from_secs(10),
+            ),
+        }
+    }
+
+    /// The main loop (or the harness) asks for the editor session to run with
+    /// the terminal suspended, then reports back with `editor_done`.
+    pub fn take_editor_job(&mut self) -> Option<EditorJob> {
+        self.editor_job.take()
+    }
+
+    pub fn editor_done(&mut self, job: EditorJob, run: std::io::Result<()>) {
+        self.busy = false;
+        if let Err(err) = run {
+            self.notify_titled(
+                "Edit failed",
+                &format!("Could not run the editor: {err}"),
+                Severity::Error,
+                Duration::from_secs(10),
+            );
+            return;
+        }
+        let after = match editor::result(&job) {
+            Ok(text) => text,
+            Err(err) => {
+                self.notify_titled(
+                    "",
+                    &format!("Could not read the edited file: {err}"),
+                    Severity::Error,
+                    Duration::from_secs(10),
+                );
+                return;
+            }
+        };
+        if after == job.before.content {
+            editor::cleanup(&job);
+            self.notify("No changes.", Duration::from_secs(2));
+            return;
+        }
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .overwrite(&job.note.id, &after, &job.before.hash)
+                .await;
+            let _ = tx.send(Msg::Written { job, result });
+        });
+    }
+
+    fn on_written(&mut self, job: EditorJob, result: Result<(), BearError>) {
+        match result {
+            Err(err) if err.is_conflict() => self.notify_titled(
+                "Edit conflict",
+                &format!("The note changed in Bear while you were editing. Nothing was written; your version is at {}", job.tmp.display()),
+                Severity::Error,
+                Duration::from_secs(30),
+            ),
+            Err(err) => self.notify_titled("Write failed", &format!("{err} — your version is at {}", job.tmp.display()), Severity::Error, Duration::from_secs(30)),
+            Ok(()) => {
+                editor::cleanup(&job);
+                self.forget_content(Some(&job.note.id));
+                self.note_written(&job.note.title);
+                self.start_reload(Some(job.note.id.clone()), None, true);
+                self.notify("Saved to Bear.", Duration::from_secs(2));
+            }
+        }
+    }
+
+    fn trash_note(&mut self) {
+        let Some(note) = self.current_note().cloned() else {
+            self.notify("No note selected.", Duration::from_secs(3));
+            return;
+        };
+        if self.selection.view == View::Trash {
+            self.notify(
+                "Already in the trash. Bear empties the trash itself.",
+                Duration::from_secs(4),
+            );
+            return;
+        }
+        self.overlay = Some(Overlay::Confirm {
+            message: format!("Move “{}” to the trash?", note.title),
+            confirm_label: "Trash".into(),
+            action: Pending::Trash(note),
+        });
+    }
+
+    fn restore_note(&mut self) {
+        let Some(note) = self.current_note().cloned() else {
+            return;
+        };
+        if !matches!(self.selection.view, View::Trash | View::Archive) {
+            self.notify(
+                "Restore works in the Trash and Archive views.",
+                Duration::from_secs(3),
+            );
+            return;
+        }
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.restore(&note.id).await;
+            let _ = tx.send(Msg::Restored { note, result });
+        });
+    }
+
+    fn toggle_pin(&mut self) {
+        let Some(current) = self.current_note().cloned() else {
+            return;
+        };
+        // The list item may predate the last reload; decide from the snapshot.
+        let note = self.snapshot.by_id(&current.id).cloned().unwrap_or(current);
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = if note.pinned_globally() {
+                client.unpin(&note.id, "global").await
+            } else {
+                client.pin(&note.id, "global").await
+            };
+            let _ = tx.send(Msg::Pinned {
+                note_id: note.id,
+                result,
+            });
+        });
+    }
+
+    fn open_in_bear(&mut self) {
+        let Some(note) = self.current_note().cloned() else {
+            return;
+        };
+        self.open_note_in_bear(&note.id, "");
+    }
+
+    pub fn open_note_in_bear(&mut self, note_id: &str, header: &str) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let (id, header) = (note_id.to_string(), header.to_string());
+        tokio::spawn(async move {
+            let _ = tx.send(Msg::Opened(client.open_in_app(&id, &header).await));
+        });
+    }
+
+    fn export_note_action(&mut self) {
+        let Some(note) = self.current_note().cloned() else {
+            self.notify("No note selected.", Duration::from_secs(3));
+            return;
+        };
+        if note.locked {
+            self.notify_titled(
+                "",
+                "Locked notes cannot be exported here.",
+                Severity::Warning,
+                Duration::from_secs(5),
+            );
+            return;
+        }
+        let index = FORMATS
+            .iter()
+            .position(|f| f.id == self.config.export_format)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::Format { index, note });
+    }
+
+    fn choose_format(&mut self, fmt: Format, note: Note) {
+        let default = default_export_path(
+            &self.config.export_dir,
+            &note.title,
+            extension_for(fmt, note.attachments > 0),
+        );
+        self.overlay = Some(Overlay::Text {
+            title: format!("Export as {} to", fmt.label),
+            field: Field::new(&default.to_string_lossy()),
+            hint: "enter to write · esc to cancel".into(),
+            purpose: TextPurpose::ExportPath {
+                format_id: fmt.id,
+                note,
+            },
+        });
+    }
+
+    fn export_to(&mut self, format_id: &str, note: Note, target: &Path) {
+        let fmt = format_by_id(format_id);
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let target = target.to_path_buf();
+        tokio::spawn(async move {
+            let outcome: Result<PathBuf, String> = async {
+                let content = client.cat(&note.id).await.map_err(|e| e.to_string())?;
+                let mut images: HashMap<String, Vec<u8>> = HashMap::new();
+                if fmt.needs_attachments && note.attachments > 0 {
+                    for name in client
+                        .attachments(&note.id)
+                        .await
+                        .map_err(|e| e.to_string())?
+                    {
+                        let bytes = client
+                            .attachment(&note.id, &name)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        images.insert(name, bytes);
+                    }
+                }
+                let title = note.title.clone();
+                tokio::task::spawn_blocking(move || {
+                    export_note(fmt, &content.content, &title, &target, &images).map_err(|e| e.0)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            }
+            .await;
+            let _ = tx.send(Msg::Exported(outcome));
+        });
+    }
+
     // -- input ---------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -743,11 +1291,30 @@ impl App {
             self.handle_overlay_key(overlay, key);
             return;
         }
+        if self.focus == Pane::Search {
+            self.search_key(key);
+            return;
+        }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('q') => self.confirm_quit(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help { scroll: 0 }),
             KeyCode::Char('r') => self.refresh(),
+            KeyCode::Char('/') => self.open_search(),
+            KeyCode::Esc => self.clear_search(),
+            KeyCode::Char('n') => self.new_note(),
+            KeyCode::Char('e') => {
+                if let Some(note) = self.current_note().cloned() {
+                    self.edit_note(note);
+                } else {
+                    self.notify("No note selected.", Duration::from_secs(3));
+                }
+            }
+            KeyCode::Char('d') => self.trash_note(),
+            KeyCode::Char('u') => self.restore_note(),
+            KeyCode::Char('p') => self.toggle_pin(),
+            KeyCode::Char('x') => self.export_note_action(),
+            KeyCode::Char('b') => self.open_in_bear(),
             KeyCode::Char('c') => self.cycle_columns(),
             KeyCode::Char('w') => self.toggle_workspace(),
             KeyCode::Char('W') => {
@@ -757,6 +1324,8 @@ impl App {
             }
             KeyCode::Char('f') => self.fold_tag(),
             KeyCode::Char('F') => self.fold_all(),
+            KeyCode::Char(']') => self.jump_match(1),
+            KeyCode::Char('[') => self.jump_match(-1),
             KeyCode::Char('j') | KeyCode::Down => self.cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.cursor(-1),
             KeyCode::PageDown => {
@@ -793,7 +1362,7 @@ impl App {
             KeyCode::Enter => match self.focus {
                 Pane::Notes => self.open_current(),
                 Pane::Sidebar => self.sidebar_announce(false),
-                Pane::Reader => {}
+                Pane::Reader | Pane::Search => {}
             },
             KeyCode::Char(c) if c.is_ascii_digit() && !shift => {
                 if let Some(view) = c.to_digit(10).and_then(|d| View::ALL.get(d as usize - 1)) {
@@ -802,6 +1371,20 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn field_key(field: &mut Field, key: &KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => field.insert(c),
+            KeyCode::Backspace => field.backspace(),
+            KeyCode::Delete => field.delete(),
+            KeyCode::Left => field.left(),
+            KeyCode::Right => field.right(),
+            KeyCode::Home => field.home(),
+            KeyCode::End => field.end(),
+            _ => return false,
+        }
+        true
     }
 
     fn handle_overlay_key(&mut self, overlay: Overlay, key: KeyEvent) {
@@ -826,6 +1409,97 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::Format { index, note } => {
+                // A format's letter wins over h/l movement (h is HTML).
+                if let KeyCode::Char(c) = key.code
+                    && let Some(fmt) = FORMATS.iter().copied().find(|f| f.key == c)
+                {
+                    self.choose_format(fmt, note);
+                    return;
+                }
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Enter => self.choose_format(FORMATS[index], note),
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        self.overlay = Some(Overlay::Format {
+                            index: (index + FORMATS.len() - 1) % FORMATS.len(),
+                            note,
+                        })
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        self.overlay = Some(Overlay::Format {
+                            index: (index + 1) % FORMATS.len(),
+                            note,
+                        })
+                    }
+                    _ => {}
+                }
+            }
+            Overlay::Text {
+                title,
+                mut field,
+                hint,
+                purpose,
+            } => match key.code {
+                KeyCode::Esc => self.overlay = None,
+                KeyCode::Enter => {
+                    self.overlay = None;
+                    let value = field.value.trim().to_string();
+                    if value.is_empty() {
+                        return;
+                    }
+                    match purpose {
+                        TextPurpose::ExportPath { format_id, note } => {
+                            self.export_to(format_id, note, Path::new(&value))
+                        }
+                    }
+                }
+                _ => {
+                    Self::field_key(&mut field, &key);
+                    self.overlay = Some(Overlay::Text {
+                        title,
+                        field,
+                        hint,
+                        purpose,
+                    });
+                }
+            },
+            Overlay::NewNote {
+                mut title,
+                mut tags,
+                mut field,
+            } => match key.code {
+                KeyCode::Esc => self.overlay = None,
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.overlay = Some(Overlay::NewNote {
+                        title,
+                        tags,
+                        field: 1 - field,
+                    })
+                }
+                KeyCode::Enter => {
+                    let title_text = title.value.trim().to_string();
+                    if field == 0 {
+                        if !title_text.is_empty() {
+                            field = 1;
+                        }
+                        self.overlay = Some(Overlay::NewNote { title, tags, field });
+                    } else if title_text.is_empty() {
+                        self.overlay = Some(Overlay::NewNote {
+                            title,
+                            tags,
+                            field: 0,
+                        });
+                    } else {
+                        self.overlay = None;
+                        self.create_note(title_text, tags.value.trim().to_string());
+                    }
+                }
+                _ => {
+                    Self::field_key(if field == 0 { &mut title } else { &mut tags }, &key);
+                    self.overlay = Some(Overlay::NewNote { title, tags, field });
+                }
+            },
         }
     }
 
@@ -845,6 +1519,11 @@ impl App {
                     if self.sidebar.click(index) {
                         self.sidebar_announce(false);
                     }
+                } else if self.columns >= 2
+                    && self.notes.search.open
+                    && inside(self.rects.search_box)
+                {
+                    self.focus = Pane::Search;
                 } else if self.columns >= 2 && inside(self.rects.notes_rows) {
                     let index =
                         self.notes.scroll + (y - self.rects.notes_rows.y) as usize / ROW_HEIGHT;
