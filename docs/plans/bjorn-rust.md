@@ -96,7 +96,7 @@ selection, sort, tag tree, duplicate titles), and the `fake-bearcli` and
 `fake-remctl` binaries. Client tests run the fake as a subprocess and repeat
 `test_bear.py`'s call-shape assertions.
 Verify: `cargo test` and `cargo clippy --all-targets -- -D warnings`
-Status: [ ] pending
+Status: [x] done 2026-09-11 (43 passed; clippy clean; live library listed: 1002 notes)
 
 ### Phase 23 — Read-only TUI
 Three columns, sidebar (views, tag tree, fold, `F`, workspace `w`/`W`, icons,

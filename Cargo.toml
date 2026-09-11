@@ -1,0 +1,48 @@
+[package]
+name = "bjorn"
+description = "A terminal front end for Bear notes, driven by bearcli"
+license = "MIT"
+authors = ["Jefferson Burson"]
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+chrono = "0.4.45"
+clap = { version = "4.6.6", features = ["derive"] }
+fancy-regex = "0.19.1"
+futures = "0.3.34"
+percent-encoding = "2.3.2"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha1 = "0.11.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "process", "sync", "time", "macros", "io-util", "fs"] }
+toml = "1.1.6"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = "3.27.0"
+
+[lib]
+name = "bjorn"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bjorn"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-bearcli"
+path = "src/bin/fake_bearcli.rs"
+
+[[bin]]
+name = "fake-remctl"
+path = "src/bin/fake_remctl.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
