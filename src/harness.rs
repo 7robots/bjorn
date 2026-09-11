@@ -207,7 +207,9 @@ impl Harness {
             .map(|y| {
                 let mut row = String::new();
                 for x in 0..area.width {
-                    row.push_str(buffer[(x, y)].symbol());
+                    if !self.is_continuation(x, y) {
+                        row.push_str(buffer[(x, y)].symbol());
+                    }
                 }
                 row.trim_end().to_string()
             })
@@ -219,9 +221,21 @@ impl Harness {
     }
 
     /// The text of one row, untrimmed.
+    /// Is `(x, y)` the cell hidden under a wide glyph to its left? ratatui's
+    /// diff never sends those cells, so the test backend keeps stale content
+    /// there; a real terminal paints the glyph over both.
+    fn is_continuation(&self, x: u16, y: u16) -> bool {
+        if x == 0 {
+            return false;
+        }
+        let left = self.terminal.backend().buffer()[(x - 1, y)].symbol();
+        unicode_width::UnicodeWidthStr::width(left) == 2
+    }
+
     pub fn row(&self, y: u16) -> String {
         let buffer = self.terminal.backend().buffer();
         (0..buffer.area.width)
+            .filter(|x| !self.is_continuation(*x, y))
             .map(|x| buffer[(x, y)].symbol().to_string())
             .collect()
     }
@@ -242,6 +256,9 @@ impl Harness {
         let mut text = String::new();
         let mut starts: Vec<(usize, u16)> = Vec::new();
         for x in x_from..x_to.min(buffer.area.width) {
+            if self.is_continuation(x, y) {
+                continue;
+            }
             starts.push((text.len(), x));
             text.push_str(buffer[(x, y)].symbol());
         }
@@ -251,6 +268,9 @@ impl Harness {
 
     /// Does the cell carry the reversed+bold search-match style?
     pub fn cell_is_match(&self, x: u16, y: u16) -> bool {
+        if self.is_continuation(x, y) {
+            return false;
+        }
         let cell = &self.terminal.backend().buffer()[(x, y)];
         cell.modifier.contains(ratatui::style::Modifier::REVERSED)
             && cell.modifier.contains(ratatui::style::Modifier::BOLD)

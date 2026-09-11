@@ -52,3 +52,7 @@ path = "src/bin/fake_remctl.rs"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[[bin]]
+name = "bjorn-gate"
+path = "src/bin/bjorn_gate.rs"

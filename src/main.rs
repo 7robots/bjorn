@@ -39,6 +39,8 @@ struct Cli {
 /// A sibling binary of this executable (the fakes ship next to `bjorn`).
 fn sibling(name: &str) -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe()?;
+    // Installed as a symlink in ~/bin: the fakes sit next to the real file.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("no directory for {}", exe.display()))?;

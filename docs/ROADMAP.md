@@ -5,8 +5,10 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Next
 
-- Decide, after the Phase 26 gate, whether `bjorn-rs` replaces the Python
-  `bjorn` launcher in `~/bin` or the two keep coexisting.
+- Decide whether `bjorn-rs` replaces the Python `bjorn` launcher in `~/bin`
+  or the two keep coexisting (gate passed 2026-09-11; numbers in the README).
+- Search-box completion candidates could be shown as a popup list now that
+  the box is drawn by hand; the Python version was limited to one ghost line.
 
 ## Deferred (carried from bjorn's ROADMAP, still open here)
 

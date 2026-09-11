@@ -1,7 +1,7 @@
 # Bjorn in Rust
 Bear mirror: 7ED80908-BD76-459C-A416-22F8BA784083
 
-Status: approved 2026-09-11.
+Status: complete 2026-09-11; all phases done, acceptance gate passed.
 
 A re-implementation of Bjorn (`~/GitHub/bjorn`, Python + Textual) in Rust with
 ratatui, to find out how well the design works as a native binary: startup,
@@ -133,4 +133,4 @@ Status: [x] done 2026-09-11 (153 passed: 73 unit, 10 client, 29 UI, 13 search, 1
    size; Python bjorn measured the same way. Table goes in this repo's README.
 4. `./install.sh`, then `~/bin/bjorn-rs --demo` from a fresh shell.
 Verify: the four steps above, in order, all passing
-Status: [ ] pending
+Status: [x] done 2026-09-11 — bjorn-gate GATE PASSED against 1002 live notes (scratch note 6F4B13C5 left in Bear's trash); Python suite 170 passed against the Rust fakes; benchmarks in README (longest note 5.8 s → 62 ms, RSS 379 → 43 MB); ~/bin/bjorn-rs --demo from a clean shell
