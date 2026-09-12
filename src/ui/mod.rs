@@ -37,6 +37,7 @@ pub const FOOTER: &[(&str, &str)] = &[
     ("e", "Edit"),
     ("d", "Trash"),
     ("p", "Pin"),
+    ("a", "Actions"),
     ("x", "Export"),
     ("b", "Bear"),
     ("w", "Workspace"),
@@ -292,6 +293,36 @@ fn field_cursor(frame: &mut Frame, field: &Field, x: u16, y: u16, width: u16) {
         .map(|c| UnicodeWidthStr::width(c.to_string().as_str()) as u16)
         .sum();
     frame.set_cursor_position(((x + offset).min(x + width.saturating_sub(1)), y));
+}
+
+/// `text` cut to `width` display cells, with … when cut, and padded out to it.
+fn fit_cells(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let full = UnicodeWidthStr::width(text);
+    if full <= width {
+        return format!("{text}{}", " ".repeat(width - full));
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    format!("{out}…{}", " ".repeat(width.saturating_sub(used + 1)))
+}
+
+/// A path with the home directory written as `~`.
+fn tilde_path(path: &std::path::Path) -> String {
+    match path.strip_prefix(crate::util::home_dir()) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
 }
 
 fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) {
@@ -680,6 +711,282 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             ];
             frame.render_widget(Paragraph::new(lines), inner);
             field_cursor(frame, field, inner.x + 2, inner.y + 2, width as u16);
+        }
+        Overlay::Actions { field, index, note } => {
+            let all = &app.config.actions;
+            let matched = crate::actions::filter(all, &field.value);
+            let default = crate::actions::default_action(all);
+            let is_default =
+                |action: &crate::actions::Action| default.is_some_and(|d| std::ptr::eq(d, action));
+            let search = field.value.trim();
+
+            let wide = area.width.saturating_sub(8).clamp(60, 104);
+            // Text width inside the borders and the two-cell margin.
+            let width = wide.min(area.width).saturating_sub(6) as usize;
+            let chunk = width.saturating_sub(2).max(1);
+            // Every matching action, then the row that adds one.
+            let total = matched.len() + 1;
+            let rows = total.min(12);
+            let no_match = matched.is_empty() && !search.is_empty();
+            // Rule, command lines, facts and a blank for the highlighted row.
+            let detail = match matched.get(*index) {
+                Some(a) => a.command.chars().count().div_ceil(chunk).clamp(1, 3) + 3,
+                None => 3,
+            };
+            let height = (2 + usize::from(no_match) + rows + 1 + detail + 2 + 2) as u16;
+            let title = format!("Actions · on “{}”", fit_cells(&note.title, 40).trim_end());
+            let inner = dialog(frame, area, wide, height, Some(&title));
+
+            let mut lines = Vec::new();
+            if field.value.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        fit_cells("type to search/filter actions by name or command…", width),
+                        theme::cursor_focused().add_modifier(Modifier::DIM),
+                    ),
+                ]));
+            } else {
+                lines.push(field_line(field, true, width));
+            }
+            lines.push(Line::from(""));
+            if no_match {
+                lines.push(Line::from(Span::styled(
+                    "  no action matches",
+                    theme::muted(),
+                )));
+            }
+
+            // Columns: marker, name, default badge, format, confirm. The name
+            // column is sized over every action so it holds still while filtering.
+            let name_width = all
+                .iter()
+                .map(|a| UnicodeWidthStr::width(a.name.as_str()))
+                .max()
+                .unwrap_or(0)
+                .clamp(8, width.saturating_sub(40).max(8));
+            // The list scrolls under the highlight once it is past the window.
+            let top = index.saturating_sub(rows - 1);
+            for i in top..(top + rows).min(total) {
+                let selected = i == *index;
+                let style = if selected {
+                    theme::match_style()
+                } else {
+                    Style::default()
+                };
+                let marker = Span::styled(if selected { "  ▸ " } else { "    " }, style);
+                let Some(&action) = matched.get(i) else {
+                    let label = if search.is_empty() {
+                        "+ New action…".to_string()
+                    } else {
+                        format!("+ New action “{search}”…")
+                    };
+                    lines.push(Line::from(vec![
+                        marker,
+                        Span::styled(
+                            fit_cells(&label, width.saturating_sub(4))
+                                .trim_end()
+                                .to_string(),
+                            (if selected { style } else { theme::accent() })
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    continue;
+                };
+                let label = crate::export::format_by_id(&action.format).label;
+                lines.push(Line::from(vec![
+                    marker,
+                    Span::styled(
+                        fit_cells(&action.name, name_width),
+                        style.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        if is_default(action) {
+                            "★ default "
+                        } else {
+                            "          "
+                        },
+                        theme::accent().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("  {label:<10}"), theme::muted()),
+                    Span::styled(
+                        if action.confirm { "  asks first" } else { "" },
+                        Style::default().fg(theme::warning_color()),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+
+            // The highlighted row in full, so a long command is never a guess.
+            lines.push(Line::from(Span::styled(
+                format!("  {}", "─".repeat(width)),
+                theme::border(),
+            )));
+            match matched.get(*index) {
+                Some(&action) => {
+                    let command: Vec<char> = action.command.chars().collect();
+                    let pieces: Vec<String> =
+                        command.chunks(chunk).map(|c| c.iter().collect()).collect();
+                    for (n, piece) in pieces.iter().take(3).enumerate() {
+                        let text = if n == 2 && pieces.len() > 3 {
+                            let kept: String =
+                                piece.chars().take(chunk.saturating_sub(1)).collect();
+                            format!("{kept}…")
+                        } else {
+                            piece.clone()
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(if n == 0 { "  $ " } else { "    " }, theme::muted()),
+                            Span::styled(text, theme::code()),
+                        ]));
+                    }
+                    let mut facts = vec![
+                        format!(
+                            "renders as {}",
+                            crate::export::format_by_id(&action.format).label
+                        ),
+                        format!("stops after {} s", action.timeout.as_secs()),
+                    ];
+                    if action.confirm {
+                        facts.push("asks before running".into());
+                    }
+                    if is_default(action) {
+                        facts.push("runs on !".into());
+                    }
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", facts.join(" · ")),
+                        theme::muted(),
+                    )));
+                }
+                None => lines.push(Line::from(Span::styled(
+                    format!(
+                        "  adds an [[actions]] entry to {}; your comments stay as they are",
+                        tilde_path(&app.config_path())
+                    ),
+                    theme::muted(),
+                ))),
+            }
+            lines.push(Line::from(""));
+
+            lines.push(Line::from(Span::styled(
+                if default.is_some() {
+                    "  ★ default · ! runs it without opening this menu"
+                } else {
+                    "  no default yet · tick Default when adding or editing an action, and ! runs it"
+                },
+                theme::muted(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  type to search/filter · ↑/↓ pick · enter runs · ctrl+e edits · ctrl+d deletes · esc closes",
+                theme::muted(),
+            )));
+            frame.render_widget(Paragraph::new(lines), inner);
+            field_cursor(frame, field, inner.x + 2, inner.y, width as u16);
+        }
+        Overlay::NewAction {
+            name,
+            command,
+            format,
+            confirm,
+            default,
+            focus,
+            editing,
+            ..
+        } => {
+            let verb = if editing.is_some() { "Edit" } else { "New" };
+            let title = format!(
+                "{verb} action · saved to {}",
+                tilde_path(&app.config_path())
+            );
+            let inner = dialog(frame, area, 84, 13, Some(&title));
+            let width = inner.width.saturating_sub(4) as usize;
+            let heading = |row: usize| {
+                if *focus == row {
+                    theme::accent().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::bold()
+                }
+            };
+            let control = |row: usize| {
+                if *focus == row {
+                    theme::match_style()
+                } else {
+                    Style::default()
+                }
+            };
+            // A long command scrolls sideways so the cursor stays in view.
+            let scrolled = |field: &Field| {
+                let start = field.cursor.saturating_sub(width.saturating_sub(1));
+                Field {
+                    value: field.value.chars().skip(start).take(width).collect(),
+                    cursor: field.cursor - start,
+                }
+            };
+            let (name_shown, command_shown) = (scrolled(name), scrolled(command));
+            let check = |on: bool| if on { "[x]" } else { "[ ]" };
+            let mut lines = vec![
+                Line::from(Span::styled("  Name", heading(0))),
+                field_line(&name_shown, *focus == 0, width),
+                Line::from(vec![
+                    Span::styled("  Command", heading(1)),
+                    Span::styled(
+                        "   runs through sh -c · the note is in \"$BJORN_NOTE_FILE\" and on stdin",
+                        theme::muted(),
+                    ),
+                ]),
+                field_line(&command_shown, *focus == 1, width),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  Format     ", heading(2)),
+                    Span::styled(format!("‹ {} ›", FORMATS[*format].label), control(2)),
+                    Span::styled("   ←/→ changes it", theme::muted()),
+                ]),
+                Line::from(vec![
+                    Span::styled("  Ask first  ", heading(3)),
+                    Span::styled(check(*confirm), control(3)),
+                    Span::styled("   space ticks · asks before it runs", theme::muted()),
+                ]),
+                Line::from(vec![
+                    Span::styled("  Default    ", heading(4)),
+                    Span::styled(check(*default), control(4)),
+                    Span::styled(
+                        "   space ticks · ! runs it without the menu",
+                        theme::muted(),
+                    ),
+                ]),
+                Line::from(""),
+            ];
+            // Only one action is the default; say which one this replaces.
+            let replaced = app
+                .config
+                .actions
+                .iter()
+                .find(|a| a.default && Some(*a) != editing.as_ref())
+                .filter(|_| *default);
+            lines.push(match replaced {
+                Some(old) => Line::from(Span::styled(
+                    format!("  ★ “{}” stops being the default", old.name),
+                    Style::default().fg(theme::warning_color()),
+                )),
+                None => Line::from(""),
+            });
+            lines.push(Line::from(Span::styled(
+                "  tab or ↑/↓ moves · enter saves · esc goes back to the menu",
+                theme::muted(),
+            )));
+            frame.render_widget(Paragraph::new(lines), inner);
+            match *focus {
+                0 => field_cursor(frame, &name_shown, inner.x + 2, inner.y + 1, width as u16),
+                1 => field_cursor(
+                    frame,
+                    &command_shown,
+                    inner.x + 2,
+                    inner.y + 3,
+                    width as u16,
+                ),
+                _ => {}
+            }
         }
         Overlay::NewNote { title, tags, field } => {
             let inner = dialog(frame, area, 70, 10, None);

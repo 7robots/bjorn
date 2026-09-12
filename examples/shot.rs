@@ -55,12 +55,45 @@ async fn main() {
     let config = Config {
         poll_seconds: 0,
         theme: theme.clone(),
+        // Only the action palette draws these; they never run here.
+        actions: ["Publish to S3", "Copy as plain text", "Gist it"]
+            .iter()
+            .map(|name| bjorn::actions::Action {
+                name: (*name).to_string(),
+                command: "true".into(),
+                default: *name == "Publish to S3",
+                ..bjorn::actions::Action::default()
+            })
+            .collect(),
         ..Config::default()
     };
     let mut h = Harness::new(config, Arc::new(client), None, (width, height));
     h.load().await;
     if screen == "triage" {
         h.press("t");
+        h.settle().await;
+    }
+    if screen == "actions" {
+        h.press("a");
+        h.settle().await;
+    }
+    if screen == "new-action" {
+        h.press("a");
+        h.type_text("Upload");
+        h.press("enter");
+        h.type_text("scp \"$BJORN_NOTE_FILE\" notes-host:notes/");
+        for _ in 0..3 {
+            h.press("tab");
+        }
+        h.press("space");
+        h.settle().await;
+    }
+    if screen == "edit-action" {
+        h.press("a");
+        h.key(
+            crossterm::event::KeyCode::Char('e'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
         h.settle().await;
     }
     h.draw();

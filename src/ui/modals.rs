@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::actions::Action;
 use crate::bear::Note;
 
 pub const HELP_TEXT: &str = "# Bjorn
@@ -23,6 +24,8 @@ Three columns: smart views and tags · notes · the rendered note.
 | `d` | move the note to the trash |
 | `u` | restore from Trash or Archive |
 | `p` | toggle the global pin |
+| `!` | run the default action on the note; the action palette if no default is set |
+| `a` | the action menu: your `[[actions]]` with a search box on top; ★ marks the default, the highlighted command is shown in full, the last row (+ New action) adds one to the config `ctrl+e` edits the highlighted one and `ctrl+d` deletes it after asking (`enter` runs, `esc` closes) |
 | `x` | export the note: Markdown, HTML, plain text, RTF or TextBundle (`←` `→` pick, `export_format` sets the default) |
 | `b` | open the note in Bear.app |
 | `w` | make the highlighted tag the workspace; again to leave it (`W` also clears) |
@@ -43,6 +46,10 @@ Edits are hash-guarded: if the note changed in Bear while you were in the editor
 pub enum Pending {
     Quit,
     Trash(Note),
+    /// An action whose config says `confirm = true`.
+    RunAction(Action, Note),
+    /// Deleting an action from the config; cancelling goes back to the menu.
+    DeleteAction(Action, Note),
     Tick(Vec<crate::ui::triage::TriageRow>),
 }
 
@@ -113,6 +120,9 @@ impl Field {
     }
 }
 
+/// Rows in the new-action form: name, command, format, confirm, default.
+pub const NEW_ACTION_FIELDS: usize = 5;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Overlay {
     Confirm {
@@ -135,6 +145,27 @@ pub enum Overlay {
         hint: String,
         purpose: TextPurpose,
     },
+    /// The action palette: a search box over the actions from the config.
+    Actions {
+        field: Field,
+        index: usize,
+        note: Note,
+    },
+    /// The form for a new action (the menu's last row) or for editing one
+    /// (`ctrl+e`); saving writes the config.
+    /// `focus` is the row: 0 name, 1 command, 2 format, 3 confirm, 4 default.
+    NewAction {
+        name: Field,
+        command: Field,
+        /// An index into `export::FORMATS`.
+        format: usize,
+        confirm: bool,
+        default: bool,
+        focus: usize,
+        note: Note,
+        /// The action being edited, as it was read; `None` for a new one.
+        editing: Option<Action>,
+    },
     /// Title and tags for a new note; `field` is 0 for the title, 1 for the tags.
     NewNote {
         title: Field,
@@ -150,6 +181,8 @@ impl Overlay {
             Overlay::Help { .. } => "Help",
             Overlay::Format { .. } => "Format",
             Overlay::Text { .. } => "Text",
+            Overlay::Actions { .. } => "Actions",
+            Overlay::NewAction { .. } => "NewAction",
             Overlay::NewNote { .. } => "NewNote",
         }
     }

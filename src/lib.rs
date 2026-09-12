@@ -3,6 +3,7 @@
 //! Module names mirror the Python implementation (`~/GitHub/bjorn-python`, archived) so the two
 //! trees can be read side by side.
 
+pub mod actions;
 pub mod app;
 pub mod bear;
 pub mod config;

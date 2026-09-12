@@ -15,6 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::actions::{self, Action};
 use crate::bear::{
     BearClient, BearError, Note, NoteContent, Probe, Snapshot, display_tag, normalize_tag,
     recently_modified,
@@ -119,6 +120,11 @@ pub enum Msg {
     },
     Opened(Result<(), BearError>),
     Exported(Result<PathBuf, String>),
+    /// An action finished: the name it ran under, and what it said.
+    ActionDone {
+        name: String,
+        result: Result<String, String>,
+    },
     TriageLoaded {
         scan: TodoScan,
         statuses: HashMap<String, (Status, i64)>,
@@ -634,6 +640,20 @@ impl App {
                 failures,
                 keys,
             } => self.on_triage_added(added, failures, keys),
+            Msg::ActionDone { name, result } => match result {
+                Ok(output) => self.notify_titled(
+                    &name,
+                    if output.is_empty() { "Done." } else { &output },
+                    Severity::Information,
+                    Duration::from_secs(6),
+                ),
+                Err(message) => self.notify_titled(
+                    &format!("{name} failed"),
+                    &message,
+                    Severity::Error,
+                    Duration::from_secs(10),
+                ),
+            },
             Msg::Exported(result) => match result {
                 Ok(path) => self.notify(
                     &format!("Exported to {}", path.display()),
@@ -1192,6 +1212,8 @@ impl App {
         match action {
             Pending::Quit => self.running = false,
             Pending::Tick(rows) => self.tick_rows(rows),
+            Pending::RunAction(action, note) => self.spawn_action(action, note),
+            Pending::DeleteAction(action, note) => self.delete_action(action, note),
             Pending::Trash(note) => {
                 let client = self.client.clone();
                 let tx = self.tx.clone();
@@ -1564,6 +1586,193 @@ impl App {
         });
     }
 
+    // -- actions -------------------------------------------------------------------
+
+    /// The note an action would run on, or a toast saying why there is none.
+    fn action_target(&mut self) -> Option<Note> {
+        let Some(note) = self.current_note().cloned() else {
+            self.notify("No note selected.", Duration::from_secs(3));
+            return None;
+        };
+        if note.locked {
+            self.notify_titled(
+                "",
+                "Locked notes cannot be sent to an action.",
+                Severity::Warning,
+                Duration::from_secs(5),
+            );
+            return None;
+        }
+        Some(note)
+    }
+
+    /// `a`: the menu, with the search box focused. With no actions configured
+    /// it holds only the row that adds one.
+    fn open_actions(&mut self) {
+        let Some(note) = self.action_target() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Actions {
+            field: Field::default(),
+            index: 0,
+            note,
+        });
+    }
+
+    /// `!`: the default action straight away, or the menu when there is no
+    /// single obvious one to run.
+    fn run_default_action(&mut self) {
+        let Some(action) = actions::default_action(&self.config.actions).cloned() else {
+            self.open_actions();
+            return;
+        };
+        let Some(note) = self.action_target() else {
+            return;
+        };
+        self.start_action(action, note);
+    }
+
+    /// The config file this run read, which is where a new action is written.
+    pub fn config_path(&self) -> PathBuf {
+        self.config
+            .path
+            .clone()
+            .unwrap_or_else(crate::config::default_config_path)
+    }
+
+    /// Write `action` into the config file, as a new entry or over `editing`,
+    /// and read the actions back so the menu shows it at once. On failure the
+    /// form stays up with what was typed.
+    fn save_action(&mut self, action: Action, editing: Option<Action>, form: Overlay, note: Note) {
+        let path = self.config_path();
+        let written = match &editing {
+            Some(original) => actions::update_in_config(&path, original, &action),
+            None => actions::add_to_config(&path, &action),
+        };
+        let saved = written.and_then(|()| {
+            Config::load(Some(&path)).map_err(|e| actions::ActionError(format!("{e:#}")))
+        });
+        match saved {
+            Ok(loaded) => {
+                self.config.actions = loaded.actions;
+                let index = self
+                    .config
+                    .actions
+                    .iter()
+                    .rposition(|a| a.name == action.name && a.command == action.command)
+                    .unwrap_or(0);
+                let (title, verb) = if editing.is_some() {
+                    ("Action updated", "updated")
+                } else {
+                    ("Action added", "saved")
+                };
+                self.notify_titled(
+                    title,
+                    &format!("“{}” is {verb} in {}.", action.name, path.display()),
+                    Severity::Information,
+                    Duration::from_secs(6),
+                );
+                self.overlay = Some(Overlay::Actions {
+                    field: Field::default(),
+                    index,
+                    note,
+                });
+            }
+            Err(err) => {
+                self.notify_titled(
+                    "Could not save the action",
+                    &err.0,
+                    Severity::Error,
+                    Duration::from_secs(10),
+                );
+                self.overlay = Some(form);
+            }
+        }
+    }
+
+    /// Delete `action` from the config file, once confirmed, then go back to
+    /// the menu with the actions read again.
+    fn delete_action(&mut self, action: Action, note: Note) {
+        let path = self.config_path();
+        let position = self
+            .config
+            .actions
+            .iter()
+            .position(|a| a == &action)
+            .unwrap_or(0);
+        let removed = actions::remove_from_config(&path, &action).and_then(|()| {
+            Config::load(Some(&path)).map_err(|e| actions::ActionError(format!("{e:#}")))
+        });
+        match removed {
+            Ok(loaded) => {
+                self.config.actions = loaded.actions;
+                self.notify_titled(
+                    "Action deleted",
+                    &format!("“{}” is gone from {}.", action.name, path.display()),
+                    Severity::Information,
+                    Duration::from_secs(6),
+                );
+            }
+            Err(err) => self.notify_titled(
+                "Could not delete the action",
+                &err.0,
+                Severity::Error,
+                Duration::from_secs(10),
+            ),
+        }
+        // The highlight stays where the deleted row was.
+        self.overlay = Some(Overlay::Actions {
+            field: Field::default(),
+            index: position.min(self.config.actions.len()),
+            note,
+        });
+    }
+
+    /// Run `action` on `note`, asking first when it says `confirm = true`.
+    fn start_action(&mut self, action: Action, note: Note) {
+        if action.confirm {
+            self.overlay = Some(Overlay::Confirm {
+                message: format!("Run “{}” on “{}”?", action.name, note.title),
+                confirm_label: "Run".into(),
+                action: Pending::RunAction(action, note),
+            });
+        } else {
+            self.spawn_action(action, note);
+        }
+    }
+
+    fn spawn_action(&mut self, action: Action, note: Note) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let name = action.name.clone();
+        self.notify(&format!("Running “{name}”…"), Duration::from_secs(3));
+        tokio::spawn(async move {
+            let result: Result<String, String> = async {
+                let fmt = crate::export::format_by_id(&action.format);
+                let content = client.cat(&note.id).await.map_err(|e| e.to_string())?;
+                let mut images: HashMap<String, Vec<u8>> = HashMap::new();
+                if fmt.needs_attachments && note.attachments > 0 {
+                    for name in client
+                        .attachments(&note.id)
+                        .await
+                        .map_err(|e| e.to_string())?
+                    {
+                        let bytes = client
+                            .attachment(&note.id, &name)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        images.insert(name, bytes);
+                    }
+                }
+                actions::run(&action, &note, &content.content, &images)
+                    .await
+                    .map_err(|e| e.0)
+            }
+            .await;
+            let _ = tx.send(Msg::ActionDone { name, result });
+        });
+    }
+
     // -- input ---------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -1602,6 +1811,8 @@ impl App {
             KeyCode::Char('u') => self.restore_note(),
             KeyCode::Char('p') => self.toggle_pin(),
             KeyCode::Char('x') => self.export_note_action(),
+            KeyCode::Char('!') => self.run_default_action(),
+            KeyCode::Char('a') => self.open_actions(),
             KeyCode::Char('b') => self.open_in_bear(),
             KeyCode::Char('t') => self.open_triage(),
             KeyCode::Char('c') => self.cycle_columns(),
@@ -1679,7 +1890,22 @@ impl App {
     fn handle_overlay_key(&mut self, overlay: Overlay, key: KeyEvent) {
         match overlay {
             Overlay::Confirm { action, .. } => match key.code {
-                KeyCode::Esc | KeyCode::Char('n') => self.overlay = None,
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    // Cancelling a delete goes back to the menu, on that action.
+                    self.overlay = match action {
+                        Pending::DeleteAction(kept, note) => Some(Overlay::Actions {
+                            field: Field::default(),
+                            index: self
+                                .config
+                                .actions
+                                .iter()
+                                .position(|a| a == &kept)
+                                .unwrap_or(0),
+                            note,
+                        }),
+                        _ => None,
+                    }
+                }
                 KeyCode::Char('y') | KeyCode::Enter => {
                     self.overlay = None;
                     self.run_pending(action);
@@ -1753,6 +1979,186 @@ impl App {
                     });
                 }
             },
+            Overlay::Actions {
+                mut field,
+                index,
+                note,
+            } => {
+                let matched = actions::filter(&self.config.actions, &field.value).len();
+                // The last row adds a new action, so there is always one to land on.
+                let rows = matched + 1;
+                let step = |index: usize, delta: i32| {
+                    (index as i32 + delta).rem_euclid(rows as i32) as usize
+                };
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                if ctrl && key.code == KeyCode::Char('d') {
+                    // Deleting asks first, the way quitting does.
+                    let chosen = actions::filter(&self.config.actions, &field.value)
+                        .get(index)
+                        .map(|a| (*a).clone());
+                    self.overlay = Some(match chosen {
+                        Some(action) => Overlay::Confirm {
+                            message: format!("Delete “{}” from the config?", action.name),
+                            confirm_label: "Delete".into(),
+                            action: Pending::DeleteAction(action, note),
+                        },
+                        None => Overlay::Actions { field, index, note },
+                    });
+                    return;
+                }
+                if ctrl && key.code == KeyCode::Char('e') {
+                    // Letters go to the search box, so editing takes ctrl.
+                    let chosen = actions::filter(&self.config.actions, &field.value)
+                        .get(index)
+                        .map(|a| (*a).clone());
+                    self.overlay = Some(match chosen {
+                        Some(action) => Overlay::NewAction {
+                            name: Field::new(&action.name),
+                            command: Field::new(&action.command),
+                            format: FORMATS
+                                .iter()
+                                .position(|f| f.id == action.format)
+                                .unwrap_or(0),
+                            confirm: action.confirm,
+                            default: action.default,
+                            focus: 0,
+                            note,
+                            editing: Some(action),
+                        },
+                        None => Overlay::Actions { field, index, note },
+                    });
+                    return;
+                }
+                let delta = match key.code {
+                    KeyCode::Down | KeyCode::Tab => Some(1),
+                    KeyCode::Up | KeyCode::BackTab => Some(-1),
+                    KeyCode::Char('n') if ctrl => Some(1),
+                    KeyCode::Char('p') if ctrl => Some(-1),
+                    _ => None,
+                };
+                if let Some(delta) = delta {
+                    self.overlay = Some(Overlay::Actions {
+                        field,
+                        index: step(index, delta),
+                        note,
+                    });
+                    return;
+                }
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Enter if index >= matched => {
+                        // Whatever was typed in the search box is a good name.
+                        let name = field.value.trim().to_string();
+                        self.overlay = Some(Overlay::NewAction {
+                            focus: if name.is_empty() { 0 } else { 1 },
+                            name: Field::new(&name),
+                            command: Field::default(),
+                            format: 0,
+                            confirm: false,
+                            default: false,
+                            note,
+                            editing: None,
+                        });
+                    }
+                    KeyCode::Enter => {
+                        let chosen = actions::filter(&self.config.actions, &field.value)
+                            .get(index)
+                            .map(|a| (*a).clone());
+                        if let Some(action) = chosen {
+                            self.overlay = None;
+                            self.start_action(action, note);
+                        }
+                    }
+                    _ => {
+                        // Typing filters, so the highlight goes back to the top.
+                        let index = if Self::field_key(&mut field, &key) {
+                            0
+                        } else {
+                            index
+                        };
+                        self.overlay = Some(Overlay::Actions { field, index, note });
+                    }
+                }
+            }
+            Overlay::NewAction {
+                mut name,
+                mut command,
+                mut format,
+                mut confirm,
+                mut default,
+                mut focus,
+                note,
+                editing,
+            } => {
+                let fields = crate::ui::modals::NEW_ACTION_FIELDS;
+                match key.code {
+                    KeyCode::Esc => {
+                        // Back to the menu, on the action that was being edited.
+                        let index = editing
+                            .as_ref()
+                            .and_then(|e| self.config.actions.iter().position(|a| a == e))
+                            .unwrap_or(0);
+                        self.overlay = Some(Overlay::Actions {
+                            field: Field::default(),
+                            index,
+                            note,
+                        });
+                        return;
+                    }
+                    KeyCode::Tab | KeyCode::Down => focus = (focus + 1) % fields,
+                    KeyCode::BackTab | KeyCode::Up => focus = (focus + fields - 1) % fields,
+                    KeyCode::Enter if name.value.trim().is_empty() => focus = 0,
+                    KeyCode::Enter if command.value.trim().is_empty() => focus = 1,
+                    KeyCode::Enter => {
+                        // An edit keeps what the form does not show, the timeout.
+                        let action = Action {
+                            name: name.value.trim().to_string(),
+                            command: command.value.trim().to_string(),
+                            format: FORMATS[format].id.to_string(),
+                            confirm,
+                            default,
+                            ..editing.clone().unwrap_or_default()
+                        };
+                        let form = Overlay::NewAction {
+                            name,
+                            command,
+                            format,
+                            confirm,
+                            default,
+                            focus,
+                            note: note.clone(),
+                            editing: editing.clone(),
+                        };
+                        self.save_action(action, editing, form, note);
+                        return;
+                    }
+                    KeyCode::Left if focus == 2 => {
+                        format = (format + FORMATS.len() - 1) % FORMATS.len()
+                    }
+                    KeyCode::Right | KeyCode::Char(' ') if focus == 2 => {
+                        format = (format + 1) % FORMATS.len()
+                    }
+                    KeyCode::Char(' ') if focus == 3 => confirm = !confirm,
+                    KeyCode::Char(' ') if focus == 4 => default = !default,
+                    _ if focus == 0 => {
+                        Self::field_key(&mut name, &key);
+                    }
+                    _ if focus == 1 => {
+                        Self::field_key(&mut command, &key);
+                    }
+                    _ => {}
+                }
+                self.overlay = Some(Overlay::NewAction {
+                    name,
+                    command,
+                    format,
+                    confirm,
+                    default,
+                    focus,
+                    note,
+                    editing,
+                });
+            }
             Overlay::NewNote {
                 mut title,
                 mut tags,
