@@ -26,13 +26,14 @@ Requires macOS with Bear installed and a Rust toolchain (`brew install rustup
 ```sh
 git clone https://github.com/7robots/bjorn.git
 cd bjorn
-./install.sh          # builds --release, puts a `bjorn-rs` launcher in ~/bin
-bjorn-rs              # or: cargo run --release --bin bjorn
-bjorn-rs --tag work   # start scoped to a tag subtree
-bjorn-rs --demo       # sample notes through the built-in fake bearcli, no Bear needed
+./install.sh          # builds --release, puts a `bjorn` launcher in ~/bin
+bjorn                 # or: cargo run --release --bin bjorn
+bjorn --tag work      # start scoped to a tag subtree
+bjorn --demo          # sample notes through the built-in fake bearcli, no Bear needed
 ```
 
-The launcher is `bjorn-rs` so the Python `bjorn` can stay installed beside it.
+The launcher was `bjorn-rs` while the Python build held the `bjorn` name; the
+Python build is archived at `7robots/bjorn-python` and the name is this one's now.
 
 ## Themes
 
@@ -46,7 +47,7 @@ command line (`--list-themes` prints them):
 | `red-graphite-dark` | the same red over Bear's graphite, for a dark terminal |
 
 ```sh
-bjorn-rs --theme red-graphite
+bjorn --theme red-graphite
 ```
 
 ```toml
