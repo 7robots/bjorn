@@ -335,7 +335,10 @@ impl Triage {
                 Status::Added => base.fg(theme::accent_color()),
                 Status::New => base,
             };
-            spans.push(Span::styled(format!("{} ", status_glyph(row.status)), style));
+            spans.push(Span::styled(
+                format!("{} ", status_glyph(row.status)),
+                style,
+            ));
         }
         spans.push(Span::styled(
             "☐ ",

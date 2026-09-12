@@ -637,8 +637,9 @@ impl BearClient {
             let _ = std::fs::create_dir_all(dir);
         }
         // Written beside the target and renamed, so a killed process never
-        // leaves half a cache behind.
-        let temp = path.with_extension("json.tmp");
+        // leaves half a cache behind. The pid keeps two Bjorns (or the Python
+        // one) from renaming each other's half-written file into place.
+        let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         if std::fs::write(&temp, &body).is_ok() && std::fs::rename(&temp, path).is_ok() {
             *self.preview_cache_written.lock().unwrap() = Some(signature);
         }
@@ -1478,7 +1479,11 @@ mod tests {
         let first = client(&rec).with_preview_cache(path.clone());
         assert!(first.preview_cache_dirty(), "nothing written yet");
         first.snapshot().await.unwrap();
-        assert_eq!(rec.kinds(), vec!["list+content"], "a cold start reads bodies");
+        assert_eq!(
+            rec.kinds(),
+            vec!["list+content"],
+            "a cold start reads bodies"
+        );
         first.save_preview_cache();
         assert!(!first.preview_cache_dirty(), "the file is up to date");
 

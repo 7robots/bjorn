@@ -400,6 +400,29 @@ async fn workspace_from_cli_flag_and_config() {
 }
 
 #[tokio::test]
+async fn unknown_theme_in_the_config_keeps_the_default_and_says_so() {
+    // The config file is shared with the Python Bjorn, which accepts Textual's
+    // own theme names, so `theme = "nord"` must not stop this build.
+    let fake = Fake::new();
+    let config = bjorn::config::Config {
+        theme: "nord".into(),
+        ..fake.config()
+    };
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    assert_eq!(theme::current().name, theme::DEFAULT_THEME);
+    assert!(
+        h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.contains("nord") && m.contains(theme::DEFAULT_THEME)),
+        "{:?}",
+        h.app.toast_messages()
+    );
+    assert!(!titles(&h).is_empty(), "the app still loads");
+}
+
+#[tokio::test]
 async fn w_again_leaves_the_workspace() {
     let fake = Fake::new();
     let mut h = fake.harness();

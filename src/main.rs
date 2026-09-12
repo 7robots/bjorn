@@ -81,15 +81,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let mut config = Config::load(cli.config.as_deref())?;
+    // A theme named on the command line was typed just now, so a typo is an
+    // error. One from the config file is not: the file is shared with the
+    // Python Bjorn, which also accepts Textual's own theme names, so an
+    // unknown name there falls back to the default with a warning in the app.
     if let Some(theme) = cli.theme.as_deref() {
+        if bjorn::ui::theme::lookup(theme).is_none() {
+            anyhow::bail!(
+                "unknown theme {:?}; try one of: {}",
+                theme,
+                bjorn::ui::theme::names().collect::<Vec<_>>().join(", ")
+            );
+        }
         config.theme = theme.trim().to_lowercase();
-    }
-    if bjorn::ui::theme::lookup(&config.theme).is_none() {
-        anyhow::bail!(
-            "unknown theme {:?}; try one of: {}",
-            config.theme,
-            bjorn::ui::theme::names().collect::<Vec<_>>().join(", ")
-        );
     }
     if cli.demo {
         config.reminders.enabled = true;

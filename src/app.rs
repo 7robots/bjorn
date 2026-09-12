@@ -213,8 +213,14 @@ impl App {
     ) -> (App, UnboundedReceiver<Msg>) {
         let (tx, rx) = unbounded_channel();
         // The palette is process-wide, so every entry point (the binary, the
-        // gate, the test harness) picks it up from the config it was given.
-        crate::ui::theme::set(&config.theme);
+        // gate, the test harness) picks it up from the config it was given. An
+        // unknown name keeps the default: the config file is shared with the
+        // Python Bjorn, which knows themes this build does not.
+        let theme_known = crate::ui::theme::set(&config.theme);
+        if !theme_known {
+            crate::ui::theme::set(crate::ui::theme::DEFAULT_THEME);
+        }
+        let unknown_theme = (!theme_known).then(|| config.theme.clone());
         let icons = IconSet::new(
             &config.icon_style,
             &config.icons,
@@ -274,6 +280,18 @@ impl App {
             reader_height: 24,
         };
         app.reader.clear("Loading\u{2026}");
+        if let Some(name) = unknown_theme {
+            app.notify_titled(
+                "Theme",
+                &format!(
+                    "Unknown theme {name:?}; drawing with {}. This build knows: {}.",
+                    crate::ui::theme::DEFAULT_THEME,
+                    crate::ui::theme::names().collect::<Vec<_>>().join(", ")
+                ),
+                Severity::Warning,
+                Duration::from_secs(10),
+            );
+        }
         (app, rx)
     }
 

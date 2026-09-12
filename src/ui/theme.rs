@@ -482,7 +482,10 @@ mod tests {
     #[test]
     fn themes_are_found_by_name() {
         assert_eq!(THEMES[lookup(DEFAULT_THEME).unwrap()].name, DEFAULT_THEME);
-        assert_eq!(THEMES[lookup("  Red-Graphite ").unwrap()].name, "red-graphite");
+        assert_eq!(
+            THEMES[lookup("  Red-Graphite ").unwrap()].name,
+            "red-graphite"
+        );
         assert!(lookup("mauve").is_none());
         assert_eq!(names().count(), THEMES.len());
     }

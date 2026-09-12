@@ -55,8 +55,10 @@ theme = "red-graphite"
 ```
 
 The Python Bjorn carries the same three, so one config file dresses both. An
-unknown name falls back to the default rather than stopping the app, because
-the config is shared and the Python build also accepts Textual's own themes.
+unknown name in the config falls back to the default with a warning rather
+than stopping the app, because the config is shared and the Python build also
+accepts Textual's own themes. An unknown `--theme` on the command line is an
+error.
 
 ## What differs from the Python Bjorn
 
@@ -114,7 +116,7 @@ draws styled lines.
 ## Development
 
 ```sh
-cargo test                                 # 167 tests: unit, client, UI through a headless harness
+cargo test                                 # 168 tests: unit, client, UI through a headless harness
 cargo clippy --all-targets -- -D warnings
 cargo run --release --bin bjorn-gate       # acceptance gate against the live library
 cargo run --release --bin bjorn-gate -- --bench
