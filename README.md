@@ -84,8 +84,9 @@ format = "txt"
 `a` opens the action menu — a search box over your actions, filtered as you
 type, with the default marked ★ and the highlighted command shown in full;
 `enter` runs. `!` skips the menu and runs the default straight away. The
-menu's last row, **+ New action**, adds one, and `ctrl+e` edits the highlighted
-one; both write the config for you, comments and all. The note is rendered the way
+menu's last row, **+ New action**, adds one, `ctrl+e` edits the highlighted one
+and `ctrl+d` deletes it after asking; all three write the config for you,
+comments and all. The note is rendered the way
 export renders it, written to a temp file the command gets as
 `$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in the
 environment; the file goes away when the command ends. The first line the
@@ -148,7 +149,7 @@ draws styled lines.
 ## Development
 
 ```sh
-cargo test                                 # 198 tests: unit, client, UI through a headless harness
+cargo test                                 # 201 tests: unit, client, UI through a headless harness
 cargo clippy --all-targets -- -D warnings
 cargo run --release --bin bjorn-gate       # acceptance gate against the live library
 cargo run --release --bin bjorn-gate -- --bench

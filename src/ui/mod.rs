@@ -878,7 +878,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 theme::muted(),
             )));
             lines.push(Line::from(Span::styled(
-                "  type to search/filter · ↑/↓ pick · enter runs · ctrl+e edits · esc closes",
+                "  type to search/filter · ↑/↓ pick · enter runs · ctrl+e edits · ctrl+d deletes · esc closes",
                 theme::muted(),
             )));
             frame.render_widget(Paragraph::new(lines), inner);

@@ -578,3 +578,52 @@ async fn ctrl_e_edits_the_highlighted_action_in_place() {
     h.press("enter");
     h.until(|_| receipt.exists()).await;
 }
+
+#[tokio::test]
+async fn ctrl_d_deletes_an_action_after_asking() {
+    let fake = Fake::new();
+    let body = "# my notes config\n[[actions]]\nname = \"Copy\"\ncommand = \"true\"\n\n\
+                [[actions]]\nname = \"Upload\"\ncommand = \"false\"\n\n# templates below\n";
+    let (config, path) = file_config(&fake, body);
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("a");
+    h.press("down");
+    h.key(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
+    assert!(
+        h.text().contains("Delete “Upload” from the config?"),
+        "{}",
+        h.text()
+    );
+
+    h.press("escape");
+    assert_eq!(
+        h.app.overlay.as_ref().map(|o| o.name()),
+        Some("Actions"),
+        "cancelling goes back to the menu"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        body,
+        "nothing is written on cancel"
+    );
+
+    h.key(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    h.press("y");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Actions"));
+    assert!(
+        h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.contains("“Upload” is gone from")),
+        "{:?}",
+        h.app.toast_messages()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# my notes config\n[[actions]]\nname = \"Copy\"\ncommand = \"true\"\n\n# templates below\n"
+    );
+    assert_eq!(h.app.config.actions.len(), 1);
+    assert_eq!(h.app.config.actions[0].name, "Copy");
+}

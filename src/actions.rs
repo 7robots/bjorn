@@ -528,6 +528,80 @@ pub fn update_in_config(
     std::fs::write(path, result).map_err(|e| ActionError(format!("{}: {e}", path.display())))
 }
 
+/// Remove the `[[actions]]` entry that reads as `original`: its header and
+/// every line down to its last key. Comments and blank lines after that key
+/// stay, since they often introduce what follows (commented-out templates, the
+/// next section). The result is read back and must hold every other action
+/// unchanged, or nothing is written.
+pub fn remove_from_config(path: &Path, original: &Action) -> Result<(), ActionError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| ActionError(format!("{}: {e}", path.display())))?;
+    let table: toml::Table = text.parse().map_err(|e: toml::de::Error| {
+        ActionError(format!(
+            "{} does not parse, so nothing was written: {}",
+            path.display(),
+            first_error_line(&e)
+        ))
+    })?;
+    let entries = read_entries(&table);
+    let position = entries
+        .iter()
+        .position(|e| e.as_ref() == Some(original))
+        .ok_or_else(|| {
+            ActionError(format!(
+                "“{}” is no longer in {} as it was read, so nothing was written.",
+                original.name,
+                path.display()
+            ))
+        })?;
+
+    let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_string).collect();
+    if let Some(last) = lines.last_mut()
+        && !last.ends_with('\n')
+    {
+        last.push('\n');
+    }
+    let headers: Vec<usize> = (0..lines.len())
+        .filter(|&i| table_header(&lines[i]).as_deref() == Some("[[actions]]"))
+        .collect();
+    if headers.len() != entries.len() {
+        return Err(ActionError(format!(
+            "{} does not write every action as an [[actions]] block, so delete this one by hand.",
+            path.display()
+        )));
+    }
+    let header = headers[position];
+    let end = block_end(&lines, header);
+    let last = (header + 1..end)
+        .rev()
+        .find(|&i| {
+            let t = lines[i].trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .unwrap_or(header);
+    lines.drain(header..=last);
+    // No double blank line where the entry was.
+    let blank = |line: Option<&String>| line.is_some_and(|l| l.trim().is_empty());
+    if blank(lines.get(header)) && (header == 0 || blank(lines.get(header - 1))) {
+        lines.remove(header);
+    }
+
+    let result = lines.concat();
+    let reread = result
+        .parse::<toml::Table>()
+        .map(|t| read_entries(&t))
+        .unwrap_or_default();
+    let mut expected = entries;
+    expected.remove(position);
+    if reread != expected {
+        return Err(ActionError(
+            "the config did not read back as expected, so nothing was written; delete this one by hand."
+                .into(),
+        ));
+    }
+    std::fs::write(path, result).map_err(|e| ActionError(format!("{}: {e}", path.display())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,6 +826,45 @@ mod tests {
         std::fs::write(&path, body).unwrap();
         let stale = action("Copy", "pbcopy -Prefer txt");
         let err = update_in_config(&path, &stale, &action("Copy", "true")).unwrap_err();
+        assert!(err.0.contains("nothing was written"), "{}", err.0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    }
+
+    #[test]
+    fn deleting_an_action_keeps_its_neighbours_and_the_comments_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let body = "theme = \"red-graphite\"\n\n[[actions]]\nname = \"Copy\"\ncommand = \"pbcopy\"\n\n\
+                    [[actions]]\n# uploads\nname = \"Upload\"\ncommand = \"scp x y\"\nconfirm = true\n\n\
+                    # --- templates ---\n# [[actions]]\n# name = \"S3\"\n";
+        std::fs::write(&path, body).unwrap();
+        let actions = crate::config::Config::load(Some(&path)).unwrap().actions;
+        remove_from_config(&path, &actions[1]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "theme = \"red-graphite\"\n\n[[actions]]\nname = \"Copy\"\ncommand = \"pbcopy\"\n\n\
+             # --- templates ---\n# [[actions]]\n# name = \"S3\"\n"
+        );
+        remove_from_config(&path, &actions[0]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "theme = \"red-graphite\"\n\n# --- templates ---\n# [[actions]]\n# name = \"S3\"\n"
+        );
+        assert!(
+            crate::config::Config::load(Some(&path))
+                .unwrap()
+                .actions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn deleting_an_action_that_changed_on_disk_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let body = "[[actions]]\nname = \"Copy\"\ncommand = \"pbcopy\"\n";
+        std::fs::write(&path, body).unwrap();
+        let err = remove_from_config(&path, &action("Copy", "pbcopy -Prefer txt")).unwrap_err();
         assert!(err.0.contains("nothing was written"), "{}", err.0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
     }

@@ -1213,6 +1213,7 @@ impl App {
             Pending::Quit => self.running = false,
             Pending::Tick(rows) => self.tick_rows(rows),
             Pending::RunAction(action, note) => self.spawn_action(action, note),
+            Pending::DeleteAction(action, note) => self.delete_action(action, note),
             Pending::Trash(note) => {
                 let client = self.client.clone();
                 let tx = self.tx.clone();
@@ -1689,6 +1690,44 @@ impl App {
         }
     }
 
+    /// Delete `action` from the config file, once confirmed, then go back to
+    /// the menu with the actions read again.
+    fn delete_action(&mut self, action: Action, note: Note) {
+        let path = self.config_path();
+        let position = self
+            .config
+            .actions
+            .iter()
+            .position(|a| a == &action)
+            .unwrap_or(0);
+        let removed = actions::remove_from_config(&path, &action).and_then(|()| {
+            Config::load(Some(&path)).map_err(|e| actions::ActionError(format!("{e:#}")))
+        });
+        match removed {
+            Ok(loaded) => {
+                self.config.actions = loaded.actions;
+                self.notify_titled(
+                    "Action deleted",
+                    &format!("“{}” is gone from {}.", action.name, path.display()),
+                    Severity::Information,
+                    Duration::from_secs(6),
+                );
+            }
+            Err(err) => self.notify_titled(
+                "Could not delete the action",
+                &err.0,
+                Severity::Error,
+                Duration::from_secs(10),
+            ),
+        }
+        // The highlight stays where the deleted row was.
+        self.overlay = Some(Overlay::Actions {
+            field: Field::default(),
+            index: position.min(self.config.actions.len()),
+            note,
+        });
+    }
+
     /// Run `action` on `note`, asking first when it says `confirm = true`.
     fn start_action(&mut self, action: Action, note: Note) {
         if action.confirm {
@@ -1851,7 +1890,22 @@ impl App {
     fn handle_overlay_key(&mut self, overlay: Overlay, key: KeyEvent) {
         match overlay {
             Overlay::Confirm { action, .. } => match key.code {
-                KeyCode::Esc | KeyCode::Char('n') => self.overlay = None,
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    // Cancelling a delete goes back to the menu, on that action.
+                    self.overlay = match action {
+                        Pending::DeleteAction(kept, note) => Some(Overlay::Actions {
+                            field: Field::default(),
+                            index: self
+                                .config
+                                .actions
+                                .iter()
+                                .position(|a| a == &kept)
+                                .unwrap_or(0),
+                            note,
+                        }),
+                        _ => None,
+                    }
+                }
                 KeyCode::Char('y') | KeyCode::Enter => {
                     self.overlay = None;
                     self.run_pending(action);
@@ -1937,6 +1991,21 @@ impl App {
                     (index as i32 + delta).rem_euclid(rows as i32) as usize
                 };
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                if ctrl && key.code == KeyCode::Char('d') {
+                    // Deleting asks first, the way quitting does.
+                    let chosen = actions::filter(&self.config.actions, &field.value)
+                        .get(index)
+                        .map(|a| (*a).clone());
+                    self.overlay = Some(match chosen {
+                        Some(action) => Overlay::Confirm {
+                            message: format!("Delete “{}” from the config?", action.name),
+                            confirm_label: "Delete".into(),
+                            action: Pending::DeleteAction(action, note),
+                        },
+                        None => Overlay::Actions { field, index, note },
+                    });
+                    return;
+                }
                 if ctrl && key.code == KeyCode::Char('e') {
                     // Letters go to the search box, so editing takes ctrl.
                     let chosen = actions::filter(&self.config.actions, &field.value)

@@ -10,13 +10,13 @@ gist create`, `pbcopy`, a script of your own.
   type. `↑`/`↓` (or `ctrl+p`/`ctrl+n`, or `tab`) picks, `enter` runs, `esc`
   closes. The default is marked ★, and under the list the highlighted action
   is shown in full: its command, format, timeout and whether it asks first. `ctrl+e`
-  edits it.
+  edits it and `ctrl+d` deletes it, after asking.
 
 `!` opens the menu instead when there is no default to run; with no actions at
 all, the menu holds just **+ New action**. Locked notes are refused, as they
 are for export.
 
-## Adding and editing from the menu
+## Adding, editing and deleting from the menu
 
 The last row of the menu, **+ New action**, opens a form: the name, the
 command, the format to render, whether it asks first, and whether it is the
@@ -38,6 +38,13 @@ alone, and keys the form does not show such as `timeout`, stay as they were.
 The result is read back before it is written, and if the entry does not come
 out exactly as edited (because the file changed since Bjorn read it, say),
 nothing is written.
+
+`ctrl+d` on the highlighted action asks first, the way quitting does: `y` or
+`enter` deletes it, `n` or `esc` goes back to the menu. Deleting removes the
+entry's lines from its `[[actions]]` header down to its last key. Comments and
+blank lines after that key stay, so a block of commented-out templates below
+your last action survives. As with an edit, the file is read back first and
+every other action must come out unchanged, or nothing is written.
 
 ## Configuring
 

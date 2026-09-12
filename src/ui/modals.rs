@@ -25,7 +25,7 @@ Three columns: smart views and tags · notes · the rendered note.
 | `u` | restore from Trash or Archive |
 | `p` | toggle the global pin |
 | `!` | run the default action on the note; the action palette if no default is set |
-| `a` | the action menu: your `[[actions]]` with a search box on top; ★ marks the default, the highlighted command is shown in full, the last row (+ New action) adds one to the config and `ctrl+e` edits the highlighted one (`enter` runs, `esc` closes) |
+| `a` | the action menu: your `[[actions]]` with a search box on top; ★ marks the default, the highlighted command is shown in full, the last row (+ New action) adds one to the config `ctrl+e` edits the highlighted one and `ctrl+d` deletes it after asking (`enter` runs, `esc` closes) |
 | `x` | export the note: Markdown, HTML, plain text, RTF or TextBundle (`←` `→` pick, `export_format` sets the default) |
 | `b` | open the note in Bear.app |
 | `w` | make the highlighted tag the workspace; again to leave it (`W` also clears) |
@@ -48,6 +48,8 @@ pub enum Pending {
     Trash(Note),
     /// An action whose config says `confirm = true`.
     RunAction(Action, Note),
+    /// Deleting an action from the config; cancelling goes back to the menu.
+    DeleteAction(Action, Note),
     Tick(Vec<crate::ui::triage::TriageRow>),
 }
 
