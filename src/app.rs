@@ -15,6 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::actions::{self, Action};
 use crate::bear::{
     BearClient, BearError, Note, NoteContent, Probe, Snapshot, display_tag, normalize_tag,
     recently_modified,
@@ -119,6 +120,11 @@ pub enum Msg {
     },
     Opened(Result<(), BearError>),
     Exported(Result<PathBuf, String>),
+    /// An action finished: the name it ran under, and what it said.
+    ActionDone {
+        name: String,
+        result: Result<String, String>,
+    },
     TriageLoaded {
         scan: TodoScan,
         statuses: HashMap<String, (Status, i64)>,
@@ -634,6 +640,20 @@ impl App {
                 failures,
                 keys,
             } => self.on_triage_added(added, failures, keys),
+            Msg::ActionDone { name, result } => match result {
+                Ok(output) => self.notify_titled(
+                    &name,
+                    if output.is_empty() { "Done." } else { &output },
+                    Severity::Information,
+                    Duration::from_secs(6),
+                ),
+                Err(message) => self.notify_titled(
+                    &format!("{name} failed"),
+                    &message,
+                    Severity::Error,
+                    Duration::from_secs(10),
+                ),
+            },
             Msg::Exported(result) => match result {
                 Ok(path) => self.notify(
                     &format!("Exported to {}", path.display()),
@@ -1192,6 +1212,7 @@ impl App {
         match action {
             Pending::Quit => self.running = false,
             Pending::Tick(rows) => self.tick_rows(rows),
+            Pending::RunAction(action, note) => self.spawn_action(action, note),
             Pending::Trash(note) => {
                 let client = self.client.clone();
                 let tx = self.tx.clone();
@@ -1564,6 +1585,124 @@ impl App {
         });
     }
 
+    // -- actions -------------------------------------------------------------------
+
+    /// The note an action would run on, or a toast saying why there is none.
+    fn action_target(&mut self) -> Option<Note> {
+        let Some(note) = self.current_note().cloned() else {
+            self.notify("No note selected.", Duration::from_secs(3));
+            return None;
+        };
+        if note.locked {
+            self.notify_titled(
+                "",
+                "Locked notes cannot be sent to an action.",
+                Severity::Warning,
+                Duration::from_secs(5),
+            );
+            return None;
+        }
+        Some(note)
+    }
+
+    /// True if there is nothing to run, having said where actions come from.
+    fn warn_without_actions(&mut self) -> bool {
+        if !self.config.actions.is_empty() {
+            return false;
+        }
+        let path = self
+            .config
+            .path
+            .clone()
+            .unwrap_or_else(crate::config::default_config_path);
+        self.notify_titled(
+            "No actions configured",
+            &format!(
+                "Add an [[actions]] entry with a name and a command to {}.",
+                path.display()
+            ),
+            Severity::Warning,
+            Duration::from_secs(8),
+        );
+        true
+    }
+
+    /// `a`: the palette, with the search box focused.
+    fn open_actions(&mut self) {
+        if self.warn_without_actions() {
+            return;
+        }
+        let Some(note) = self.action_target() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Actions {
+            field: Field::default(),
+            index: 0,
+            note,
+        });
+    }
+
+    /// `!`: the default action straight away, or the palette when there is no
+    /// single obvious one to run.
+    fn run_default_action(&mut self) {
+        if self.warn_without_actions() {
+            return;
+        }
+        let Some(action) = actions::default_action(&self.config.actions).cloned() else {
+            self.open_actions();
+            return;
+        };
+        let Some(note) = self.action_target() else {
+            return;
+        };
+        self.start_action(action, note);
+    }
+
+    /// Run `action` on `note`, asking first when it says `confirm = true`.
+    fn start_action(&mut self, action: Action, note: Note) {
+        if action.confirm {
+            self.overlay = Some(Overlay::Confirm {
+                message: format!("Run “{}” on “{}”?", action.name, note.title),
+                confirm_label: "Run".into(),
+                action: Pending::RunAction(action, note),
+            });
+        } else {
+            self.spawn_action(action, note);
+        }
+    }
+
+    fn spawn_action(&mut self, action: Action, note: Note) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let name = action.name.clone();
+        self.notify(&format!("Running “{name}”…"), Duration::from_secs(3));
+        tokio::spawn(async move {
+            let result: Result<String, String> = async {
+                let fmt = crate::export::format_by_id(&action.format);
+                let content = client.cat(&note.id).await.map_err(|e| e.to_string())?;
+                let mut images: HashMap<String, Vec<u8>> = HashMap::new();
+                if fmt.needs_attachments && note.attachments > 0 {
+                    for name in client
+                        .attachments(&note.id)
+                        .await
+                        .map_err(|e| e.to_string())?
+                    {
+                        let bytes = client
+                            .attachment(&note.id, &name)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        images.insert(name, bytes);
+                    }
+                }
+                actions::run(&action, &note, &content.content, &images)
+                    .await
+                    .map_err(|e| e.0)
+            }
+            .await;
+            let _ = tx.send(Msg::ActionDone { name, result });
+        });
+    }
+
     // -- input ---------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -1602,6 +1741,8 @@ impl App {
             KeyCode::Char('u') => self.restore_note(),
             KeyCode::Char('p') => self.toggle_pin(),
             KeyCode::Char('x') => self.export_note_action(),
+            KeyCode::Char('!') => self.run_default_action(),
+            KeyCode::Char('a') => self.open_actions(),
             KeyCode::Char('b') => self.open_in_bear(),
             KeyCode::Char('t') => self.open_triage(),
             KeyCode::Char('c') => self.cycle_columns(),
@@ -1753,6 +1894,70 @@ impl App {
                     });
                 }
             },
+            Overlay::Actions {
+                mut field,
+                index,
+                note,
+            } => {
+                let matched = actions::filter(&self.config.actions, &field.value).len();
+                let step = |index: usize, delta: i32| {
+                    if matched == 0 {
+                        0
+                    } else {
+                        (index as i32 + delta).rem_euclid(matched as i32) as usize
+                    }
+                };
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Enter => {
+                        let chosen = actions::filter(&self.config.actions, &field.value)
+                            .get(index)
+                            .map(|a| (*a).clone());
+                        if let Some(action) = chosen {
+                            self.overlay = None;
+                            self.start_action(action, note);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Tab => {
+                        self.overlay = Some(Overlay::Actions {
+                            field,
+                            index: step(index, 1),
+                            note,
+                        })
+                    }
+                    KeyCode::Up | KeyCode::BackTab => {
+                        self.overlay = Some(Overlay::Actions {
+                            field,
+                            index: step(index, -1),
+                            note,
+                        })
+                    }
+                    KeyCode::Char('n') if ctrl => {
+                        self.overlay = Some(Overlay::Actions {
+                            field,
+                            index: step(index, 1),
+                            note,
+                        })
+                    }
+                    KeyCode::Char('p') if ctrl => {
+                        self.overlay = Some(Overlay::Actions {
+                            field,
+                            index: step(index, -1),
+                            note,
+                        })
+                    }
+                    _ => {
+                        // Typing filters, so the highlight goes back to the top.
+                        let index = if Self::field_key(&mut field, &key) {
+                            0
+                        } else {
+                            index
+                        };
+                        self.overlay = Some(Overlay::Actions { field, index, note });
+                    }
+                }
+            }
             Overlay::NewNote {
                 mut title,
                 mut tags,

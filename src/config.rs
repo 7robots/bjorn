@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use toml::Value;
 
+use crate::actions::{Action, DEFAULT_TIMEOUT_SECONDS};
 use crate::util::{expand_tilde, home_dir, which};
 
 pub const APP_NAME: &str = "bjorn";
@@ -86,6 +87,8 @@ pub struct Config {
     /// Rust build never negotiates pixel mouse reporting, so it has no effect.
     pub mouse_pixels: bool,
     pub reminders: RemindersConfig,
+    /// `[[actions]]` from the config file, in the order they are written.
+    pub actions: Vec<Action>,
     pub path: Option<PathBuf>,
 }
 
@@ -103,6 +106,7 @@ impl Default for Config {
             theme: crate::ui::theme::DEFAULT_THEME.into(),
             mouse_pixels: true,
             reminders: RemindersConfig::default(),
+            actions: Vec::new(),
             path: None,
         }
     }
@@ -202,8 +206,55 @@ impl Config {
                 remctl: text(section.get("remctl"), "").trim().to_string(),
             };
         }
+        cfg.actions = parse_actions(data.get("actions"));
         Ok(cfg)
     }
+}
+
+/// `[[actions]]`: a name and a shell command, plus the optional `format`,
+/// `confirm`, `timeout` and `default`. An entry without a name or a command is
+/// dropped rather than raised, so a half-written action never stops the app.
+fn parse_actions(value: Option<&Value>) -> Vec<Action> {
+    let Some(Value::Array(entries)) = value else {
+        return Vec::new();
+    };
+    let mut actions = Vec::new();
+    for entry in entries {
+        let Value::Table(entry) = entry else { continue };
+        let command = text(entry.get("command"), "").trim().to_string();
+        if command.is_empty() {
+            continue;
+        }
+        let name = text(entry.get("name"), "").trim().to_string();
+        let format = text(entry.get("format"), crate::export::DEFAULT_FORMAT)
+            .trim()
+            .to_lowercase();
+        let timeout = match entry.get("timeout") {
+            None => DEFAULT_TIMEOUT_SECONDS,
+            Some(Value::Integer(i)) => (*i).max(1) as u64,
+            Some(Value::Float(f)) => f.trunc().max(1.0) as u64,
+            Some(Value::String(s)) => s
+                .trim()
+                .parse::<i64>()
+                .map(|i| i.max(1) as u64)
+                .unwrap_or(DEFAULT_TIMEOUT_SECONDS),
+            Some(_) => DEFAULT_TIMEOUT_SECONDS,
+        };
+        actions.push(Action {
+            name: if name.is_empty() {
+                command.clone()
+            } else {
+                name
+            },
+            command,
+            // An unknown format falls back to Markdown, as `export_format` does.
+            format: crate::export::format_by_id(&format).id.to_string(),
+            confirm: truthy(entry.get("confirm"), false),
+            timeout: std::time::Duration::from_secs(timeout),
+            default: truthy(entry.get("default"), false),
+        });
+    }
+    actions
 }
 
 /// Config `editor`, then `$VISUAL`, then `$EDITOR`, then `vim`.
@@ -331,6 +382,37 @@ mod tests {
             }
         );
         assert_eq!(Config::default().reminders.due, "today");
+    }
+
+    #[test]
+    fn actions_are_read_in_order_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[[actions]]\nname = \"Publish to S3\"\ncommand = \"aws s3 cp \\\"$BJORN_NOTE_FILE\\\" s3://notes/\"\n\
+             format = \"HTML\"\nconfirm = true\ntimeout = 300\ndefault = true\n\n\
+             [[actions]]\ncommand = \"pbcopy\"\nformat = \"nonsense\"\n\n\
+             [[actions]]\nname = \"No command\"\n",
+        );
+        let actions = Config::load(Some(&path)).unwrap().actions;
+        assert_eq!(actions.len(), 2, "the entry without a command is dropped");
+        assert_eq!(actions[0].name, "Publish to S3");
+        assert_eq!(actions[0].format, "html");
+        assert!(actions[0].confirm && actions[0].default);
+        assert_eq!(actions[0].timeout, std::time::Duration::from_secs(300));
+        assert_eq!(actions[1].name, "pbcopy", "the command names it");
+        assert_eq!(actions[1].format, "md", "an unknown format falls back");
+        assert!(!actions[1].confirm && !actions[1].default);
+        assert_eq!(
+            actions[1].timeout,
+            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)
+        );
+        assert!(
+            Config::load(Some(&write(&dir, "actions = 3\n")))
+                .unwrap()
+                .actions
+                .is_empty()
+        );
     }
 
     #[test]

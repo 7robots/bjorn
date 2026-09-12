@@ -26,6 +26,10 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
+- Actions: `[[actions]]` in the config, `!` for the default one and `a` for a
+  searchable palette. The note is rendered through the exporter, handed to a
+  shell command as a temp file and on stdin, and the command's first line comes
+  back as a toast. See `docs/actions.md`.
 - Persisted body previews: `~/.cache/bjorn/previews.json`, written after every
   snapshot that moved and read at start-up, so a launch lists metadata only
   (918 notes: 1197 ms to the first frame, 440 ms once the cache is there). The

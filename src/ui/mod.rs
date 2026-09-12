@@ -37,6 +37,8 @@ pub const FOOTER: &[(&str, &str)] = &[
     ("e", "Edit"),
     ("d", "Trash"),
     ("p", "Pin"),
+    ("!", "Action"),
+    ("a", "Actions"),
     ("x", "Export"),
     ("b", "Bear"),
     ("w", "Workspace"),
@@ -680,6 +682,46 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             ];
             frame.render_widget(Paragraph::new(lines), inner);
             field_cursor(frame, field, inner.x + 2, inner.y + 2, width as u16);
+        }
+        Overlay::Actions { field, index, .. } => {
+            let matched = crate::actions::filter(&app.config.actions, &field.value);
+            let rows = matched.len().clamp(1, 10) as u16;
+            let inner = dialog(frame, area, 76, rows + 6, Some("Actions"));
+            let width = inner.width.saturating_sub(4) as usize;
+            let mut lines = vec![field_line(field, true, width), Line::from("")];
+            if matched.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  no action matches",
+                    theme::muted(),
+                )));
+            }
+            // The list scrolls under the highlight once it is past the window.
+            let top = index.saturating_sub(rows as usize - 1);
+            for (i, action) in matched.iter().enumerate().skip(top).take(rows as usize) {
+                let selected = i == *index;
+                let style = if selected {
+                    theme::match_style()
+                } else {
+                    Style::default()
+                };
+                let room = width.saturating_sub(action.name.chars().count() + 5);
+                let mut spans = vec![
+                    Span::styled(if selected { "  ▸ " } else { "    " }, style),
+                    Span::styled(action.name.clone(), style.add_modifier(Modifier::BOLD)),
+                ];
+                if room > 4 {
+                    let command: String = action.command.chars().take(room).collect();
+                    spans.push(Span::styled(format!("  {command}"), theme::muted()));
+                }
+                lines.push(Line::from(spans));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  type to filter · ↑/↓ pick · enter runs · esc closes",
+                theme::muted(),
+            )));
+            frame.render_widget(Paragraph::new(lines), inner);
+            field_cursor(frame, field, inner.x + 2, inner.y, width as u16);
         }
         Overlay::NewNote { title, tags, field } => {
             let inner = dialog(frame, area, 70, 10, None);

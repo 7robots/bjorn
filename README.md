@@ -61,6 +61,34 @@ than stopping the app, because the config is shared and the Python build also
 accepts Textual's own themes. An unknown `--theme` on the command line is an
 error.
 
+## Actions
+
+`x` exports a note to a file you pick. `!` and `a` hand that same file to a
+command of yours: publish it, copy it, POST it, push it.
+
+```toml
+# ~/.config/bjorn/config.toml
+[[actions]]
+name = "Publish to S3"
+command = 'aws s3 cp "$BJORN_NOTE_FILE" "s3://notes/$BJORN_NOTE_TITLE.html"'
+format = "html"        # md (default), html, txt, rtf, textbundle
+confirm = true         # ask first
+default = true         # this is what `!` runs
+
+[[actions]]
+name = "Copy as plain text"
+command = "pbcopy"
+format = "txt"
+```
+
+`!` runs the default action; `a` opens the palette — a search box over your
+actions, filtered as you type, `enter` runs. The note is rendered the way
+export renders it, written to a temp file the command gets as
+`$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in the
+environment; the file goes away when the command ends. The first line the
+command prints comes back as a toast, and a non-zero exit is reported with its
+stderr. Full reference: [docs/actions.md](docs/actions.md).
+
 ## What differs from the Python Bjorn
 
 - The reader renders the whole note in one pass and draws only the viewport.
@@ -117,7 +145,7 @@ draws styled lines.
 ## Development
 
 ```sh
-cargo test                                 # 168 tests: unit, client, UI through a headless harness
+cargo test                                 # 189 tests: unit, client, UI through a headless harness
 cargo clippy --all-targets -- -D warnings
 cargo run --release --bin bjorn-gate       # acceptance gate against the live library
 cargo run --release --bin bjorn-gate -- --bench

@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::actions::Action;
 use crate::bear::Note;
 
 pub const HELP_TEXT: &str = "# Bjorn
@@ -23,6 +24,8 @@ Three columns: smart views and tags · notes · the rendered note.
 | `d` | move the note to the trash |
 | `u` | restore from Trash or Archive |
 | `p` | toggle the global pin |
+| `!` | run the default action on the note; the action palette if no default is set |
+| `a` | the action palette: your `[[actions]]` from the config, filtered as you type (`enter` runs, `esc` closes) |
 | `x` | export the note: Markdown, HTML, plain text, RTF or TextBundle (`←` `→` pick, `export_format` sets the default) |
 | `b` | open the note in Bear.app |
 | `w` | make the highlighted tag the workspace; again to leave it (`W` also clears) |
@@ -43,6 +46,8 @@ Edits are hash-guarded: if the note changed in Bear while you were in the editor
 pub enum Pending {
     Quit,
     Trash(Note),
+    /// An action whose config says `confirm = true`.
+    RunAction(Action, Note),
     Tick(Vec<crate::ui::triage::TriageRow>),
 }
 
@@ -135,6 +140,12 @@ pub enum Overlay {
         hint: String,
         purpose: TextPurpose,
     },
+    /// The action palette: a search box over the actions from the config.
+    Actions {
+        field: Field,
+        index: usize,
+        note: Note,
+    },
     /// Title and tags for a new note; `field` is 0 for the title, 1 for the tags.
     NewNote {
         title: Field,
@@ -150,6 +161,7 @@ impl Overlay {
             Overlay::Help { .. } => "Help",
             Overlay::Format { .. } => "Format",
             Overlay::Text { .. } => "Text",
+            Overlay::Actions { .. } => "Actions",
             Overlay::NewNote { .. } => "NewNote",
         }
     }
