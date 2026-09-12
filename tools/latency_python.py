@@ -1,6 +1,6 @@
 """The Python Bjorn's input-to-frame latency, the way `bjorn-gate --latency` measures the Rust one.
 
-    cd ../bjorn && .venv/bin/python ../bjorn-rust/tools/latency_python.py
+    cd ../bjorn-python && .venv/bin/python ../bjorn/tools/latency_python.py
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ import sys
 import time
 from pathlib import Path
 
-# The Python Bjorn: $BJORN_PY, else a `bjorn` checkout beside this one.
-BJORN_PY = Path(os.environ.get("BJORN_PY") or Path(__file__).resolve().parents[2] / "bjorn")
+# The Python Bjorn: $BJORN_PY, else a `bjorn-python` checkout beside this one.
+BJORN_PY = Path(os.environ.get("BJORN_PY") or Path(__file__).resolve().parents[2] / "bjorn-python")
 sys.path.insert(0, str(BJORN_PY / "src"))
 
 from bjorn.app import BjornApp  # noqa: E402

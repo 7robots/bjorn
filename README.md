@@ -24,8 +24,8 @@ Requires macOS with Bear installed and a Rust toolchain (`brew install rustup
 && rustup default stable`).
 
 ```sh
-git clone https://github.com/7robots/bjorn-rust.git
-cd bjorn-rust
+git clone https://github.com/7robots/bjorn.git
+cd bjorn
 ./install.sh          # builds --release, puts a `bjorn-rs` launcher in ~/bin
 bjorn-rs              # or: cargo run --release --bin bjorn
 bjorn-rs --tag work   # start scoped to a tag subtree
@@ -128,8 +128,8 @@ uv run --with pillow python tools/shot.py /tmp/shot.json /tmp/shot.png
 The Python suite runs against the Rust fakes with the plugin in `tools/`:
 
 ```sh
-cd ../bjorn
-PYTHONPATH=../bjorn-rust/tools uv run pytest -p pytest_rust_fake -q
+cd ../bjorn-python
+PYTHONPATH=../bjorn/tools uv run pytest -p pytest_rust_fake -q
 ```
 
 The plan and its status live in `docs/plans/bjorn-rust.md`; deferred work in

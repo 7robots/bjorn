@@ -6,8 +6,8 @@ commands to the Rust `fake-bearcli` / `fake-remctl` binaries, so every test
 that drives the fake as a subprocess proves the Rust fake honours the same
 contract. The state files and their env vars are unchanged.
 
-    cd ../bjorn
-    PYTHONPATH=../bjorn-rust/tools uv run pytest -p pytest_rust_fake -q
+    cd ../bjorn-python
+    PYTHONPATH=../bjorn/tools uv run pytest -p pytest_rust_fake -q
 """
 
 from __future__ import annotations

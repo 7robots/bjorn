@@ -3,7 +3,7 @@ Bear mirror: 7ED80908-BD76-459C-A416-22F8BA784083
 
 Status: complete 2026-09-11; all phases done, acceptance gate passed.
 
-A re-implementation of Bjorn (`~/GitHub/bjorn`, Python + Textual) in Rust with
+A re-implementation of Bjorn (`~/GitHub/bjorn-python`, Python + Textual; archived) in Rust with
 ratatui, to find out how well the design works as a native binary: startup,
 reload, rendering of long notes, memory, and install without a Python runtime.
 Feature parity with bjorn at commit `e60f93e` is the target; the Python repo is

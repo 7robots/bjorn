@@ -1,6 +1,6 @@
 # Roadmap
 
-Single source of truth for planned and deferred work in bjorn-rust. The active
+Single source of truth for planned and deferred work in bjorn (the Rust build). The active
 plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Next
