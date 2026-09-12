@@ -24,7 +24,7 @@ use crate::ui::note_list::ROW_HEIGHT;
 use crate::ui::note_view::column_glyph;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
-pub const SIDEBAR_WIDTH: u16 = 30;
+pub const SIDEBAR_WIDTH: u16 = 28;
 pub const NOTES_WIDTH: u16 = 36;
 
 /// Footer entries: key, label. Grows as phases land.
