@@ -463,11 +463,118 @@ async fn bench() {
     println!("show_longest_ms={:.0}", show.as_secs_f64() * 1000.0);
 }
 
+/// Input-to-frame latency for the interactions that are felt: moving the
+/// list cursor, the reader following it, switching views, cycling focus,
+/// and a broad search. Each figure is the median of `n` repetitions.
+async fn latency() {
+    let client = Arc::new(BearClient::new(vec![resolve_bearcli("")]));
+    let mut h = Harness::new(config(), client.clone(), None, (140, 44));
+    h.load().await;
+    let n = h.app.notes.len();
+    println!("implementation=rust notes={n}");
+
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+
+    // 1. j: key handled and the frame drawn (the reader waits for the debounce).
+    let mut key_frame = Vec::new();
+    let mut reader_follow = Vec::new();
+    for _ in 0..20 {
+        let before = h.app.reader.note.as_ref().map(|n| n.id.clone());
+        let t = Instant::now();
+        h.press("j");
+        key_frame.push(ms(t.elapsed()));
+        let t = Instant::now();
+        let prev = before.clone();
+        h.until(move |app| {
+            app.reader.note.as_ref().map(|n| n.id.clone()) != prev && app.reader.full_text.is_some()
+        })
+        .await;
+        reader_follow.push(ms(t.elapsed()));
+    }
+    println!("cursor_key_to_frame_ms={:.1}", median(key_frame));
+    println!(
+        "cursor_to_reader_ms={:.0}   (includes the 120 ms debounce and one bearcli cat)",
+        median(reader_follow)
+    );
+
+    // 2. View switches on the whole library: list rebuilt and drawn.
+    let mut views = Vec::new();
+    for _ in 0..10 {
+        let t = Instant::now();
+        h.press("2");
+        h.press("1");
+        views.push(ms(t.elapsed()) / 2.0);
+    }
+    println!("view_switch_ms={:.1}", median(views));
+
+    // 3. tab through the three panes.
+    let mut tabs = Vec::new();
+    for _ in 0..30 {
+        let t = Instant::now();
+        h.press("tab");
+        tabs.push(ms(t.elapsed()));
+    }
+    println!("tab_focus_ms={:.2}", median(tabs));
+
+    // 4. A frame with nothing changed.
+    let mut frames = Vec::new();
+    for _ in 0..30 {
+        let t = Instant::now();
+        h.draw();
+        frames.push(ms(t.elapsed()));
+    }
+    println!("idle_frame_ms={:.2}", median(frames));
+
+    // 5. A broad search: results listed and drawn.
+    h.app.set_focus(Pane::Notes);
+    let t = Instant::now();
+    h.press("slash");
+    h.type_text("the");
+    h.press("enter");
+    h.until(|app| app.notes.header.starts_with("“the”")).await;
+    println!(
+        "search_the_ms={:.0} results={}",
+        ms(t.elapsed()),
+        h.app.notes.len()
+    );
+    h.press("escape");
+    h.until(|app| app.search_query.is_empty() && app.notes.len() == n)
+        .await;
+
+    // 6. Sidebar: F expands every tag, then j walks 20 rows (each applies a tag selection).
+    h.app.set_focus(Pane::Sidebar);
+    let t = Instant::now();
+    h.press("F");
+    println!(
+        "fold_all_ms={:.1} rows={}",
+        ms(t.elapsed()),
+        h.app.sidebar.rows.len()
+    );
+    h.app
+        .sidebar
+        .move_to_tag(&h.app.sidebar.tag_roots()[0].clone());
+    let mut side = Vec::new();
+    for _ in 0..20 {
+        let t = Instant::now();
+        h.press("j");
+        side.push(ms(t.elapsed()));
+    }
+    println!("sidebar_step_ms={:.1}", median(side));
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--bench") {
         bench().await;
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--latency") {
+        latency().await;
         return;
     }
     let body = args
