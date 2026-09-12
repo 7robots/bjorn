@@ -5,6 +5,8 @@ mod common;
 
 use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyModifiers};
+
 use bjorn::actions::Action;
 use bjorn::config::Config;
 use common::Fake;
@@ -351,9 +353,13 @@ async fn the_menu_marks_the_default_and_shows_the_highlighted_command() {
     h.press("a");
     let screen = h.text();
     assert!(screen.contains("on “Sprint Planning”"), "{screen}");
-    assert_eq!(screen.matches("★ default").count(), 1, "{screen}");
+    assert_eq!(
+        screen.matches("★ default").count(),
+        2,
+        "the row's badge and the hint: {screen}"
+    );
     assert!(
-        screen.contains("★ Publish is the default: ! runs it without opening this menu"),
+        screen.contains("★ default · ! runs it without opening this menu"),
         "{screen}"
     );
     assert!(
@@ -504,4 +510,71 @@ async fn the_new_action_form_wants_a_name_and_a_command() {
         std::fs::read_to_string(&path).unwrap(),
         "export_format = \"md\"\n"
     );
+}
+
+#[tokio::test]
+async fn ctrl_e_edits_the_highlighted_action_in_place() {
+    let fake = Fake::new();
+    let receipt = fake.dir.path().join("edited");
+    let (config, path) = file_config(
+        &fake,
+        "# my notes config\n[[actions]]\nname = \"Copy\"  # clipboard\ncommand = \"true\"\n\n\
+         [[actions]]\nname = \"Upload\"\ncommand = \"false\"\ntimeout = 300\n",
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("a");
+    h.press("down");
+    h.key(KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("NewAction"));
+    assert!(h.text().contains("Edit action"), "{}", h.text());
+
+    h.type_text(" v2");
+    h.press("tab");
+    for _ in 0.."false".len() {
+        h.press("backspace");
+    }
+    h.type_text(&format!(
+        "cp \"$BJORN_NOTE_FILE\" {}",
+        shell_quote(&receipt.to_string_lossy())
+    ));
+    h.press("enter");
+    assert_eq!(
+        h.app.overlay.as_ref().map(|o| o.name()),
+        Some("Actions"),
+        "saving goes back to the menu"
+    );
+    assert!(
+        h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.contains("“Upload v2” is updated in")),
+        "{:?}",
+        h.app.toast_messages()
+    );
+
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        body.starts_with(
+            "# my notes config\n[[actions]]\nname = \"Copy\"  # clipboard\ncommand = \"true\"\n"
+        ),
+        "the other entry is untouched: {body}"
+    );
+    assert!(body.contains("name = \"Upload v2\"\n"), "{body}");
+    assert!(
+        body.contains("timeout = 300\n"),
+        "keys the form does not show survive: {body}"
+    );
+    let actions = Config::load(Some(&path)).unwrap().actions;
+    assert_eq!(actions.len(), 2, "{body}");
+    assert_eq!(
+        h.app.config.actions, actions,
+        "the menu has it without a restart"
+    );
+
+    h.press("escape");
+    h.press("a");
+    h.press("down");
+    h.press("enter");
+    h.until(|_| receipt.exists()).await;
 }

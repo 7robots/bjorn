@@ -1639,11 +1639,16 @@ impl App {
             .unwrap_or_else(crate::config::default_config_path)
     }
 
-    /// Write `action` into the config file and read the actions back, so the
-    /// menu shows it at once. On failure the form stays up with what was typed.
-    fn save_new_action(&mut self, action: Action, form: Overlay, note: Note) {
+    /// Write `action` into the config file, as a new entry or over `editing`,
+    /// and read the actions back so the menu shows it at once. On failure the
+    /// form stays up with what was typed.
+    fn save_action(&mut self, action: Action, editing: Option<Action>, form: Overlay, note: Note) {
         let path = self.config_path();
-        let saved = actions::add_to_config(&path, &action).and_then(|()| {
+        let written = match &editing {
+            Some(original) => actions::update_in_config(&path, original, &action),
+            None => actions::add_to_config(&path, &action),
+        };
+        let saved = written.and_then(|()| {
             Config::load(Some(&path)).map_err(|e| actions::ActionError(format!("{e:#}")))
         });
         match saved {
@@ -1655,9 +1660,14 @@ impl App {
                     .iter()
                     .rposition(|a| a.name == action.name && a.command == action.command)
                     .unwrap_or(0);
+                let (title, verb) = if editing.is_some() {
+                    ("Action updated", "updated")
+                } else {
+                    ("Action added", "saved")
+                };
                 self.notify_titled(
-                    "Action added",
-                    &format!("“{}” is saved in {}.", action.name, path.display()),
+                    title,
+                    &format!("“{}” is {verb} in {}.", action.name, path.display()),
                     Severity::Information,
                     Duration::from_secs(6),
                 );
@@ -1669,7 +1679,7 @@ impl App {
             }
             Err(err) => {
                 self.notify_titled(
-                    "Could not add the action",
+                    "Could not save the action",
                     &err.0,
                     Severity::Error,
                     Duration::from_secs(10),
@@ -1927,6 +1937,29 @@ impl App {
                     (index as i32 + delta).rem_euclid(rows as i32) as usize
                 };
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                if ctrl && key.code == KeyCode::Char('e') {
+                    // Letters go to the search box, so editing takes ctrl.
+                    let chosen = actions::filter(&self.config.actions, &field.value)
+                        .get(index)
+                        .map(|a| (*a).clone());
+                    self.overlay = Some(match chosen {
+                        Some(action) => Overlay::NewAction {
+                            name: Field::new(&action.name),
+                            command: Field::new(&action.command),
+                            format: FORMATS
+                                .iter()
+                                .position(|f| f.id == action.format)
+                                .unwrap_or(0),
+                            confirm: action.confirm,
+                            default: action.default,
+                            focus: 0,
+                            note,
+                            editing: Some(action),
+                        },
+                        None => Overlay::Actions { field, index, note },
+                    });
+                    return;
+                }
                 let delta = match key.code {
                     KeyCode::Down | KeyCode::Tab => Some(1),
                     KeyCode::Up | KeyCode::BackTab => Some(-1),
@@ -1955,6 +1988,7 @@ impl App {
                             confirm: false,
                             default: false,
                             note,
+                            editing: None,
                         });
                     }
                     KeyCode::Enter => {
@@ -1985,13 +2019,19 @@ impl App {
                 mut default,
                 mut focus,
                 note,
+                editing,
             } => {
                 let fields = crate::ui::modals::NEW_ACTION_FIELDS;
                 match key.code {
                     KeyCode::Esc => {
+                        // Back to the menu, on the action that was being edited.
+                        let index = editing
+                            .as_ref()
+                            .and_then(|e| self.config.actions.iter().position(|a| a == e))
+                            .unwrap_or(0);
                         self.overlay = Some(Overlay::Actions {
                             field: Field::default(),
-                            index: 0,
+                            index,
                             note,
                         });
                         return;
@@ -2001,13 +2041,14 @@ impl App {
                     KeyCode::Enter if name.value.trim().is_empty() => focus = 0,
                     KeyCode::Enter if command.value.trim().is_empty() => focus = 1,
                     KeyCode::Enter => {
+                        // An edit keeps what the form does not show, the timeout.
                         let action = Action {
                             name: name.value.trim().to_string(),
                             command: command.value.trim().to_string(),
                             format: FORMATS[format].id.to_string(),
                             confirm,
                             default,
-                            ..Action::default()
+                            ..editing.clone().unwrap_or_default()
                         };
                         let form = Overlay::NewAction {
                             name,
@@ -2017,8 +2058,9 @@ impl App {
                             default,
                             focus,
                             note: note.clone(),
+                            editing: editing.clone(),
                         };
-                        self.save_new_action(action, form, note);
+                        self.save_action(action, editing, form, note);
                         return;
                     }
                     KeyCode::Left if focus == 2 => {
@@ -2045,6 +2087,7 @@ impl App {
                     default,
                     focus,
                     note,
+                    editing,
                 });
             }
             Overlay::NewNote {

@@ -25,7 +25,7 @@ Three columns: smart views and tags · notes · the rendered note.
 | `u` | restore from Trash or Archive |
 | `p` | toggle the global pin |
 | `!` | run the default action on the note; the action palette if no default is set |
-| `a` | the action menu: your `[[actions]]` with a search box on top; ★ marks the default, the highlighted command is shown in full, and the last row (+ New action) adds one to the config (`enter` runs, `esc` closes) |
+| `a` | the action menu: your `[[actions]]` with a search box on top; ★ marks the default, the highlighted command is shown in full, the last row (+ New action) adds one to the config and `ctrl+e` edits the highlighted one (`enter` runs, `esc` closes) |
 | `x` | export the note: Markdown, HTML, plain text, RTF or TextBundle (`←` `→` pick, `export_format` sets the default) |
 | `b` | open the note in Bear.app |
 | `w` | make the highlighted tag the workspace; again to leave it (`W` also clears) |
@@ -149,7 +149,8 @@ pub enum Overlay {
         index: usize,
         note: Note,
     },
-    /// The form behind the menu's last row: a new action for the config.
+    /// The form for a new action (the menu's last row) or for editing one
+    /// (`ctrl+e`); saving writes the config.
     /// `focus` is the row: 0 name, 1 command, 2 format, 3 confirm, 4 default.
     NewAction {
         name: Field,
@@ -160,6 +161,8 @@ pub enum Overlay {
         default: bool,
         focus: usize,
         note: Note,
+        /// The action being edited, as it was read; `None` for a new one.
+        editing: Option<Action>,
     },
     /// Title and tags for a new note; `field` is 0 for the title, 1 for the tags.
     NewNote {

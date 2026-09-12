@@ -340,6 +340,194 @@ pub fn add_to_config(path: &Path, action: &Action) -> Result<(), ActionError> {
     std::fs::write(path, text).map_err(|e| ActionError(format!("{}: {e}", path.display())))
 }
 
+/// The first line of a TOML parse error; the rest is a drawing of the spot.
+fn first_error_line(e: &toml::de::Error) -> String {
+    e.to_string().lines().next().unwrap_or("").to_string()
+}
+
+/// A line that opens a table, `[name]` or `[[name]]`, with spaces and any
+/// comment taken out.
+fn table_header(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+    Some(
+        trimmed
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect(),
+    )
+}
+
+/// Where the table opened on line `start` ends: the next header, or the end.
+fn block_end(lines: &[String], start: usize) -> usize {
+    (start + 1..lines.len())
+        .find(|&i| table_header(&lines[i]).is_some())
+        .unwrap_or(lines.len())
+}
+
+/// The lines holding `key` in `lines[from..to]`: the key line, and for a
+/// multi-line string every line down to the one that closes it.
+fn key_lines(lines: &[String], from: usize, to: usize, key: &str) -> Option<(usize, usize)> {
+    let pattern = Regex::new(&format!(r"^\s*{}\s*=", regex::escape(key))).unwrap();
+    let start = (from..to).find(|&i| pattern.is_match(&lines[i]))?;
+    let value = lines[start]
+        .split_once('=')
+        .map(|(_, v)| v)
+        .unwrap_or("")
+        .trim_start();
+    for delim in ["\"\"\"", "'''"] {
+        if let Some(rest) = value.strip_prefix(delim) {
+            if rest.contains(delim) {
+                return Some((start, start));
+            }
+            let end = (start + 1..to)
+                .find(|&i| lines[i].contains(delim))
+                .unwrap_or(to.saturating_sub(1).max(start));
+            return Some((start, end));
+        }
+    }
+    Some((start, start))
+}
+
+/// Whether two `key = value` snippets hold the same value, whatever their
+/// spacing, quoting or trailing comment.
+fn same_value(current: &str, wanted: &str, key: &str) -> bool {
+    let read = |text: &str| {
+        text.trim_start()
+            .parse::<toml::Table>()
+            .ok()
+            .and_then(|t| t.get(key).cloned())
+    };
+    let now = read(current);
+    now.is_some() && now == read(wanted)
+}
+
+/// Every action the config text holds, in order, as the app reads them.
+fn read_entries(table: &toml::Table) -> Vec<Option<Action>> {
+    match table.get("actions") {
+        Some(toml::Value::Array(entries)) => entries
+            .iter()
+            .map(|e| e.as_table().and_then(crate::config::parse_action))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Rewrite the `[[actions]]` entry that reads as `original` so it reads as
+/// `updated`. Only lines whose value changes are touched, so comments and keys
+/// the form does not show stay as they were, and a missing key is added after
+/// the entry's last one. If `updated` is the default, other entries lose
+/// theirs. The result is read back and must hold `updated` where `original`
+/// was, or nothing is written.
+pub fn update_in_config(
+    path: &Path,
+    original: &Action,
+    updated: &Action,
+) -> Result<(), ActionError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| ActionError(format!("{}: {e}", path.display())))?;
+    let table: toml::Table = text.parse().map_err(|e: toml::de::Error| {
+        ActionError(format!(
+            "{} does not parse, so nothing was written: {}",
+            path.display(),
+            first_error_line(&e)
+        ))
+    })?;
+    let entries = read_entries(&table);
+    let position = entries
+        .iter()
+        .position(|e| e.as_ref() == Some(original))
+        .ok_or_else(|| {
+            ActionError(format!(
+                "“{}” is no longer in {} as it was read, so nothing was written.",
+                original.name,
+                path.display()
+            ))
+        })?;
+
+    let text = if updated.default {
+        clear_defaults(&text)
+    } else {
+        text
+    };
+    let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_string).collect();
+    if let Some(last) = lines.last_mut()
+        && !last.ends_with('\n')
+    {
+        last.push('\n');
+    }
+    let headers: Vec<usize> = (0..lines.len())
+        .filter(|&i| table_header(&lines[i]).as_deref() == Some("[[actions]]"))
+        .collect();
+    if headers.len() != entries.len() {
+        return Err(ActionError(format!(
+            "{} does not write every action as an [[actions]] block, so edit this one by hand.",
+            path.display()
+        )));
+    }
+    let header = headers[position];
+    let seconds = updated.timeout.as_secs();
+    let wanted = [
+        ("name", toml_string(&updated.name), true),
+        ("command", toml_string(&updated.command), true),
+        ("format", toml_string(&updated.format), true),
+        ("confirm", updated.confirm.to_string(), updated.confirm),
+        ("default", updated.default.to_string(), updated.default),
+        (
+            "timeout",
+            seconds.to_string(),
+            seconds != DEFAULT_TIMEOUT_SECONDS,
+        ),
+    ];
+    for (key, value, needed) in wanted {
+        let end = block_end(&lines, header);
+        let line = format!("{key} = {value}\n");
+        match key_lines(&lines, header + 1, end, key) {
+            Some((first, last)) => {
+                if same_value(&lines[first..=last].concat(), &line, key) {
+                    continue;
+                }
+                let indent: String = lines[first]
+                    .chars()
+                    .take_while(|c| *c == ' ' || *c == '\t')
+                    .collect();
+                lines.splice(first..=last, [format!("{indent}{line}")]);
+            }
+            None if needed => {
+                // After the entry's last key, ahead of blank lines and comments
+                // that separate it from what follows.
+                let at = (header + 1..end)
+                    .rev()
+                    .find(|&i| {
+                        let t = lines[i].trim();
+                        !t.is_empty() && !t.starts_with('#')
+                    })
+                    .map_or(header + 1, |i| i + 1);
+                lines.insert(at, line);
+            }
+            None => {}
+        }
+    }
+
+    let result = lines.concat();
+    let reread = result
+        .parse::<toml::Table>()
+        .map(|t| read_entries(&t))
+        .unwrap_or_default();
+    if reread.len() != entries.len() || reread[position].as_ref() != Some(updated) {
+        return Err(ActionError(
+            "the edited entry did not read back as written, so nothing was written; edit this one by hand."
+                .into(),
+        ));
+    }
+    std::fs::write(path, result).map_err(|e| ActionError(format!("{}: {e}", path.display())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,5 +707,52 @@ mod tests {
         let err = add_to_config(&path, &action("X", "true")).unwrap_err();
         assert!(err.0.contains("nothing was written"), "{}", err.0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = \n");
+    }
+
+    #[test]
+    fn an_edit_changes_only_the_lines_it_must() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let body = "# mine\n\n[[actions]]\nname = \"Copy\"   # short\ncommand = \"pbcopy\"\ndefault = true\n\n\
+                    [[actions]]\n# uploads\nname = \"Upload\"\ncommand = '''\nscp \"$BJORN_NOTE_FILE\" host:notes/\n'''\ntimeout = 300\n\n\
+                    [reminders]\nenabled = false\n";
+        std::fs::write(&path, body).unwrap();
+        let before = crate::config::Config::load(Some(&path)).unwrap().actions;
+        let upload = before[1].clone();
+        let edited = Action {
+            name: "Upload \"notes\"".into(),
+            command: "rsync -a \"$BJORN_NOTE_FILE\" host:notes/".into(),
+            format: "html".into(),
+            confirm: true,
+            default: true,
+            ..upload.clone()
+        };
+        update_in_config(&path, &upload, &edited).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            "# mine\n\n[[actions]]\nname = \"Copy\"   # short\ncommand = \"pbcopy\"\ndefault = false\n\n\
+             [[actions]]\n# uploads\nname = \"Upload \\\"notes\\\"\"\ncommand = \"rsync -a \\\"$BJORN_NOTE_FILE\\\" host:notes/\"\n\
+             timeout = 300\nformat = \"html\"\nconfirm = true\ndefault = true\n\n\
+             [reminders]\nenabled = false\n"
+        );
+        let cfg = crate::config::Config::load(Some(&path)).unwrap();
+        assert_eq!(cfg.actions[1], edited);
+        assert_eq!(
+            default_action(&cfg.actions).unwrap().name,
+            "Upload \"notes\""
+        );
+    }
+
+    #[test]
+    fn an_edit_of_an_action_that_changed_on_disk_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let body = "[[actions]]\nname = \"Copy\"\ncommand = \"pbcopy\"\n";
+        std::fs::write(&path, body).unwrap();
+        let stale = action("Copy", "pbcopy -Prefer txt");
+        let err = update_in_config(&path, &stale, &action("Copy", "true")).unwrap_err();
+        assert!(err.0.contains("nothing was written"), "{}", err.0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
     }
 }

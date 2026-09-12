@@ -9,13 +9,14 @@ gist create`, `pbcopy`, a script of your own.
 - `a` opens the action menu: a search box over your actions, filtered as you
   type. `↑`/`↓` (or `ctrl+p`/`ctrl+n`, or `tab`) picks, `enter` runs, `esc`
   closes. The default is marked ★, and under the list the highlighted action
-  is shown in full: its command, format, timeout and whether it asks first.
+  is shown in full: its command, format, timeout and whether it asks first. `ctrl+e`
+  edits it.
 
 `!` opens the menu instead when there is no default to run; with no actions at
 all, the menu holds just **+ New action**. Locked notes are refused, as they
 are for export.
 
-## Adding one from the menu
+## Adding and editing from the menu
 
 The last row of the menu, **+ New action**, opens a form: the name, the
 command, the format to render, whether it asks first, and whether it is the
@@ -30,6 +31,13 @@ the default: if the new one is, the old entry's `default = true` becomes
 `default = false`, and the form says which one that is before you save.
 Nothing is written if the file does not parse, and the new action is in the
 menu straight away.
+
+`ctrl+e` on the highlighted action opens the same form, filled in. Saving an
+edit rewrites only the lines whose value changed: a comment on a line you left
+alone, and keys the form does not show such as `timeout`, stay as they were.
+The result is read back before it is written, and if the entry does not come
+out exactly as edited (because the file changed since Bjorn read it, say),
+nothing is written.
 
 ## Configuring
 

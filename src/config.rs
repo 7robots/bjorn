@@ -218,43 +218,50 @@ fn parse_actions(value: Option<&Value>) -> Vec<Action> {
     let Some(Value::Array(entries)) = value else {
         return Vec::new();
     };
-    let mut actions = Vec::new();
-    for entry in entries {
-        let Value::Table(entry) = entry else { continue };
-        let command = text(entry.get("command"), "").trim().to_string();
-        if command.is_empty() {
-            continue;
-        }
-        let name = text(entry.get("name"), "").trim().to_string();
-        let format = text(entry.get("format"), crate::export::DEFAULT_FORMAT)
-            .trim()
-            .to_lowercase();
-        let timeout = match entry.get("timeout") {
-            None => DEFAULT_TIMEOUT_SECONDS,
-            Some(Value::Integer(i)) => (*i).max(1) as u64,
-            Some(Value::Float(f)) => f.trunc().max(1.0) as u64,
-            Some(Value::String(s)) => s
-                .trim()
-                .parse::<i64>()
-                .map(|i| i.max(1) as u64)
-                .unwrap_or(DEFAULT_TIMEOUT_SECONDS),
-            Some(_) => DEFAULT_TIMEOUT_SECONDS,
-        };
-        actions.push(Action {
-            name: if name.is_empty() {
-                command.clone()
-            } else {
-                name
-            },
-            command,
-            // An unknown format falls back to Markdown, as `export_format` does.
-            format: crate::export::format_by_id(&format).id.to_string(),
-            confirm: truthy(entry.get("confirm"), false),
-            timeout: std::time::Duration::from_secs(timeout),
-            default: truthy(entry.get("default"), false),
-        });
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Value::Table(entry) => parse_action(entry),
+            _ => None,
+        })
+        .collect()
+}
+
+/// One `[[actions]]` entry, or `None` when it has no command. Editing an
+/// action finds its entry again by reading every entry through this.
+pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
+    let command = text(entry.get("command"), "").trim().to_string();
+    if command.is_empty() {
+        return None;
     }
-    actions
+    let name = text(entry.get("name"), "").trim().to_string();
+    let format = text(entry.get("format"), crate::export::DEFAULT_FORMAT)
+        .trim()
+        .to_lowercase();
+    let timeout = match entry.get("timeout") {
+        None => DEFAULT_TIMEOUT_SECONDS,
+        Some(Value::Integer(i)) => (*i).max(1) as u64,
+        Some(Value::Float(f)) => f.trunc().max(1.0) as u64,
+        Some(Value::String(s)) => s
+            .trim()
+            .parse::<i64>()
+            .map(|i| i.max(1) as u64)
+            .unwrap_or(DEFAULT_TIMEOUT_SECONDS),
+        Some(_) => DEFAULT_TIMEOUT_SECONDS,
+    };
+    Some(Action {
+        name: if name.is_empty() {
+            command.clone()
+        } else {
+            name
+        },
+        command,
+        // An unknown format falls back to Markdown, as `export_format` does.
+        format: crate::export::format_by_id(&format).id.to_string(),
+        confirm: truthy(entry.get("confirm"), false),
+        timeout: std::time::Duration::from_secs(timeout),
+        default: truthy(entry.get("default"), false),
+    })
 }
 
 /// Config `editor`, then `$VISUAL`, then `$EDITOR`, then `vim`.

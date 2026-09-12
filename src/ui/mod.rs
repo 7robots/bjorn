@@ -742,7 +742,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 lines.push(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
-                        fit_cells("search actions by name or command…", width),
+                        fit_cells("type to search/filter actions by name or command…", width),
                         theme::cursor_focused().add_modifier(Modifier::DIM),
                     ),
                 ]));
@@ -870,17 +870,15 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             lines.push(Line::from(""));
 
             lines.push(Line::from(Span::styled(
-                match default {
-                    Some(d) => format!(
-                        "  ★ {} is the default: ! runs it without opening this menu",
-                        d.name
-                    ),
-                    None => "  no default yet: tick Default on a new action, or set default = true, and ! runs it".to_string(),
+                if default.is_some() {
+                    "  ★ default · ! runs it without opening this menu"
+                } else {
+                    "  no default yet · tick Default when adding or editing an action, and ! runs it"
                 },
                 theme::muted(),
             )));
             lines.push(Line::from(Span::styled(
-                "  type to search · ↑/↓ pick · enter runs · esc closes",
+                "  type to search/filter · ↑/↓ pick · enter runs · ctrl+e edits · esc closes",
                 theme::muted(),
             )));
             frame.render_widget(Paragraph::new(lines), inner);
@@ -893,9 +891,14 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             confirm,
             default,
             focus,
+            editing,
             ..
         } => {
-            let title = format!("New action · saved to {}", tilde_path(&app.config_path()));
+            let verb = if editing.is_some() { "Edit" } else { "New" };
+            let title = format!(
+                "{verb} action · saved to {}",
+                tilde_path(&app.config_path())
+            );
             let inner = dialog(frame, area, 84, 13, Some(&title));
             let width = inner.width.saturating_sub(4) as usize;
             let heading = |row: usize| {
@@ -959,7 +962,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 .config
                 .actions
                 .iter()
-                .find(|a| a.default)
+                .find(|a| a.default && Some(*a) != editing.as_ref())
                 .filter(|_| *default);
             lines.push(match replaced {
                 Some(old) => Line::from(Span::styled(

@@ -88,6 +88,14 @@ async fn main() {
         h.press("space");
         h.settle().await;
     }
+    if screen == "edit-action" {
+        h.press("a");
+        h.key(
+            crossterm::event::KeyCode::Char('e'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        h.settle().await;
+    }
     h.draw();
 
     let buffer = h.buffer();
