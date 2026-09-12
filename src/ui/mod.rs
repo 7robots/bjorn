@@ -46,7 +46,7 @@ pub const FOOTER: &[(&str, &str)] = &[
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let [body, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
+    let [body, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(area);
     let mut rects = Rects::default();
 
     if app.triage.is_some() {
@@ -504,7 +504,18 @@ fn draw_footer(frame: &mut Frame, area: Rect) {
     draw_footer_entries(frame, area, FOOTER);
 }
 
+/// The footer is two rows: a rule separating it from the columns, then the key hints.
 fn draw_footer_entries(frame: &mut Frame, area: Rect, entries: &[(&str, &str)]) {
+    let [rule, hints] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(rule.width as usize),
+            theme::border(),
+        ))),
+        rule,
+    );
+    let area = hints;
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (key, label) in entries {
         spans.push(Span::styled(
