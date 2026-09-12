@@ -145,7 +145,7 @@ impl NoteList {
         };
         let mut title_spans: Vec<Span<'static>> = Vec::new();
         if note.pinned() {
-            title_spans.push(Span::styled("📌 ", base.fg(theme::WARNING)));
+            title_spans.push(Span::styled("📌 ", base.fg(theme::warning_color())));
         }
         title_spans.push(Span::styled(
             note.title.clone(),

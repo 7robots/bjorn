@@ -260,7 +260,7 @@ async fn focused_column_header_is_filled_with_the_accent() {
     let mut h = fake.harness();
     h.load().await;
     let lit = |h: &bjorn::harness::Harness, r: ratatui::layout::Rect| {
-        h.cell_bg(r.x + 1, r.y) == theme::ACCENT
+        h.cell_bg(r.x + 1, r.y) == theme::accent_color()
     };
     h.app.focus = Pane::Notes;
     h.draw();
@@ -397,6 +397,29 @@ async fn workspace_from_cli_flag_and_config() {
     h.load().await;
     assert_eq!(h.app.selection.workspace, "home");
     assert_eq!(titles(&h), vec!["Garden Plan", "Reading Queue"]);
+}
+
+#[tokio::test]
+async fn unknown_theme_in_the_config_keeps_the_default_and_says_so() {
+    // The config file is shared with the Python Bjorn, which accepts Textual's
+    // own theme names, so `theme = "nord"` must not stop this build.
+    let fake = Fake::new();
+    let config = bjorn::config::Config {
+        theme: "nord".into(),
+        ..fake.config()
+    };
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    assert_eq!(theme::current().name, theme::DEFAULT_THEME);
+    assert!(
+        h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.contains("nord") && m.contains(theme::DEFAULT_THEME)),
+        "{:?}",
+        h.app.toast_messages()
+    );
+    assert!(!titles(&h).is_empty(), "the app still loads");
 }
 
 #[tokio::test]
@@ -774,4 +797,39 @@ async fn locked_and_missing_notes_explain_themselves() {
             .is_some_and(|m| m.contains("Could not read note"))
     })
     .await;
+}
+
+#[tokio::test]
+async fn the_reader_does_not_wait_for_a_note_it_already_has() {
+    // The cold listing reads every body to build the previews, so they are
+    // already in hand: moving the cursor draws the note in the same frame
+    // rather than after the debounce and a `bearcli cat`.
+    let fake = Fake::new();
+    let mut h = fake.harness();
+    h.load().await;
+    let first = h.app.reader.note.as_ref().unwrap().id.clone();
+
+    h.app.set_focus(Pane::Notes);
+    h.press("j");
+    let next = h.app.notes.current().unwrap().id.clone();
+    assert_ne!(next, first, "the cursor moved");
+    assert_eq!(
+        h.app.reader.note.as_ref().map(|n| n.id.clone()),
+        Some(next.clone()),
+        "the reader followed inside the keypress"
+    );
+    assert!(h.app.reader.full_text.is_some());
+
+    // A body the cache has not seen still waits, so a big library does not
+    // spawn a bearcli per keypress while the cursor is moving.
+    let mut unseen = h.app.notes.notes[0].clone();
+    unseen.id = "NOT-CACHED".into();
+    h.app.notes.notes[0] = unseen.clone();
+    h.app.notes.select_id("NOT-CACHED");
+    h.app.schedule_preview(unseen, false, true);
+    assert_eq!(
+        h.app.reader.note.as_ref().map(|n| n.id.clone()),
+        Some(next),
+        "an uncached note leaves the last one up until it arrives"
+    );
 }

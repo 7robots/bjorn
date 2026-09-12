@@ -9,7 +9,7 @@
 use std::sync::LazyLock;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use regex::Regex;
 use unicode_width::UnicodeWidthStr;
@@ -96,11 +96,11 @@ struct TableState {
 }
 
 fn code_style() -> Style {
-    Style::default().fg(Color::Cyan)
+    theme::code()
 }
 
 fn tag_style() -> Style {
-    Style::default().fg(theme::ACCENT)
+    theme::tag()
 }
 
 impl Renderer {
@@ -242,13 +242,7 @@ impl Renderer {
     }
 
     fn heading_style(level: HeadingLevel) -> Style {
-        match level {
-            HeadingLevel::H1 => Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-            HeadingLevel::H2 => Style::default().add_modifier(Modifier::BOLD),
-            _ => Style::default().add_modifier(Modifier::BOLD | Modifier::ITALIC),
-        }
+        theme::heading(level as u8)
     }
 
     fn end_table(&mut self, table: TableState) {
@@ -383,17 +377,13 @@ pub fn render(content: &str) -> Vec<RLine> {
                     r.cont.push(Span::raw(
                         " ".repeat(UnicodeWidthStr::width(marker.as_str())),
                     ));
-                    r.spans.push(Span::styled(marker, theme::muted()));
+                    r.spans.push(Span::styled(marker, theme::bullet()));
                     r.item_open = true;
                 }
                 Tag::Emphasis => r.push(Style::default().add_modifier(Modifier::ITALIC)),
                 Tag::Strong => r.push(Style::default().add_modifier(Modifier::BOLD)),
                 Tag::Strikethrough => r.push(Style::default().add_modifier(Modifier::CROSSED_OUT)),
-                Tag::Link { .. } => r.push(
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::UNDERLINED),
-                ),
+                Tag::Link { .. } => r.push(theme::link()),
                 Tag::Image { .. } => {
                     r.in_image = true;
                     r.image_alt.clear();
@@ -622,7 +612,10 @@ pub fn wrap(line: &RLine, width: usize) -> Vec<Line<'static>> {
             new_row(&mut rows, &mut current, &mut used);
             continue;
         }
-        if used > cont_width || (used > 0 && rows.is_empty() && used > cont_width) {
+        // Break only if this row holds something of its own: on a continuation
+        // row `used` starts at the prefix's width, and the first row's spans
+        // carry that same prefix, so `cont_width` is the empty mark on both.
+        if used > cont_width {
             new_row(&mut rows, &mut current, &mut used);
         }
         if used + w <= width {
@@ -727,7 +720,7 @@ mod tests {
                 .unwrap()
                 .style
                 .fg,
-            Some(theme::ACCENT)
+            Some(theme::current().tag_fg)
         );
         assert_ne!(lines[0].block, lines[2].block);
         assert_ne!(lines[2].block, lines[4].block);

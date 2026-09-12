@@ -144,11 +144,13 @@ pub enum Status {
 pub fn join(todos: &[Todo], reminders: &[LinkedReminder]) -> HashMap<String, (Status, i64)> {
     let mut by_key: HashMap<&str, &LinkedReminder> = HashMap::new();
     for reminder in reminders {
-        match by_key.get(reminder.key.as_str()) {
-            Some(current) if !(current.completed && !reminder.completed) => {}
-            _ => {
-                by_key.insert(&reminder.key, reminder);
-            }
+        let takes_the_key = match by_key.get(reminder.key.as_str()) {
+            None => true,
+            // An active reminder displaces a completed one under the same key.
+            Some(current) => current.completed && !reminder.completed,
+        };
+        if takes_the_key {
+            by_key.insert(&reminder.key, reminder);
         }
     }
     let mut out = HashMap::new();

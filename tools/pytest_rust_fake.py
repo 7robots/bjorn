@@ -6,9 +6,8 @@ commands to the Rust `fake-bearcli` / `fake-remctl` binaries, so every test
 that drives the fake as a subprocess proves the Rust fake honours the same
 contract. The state files and their env vars are unchanged.
 
-    cd ~/GitHub/bjorn
-    BJORN_RUST_BIN=~/GitHub/bjorn-rust/target/release \
-      PYTHONPATH=~/GitHub/bjorn-rust/tools uv run pytest -p pytest_rust_fake -q
+    cd ../bjorn
+    PYTHONPATH=../bjorn-rust/tools uv run pytest -p pytest_rust_fake -q
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-RUST_BIN = Path(os.environ.get("BJORN_RUST_BIN", str(Path.home() / "GitHub" / "bjorn-rust" / "target" / "release")))
+RUST_BIN = Path(os.environ.get("BJORN_RUST_BIN") or Path(__file__).resolve().parents[1] / "target" / "release")
 
 
 def _swap(command, python_name: str, rust_name: str):

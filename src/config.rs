@@ -30,6 +30,26 @@ pub fn default_config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// `${XDG_CACHE_HOME:-~/.cache}/bjorn`: derived state only, safe to delete.
+pub fn cache_dir() -> PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME").unwrap_or_default();
+    let base = base.trim();
+    let root = if base.is_empty() {
+        home_dir().join(".cache")
+    } else {
+        expand_tilde(base)
+    };
+    root.join(APP_NAME)
+}
+
+/// Previews kept between runs, so a launch takes the warm path. The Python
+/// Bjorn writes the same file in the same shape, so either one warms the other;
+/// it is versioned and keyed by the bearcli it came from, and anything that
+/// does not match is ignored and overwritten.
+pub fn preview_cache_path() -> PathBuf {
+    cache_dir().join("previews.json")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemindersConfig {
     pub enabled: bool,
@@ -59,6 +79,9 @@ pub struct Config {
     pub bearcli: String,
     pub icon_style: String,
     pub icons: BTreeMap<String, String>,
+    /// Palette name; see `ui::theme::THEMES`. An unknown name falls back to
+    /// the default, so a typo never stops the app.
+    pub theme: String,
     /// Accepted for compatibility with the Python Bjorn's config file. The
     /// Rust build never negotiates pixel mouse reporting, so it has no effect.
     pub mouse_pixels: bool,
@@ -77,6 +100,7 @@ impl Default for Config {
             bearcli: String::new(),
             icon_style: "auto".into(),
             icons: BTreeMap::new(),
+            theme: crate::ui::theme::DEFAULT_THEME.into(),
             mouse_pixels: true,
             reminders: RemindersConfig::default(),
             path: None,
@@ -159,6 +183,12 @@ impl Config {
                 .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                 .collect();
         }
+        cfg.theme = text(data.get("theme"), crate::ui::theme::DEFAULT_THEME)
+            .trim()
+            .to_lowercase();
+        if cfg.theme.is_empty() {
+            cfg.theme = crate::ui::theme::DEFAULT_THEME.into();
+        }
         cfg.mouse_pixels = truthy(data.get("mouse_pixels"), true);
         if let Some(Value::Table(section)) = data.get("reminders") {
             cfg.reminders = RemindersConfig {
@@ -227,6 +257,19 @@ mod tests {
         assert_eq!(cfg.poll_seconds, 5);
         assert_eq!(cfg.workspace, "");
         assert_eq!(cfg.export_dir, home_dir().join("Downloads"));
+        assert_eq!(cfg.theme, crate::ui::theme::DEFAULT_THEME);
+    }
+
+    #[test]
+    fn theme_is_read_and_normalised() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "theme = \"Red-Graphite\"\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().theme, "red-graphite");
+        let path = write(&dir, "theme = \"\"\n");
+        assert_eq!(
+            Config::load(Some(&path)).unwrap().theme,
+            crate::ui::theme::DEFAULT_THEME
+        );
     }
 
     #[test]
@@ -244,6 +287,7 @@ mod tests {
         assert_eq!(cfg.workspace, "work");
         assert_eq!(cfg.bearcli, "/opt/bearcli");
         assert_eq!(cfg.icon_style, "nerd");
+        assert_eq!(cfg.theme, crate::ui::theme::DEFAULT_THEME);
         assert_eq!(cfg.icons.get("tech").unwrap(), "terminal");
         assert_eq!(cfg.icons.get("school").unwrap(), "emoji:🎓");
         assert!(!cfg.icons.contains_key("bad"));

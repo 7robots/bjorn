@@ -11,7 +11,7 @@ pub mod triage;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
@@ -46,6 +46,9 @@ pub const FOOTER: &[(&str, &str)] = &[
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    // Every pane paints its own surface over this; it covers the gaps and
+    // gives the reader and the modals their background.
+    frame.buffer_mut().set_style(area, theme::screen());
     let [body, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(area);
     let mut rects = Rects::default();
 
@@ -93,12 +96,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn header_line(text: &str, width: u16, focused: bool) -> Paragraph<'static> {
-    let style = if focused {
-        theme::header_focused()
-    } else {
-        theme::header()
-    };
+fn header_line(text: &str, width: u16, style: Style) -> Paragraph<'static> {
     let padded = format!(
         " {text}{}",
         " ".repeat((width as usize).saturating_sub(UnicodeWidthStr::width(text) + 1))
@@ -107,21 +105,27 @@ fn header_line(text: &str, width: u16, focused: bool) -> Paragraph<'static> {
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) {
+    let focused = app.focus == Pane::Sidebar;
+    frame
+        .buffer_mut()
+        .set_style(area, theme::sidebar_surface(focused));
     let block = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(theme::border());
+        .border_style(theme::sidebar_border());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [header, rows] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
-    let focused = app.focus == Pane::Sidebar;
+    let style = if focused {
+        theme::header_focused()
+    } else {
+        theme::sidebar_header()
+    };
     frame.render_widget(
-        header_line(&app.sidebar.header(), header.width, focused),
+        header_line(&app.sidebar.header(), header.width, style),
         header,
     );
     rects.sidebar_header = header;
     rects.sidebar_rows = rows;
-    // Paragraph leaves the cell after a wide glyph as it was; start from a clean pane.
-    frame.render_widget(Clear, rows);
     app.sidebar.ensure_visible(rows.height as usize);
     let width = rows.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -129,11 +133,7 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects)
         app.sidebar.scroll..(app.sidebar.scroll + rows.height as usize).min(app.sidebar.rows.len())
     {
         let cursor = if index == app.sidebar.cursor {
-            Some(if focused {
-                theme::cursor_focused()
-            } else {
-                theme::cursor_unfocused()
-            })
+            Some(theme::sidebar_cursor(focused))
         } else {
             None
         };
@@ -143,6 +143,8 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects)
 }
 
 fn draw_notes(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) {
+    let focused = app.focus == Pane::Notes;
+    frame.buffer_mut().set_style(area, theme::surface(focused));
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(theme::border());
@@ -155,19 +157,22 @@ fn draw_notes(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) {
         Constraint::Min(1),
     ])
     .areas(inner);
-    let focused = app.focus == Pane::Notes;
-    frame.render_widget(
-        header_line(&app.notes.header, header.width, focused),
-        header,
-    );
+    let style = if focused {
+        theme::header_focused()
+    } else {
+        theme::header()
+    };
+    frame.render_widget(header_line(&app.notes.header, header.width, style), header);
     rects.notes_header = header;
     rects.notes_rows = rows;
-    frame.render_widget(Clear, rows);
     if app.notes.search.open {
         draw_search_box(frame, app, search, rects);
     }
     if app.notes.is_empty() {
-        let empty = Paragraph::new(Line::from(Span::styled("No notes", theme::muted())))
+        // Before the first snapshot lands an empty column reads as broken, so
+        // it says which it is.
+        let text = if app.loaded { "No notes" } else { "Loading…" };
+        let empty = Paragraph::new(Line::from(Span::styled(text, theme::muted())))
             .block(Block::default().padding(Padding::new(2, 2, 1, 0)));
         frame.render_widget(empty, rows);
         return;
@@ -221,7 +226,7 @@ fn draw_search_box(frame: &mut Frame, app: &App, area: Rect, rects: &mut Rects) 
         Layout::vertical([Constraint::Length(3), Constraint::Length(1)]).areas(area);
     rects.search_box = box_area;
     let border = if focused {
-        Style::default().fg(theme::ACCENT)
+        Style::default().fg(theme::accent_color())
     } else {
         theme::border()
     };
@@ -267,7 +272,7 @@ fn draw_search_box(frame: &mut Frame, app: &App, area: Rect, rects: &mut Rects) 
 
 fn field_line(field: &Field, focused: bool, width: usize) -> Line<'static> {
     let style = if focused {
-        Style::default().bg(Color::DarkGray).fg(Color::White)
+        theme::cursor_focused()
     } else {
         theme::muted()
     };
@@ -300,13 +305,13 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
     let bar_style = if focused {
         theme::header_focused()
     } else {
-        Style::default()
+        theme::header()
     };
     let glyph = column_glyph(app.columns);
     let glyph_style = if focused {
         theme::header_focused()
     } else {
-        theme::muted()
+        theme::header().fg(theme::current().muted)
     };
     let title_style = if focused {
         theme::header_focused()
@@ -341,7 +346,6 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
         height: body.height,
     };
     rects.reader_body = body;
-    frame.render_widget(Clear, body);
     app.set_reader_viewport(inner.width as usize, inner.height as usize);
     if let Some(editing) = app.editing.as_mut() {
         // The editor's screen fills the reader body; the pane's own cursor
@@ -408,13 +412,14 @@ fn draw_triage(frame: &mut Frame, app: &mut App, area: Rect) {
     ])
     .areas(area);
     frame.render_widget(Clear, area);
+    frame.buffer_mut().set_style(area, theme::surface(true));
     let head = format!(" {}", triage.header());
     let pad = (header.width as usize).saturating_sub(UnicodeWidthStr::width(head.as_str()));
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!("{head}{}", " ".repeat(pad)),
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::accent_color())
                 .add_modifier(Modifier::BOLD),
         ))),
         header,
@@ -422,7 +427,7 @@ fn draw_triage(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(field) = &triage.filter {
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::ACCENT));
+            .border_style(Style::default().fg(theme::accent_color()));
         let inner = block.inner(filter);
         frame.render_widget(block, filter);
         let shown = if field.value.is_empty() {
@@ -508,23 +513,21 @@ fn draw_footer(frame: &mut Frame, area: Rect) {
 fn draw_footer_entries(frame: &mut Frame, area: Rect, entries: &[(&str, &str)]) {
     let [rule, hints] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    frame.buffer_mut().set_style(area, theme::footer());
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "─".repeat(rule.width as usize),
-            theme::border(),
+            theme::footer().fg(theme::current().border),
         ))),
         rule,
     );
     let area = hints;
+    let key_style = theme::footer_key();
+    let label_style = theme::footer();
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (key, label) in entries {
-        spans.push(Span::styled(
-            format!(" {key} "),
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(format!("{label} "), theme::muted()));
+        spans.push(Span::styled(format!(" {key} "), key_style));
+        spans.push(Span::styled(format!("{label} "), label_style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -534,9 +537,9 @@ fn draw_toasts(frame: &mut Frame, app: &App, area: Rect) {
     let mut bottom = area.y + area.height;
     for toast in app.toasts.iter().rev() {
         let color = match toast.severity {
-            Severity::Information => theme::ACCENT,
-            Severity::Warning => theme::WARNING,
-            Severity::Error => theme::ERROR,
+            Severity::Information => theme::accent_color(),
+            Severity::Warning => theme::warning_color(),
+            Severity::Error => theme::error_color(),
         };
         let mut lines: Vec<Line<'static>> = Vec::new();
         if !toast.title.is_empty() {
@@ -569,6 +572,7 @@ fn draw_toasts(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(Clear, rect);
         let block = Block::default()
             .borders(Borders::ALL)
+            .style(theme::screen())
             .border_style(Style::default().fg(color));
         frame.render_widget(
             Paragraph::new(lines)
@@ -595,7 +599,8 @@ fn dialog(frame: &mut Frame, area: Rect, width: u16, height: u16, title: Option<
     frame.render_widget(Clear, rect);
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .style(theme::screen())
+        .border_style(Style::default().fg(theme::accent_color()));
     if let Some(title) = title {
         block = block.title(format!(" {title} "));
     }
@@ -621,8 +626,8 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     Span::styled(
                         format!("  {confirm_label} (y)  "),
                         Style::default()
-                            .bg(theme::ERROR)
-                            .fg(Color::White)
+                            .bg(theme::error_color())
+                            .fg(theme::current().header_focus_fg)
                             .add_modifier(Modifier::BOLD),
                     ),
                 ])

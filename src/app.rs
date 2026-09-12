@@ -39,10 +39,20 @@ use crate::ui::sidebar::{Row, Sidebar};
 use crate::ui::triage::{Triage, TriageRow};
 
 /// Delay between the list cursor moving and the note being fetched and rendered.
+/// Only a note whose body has to be read from Bear waits: a cached one is drawn
+/// on the next frame, so holding `j` down stays instant.
 pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 /// Note bodies kept in memory, most recently read last. Each is keyed by the
 /// note's modification stamp, so a changed note is fetched again on its own.
-pub const CONTENT_CACHE_SIZE: usize = 64;
+pub const CONTENT_CACHE_SIZE: usize = 512;
+/// Bytes of note bodies to keep. A thousand notes of a few KB each fit; one
+/// 170 KB monster does not evict the rest of the library on its own.
+pub const CONTENT_CACHE_BYTES: usize = 24 * 1024 * 1024;
+/// How far either side of the cursor to read ahead, so the next `j` or `k`
+/// lands on a note that is already in hand.
+pub const PREFETCH_RADIUS: usize = 3;
+/// Read-aheads allowed in flight at once; bearcli is a process per call.
+pub const PREFETCH_INFLIGHT: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -64,6 +74,13 @@ pub enum Msg {
         force: bool,
     },
     Probed(Result<Probe, BearError>),
+    /// A read-ahead finished: the body goes in the cache, nothing is drawn.
+    Prefetched {
+        epoch: u64,
+        id: String,
+        stamp: String,
+        body: Option<String>,
+    },
     Content {
         generation: u64,
         epoch: u64,
@@ -158,7 +175,12 @@ pub struct App {
     pub toasts: Vec<Toast>,
     pub rects: Rects,
     tx: UnboundedSender<Msg>,
-    content_cache: VecDeque<(String, String, NoteContent)>,
+    /// Note id, modification stamp, body. The reader's cache only: the edit
+    /// path always re-reads, because it needs a fresh hash to write against.
+    content_cache: VecDeque<(String, String, String)>,
+    content_cache_bytes: usize,
+    /// Read-aheads running now, and the ids they are for.
+    prefetching: std::collections::HashSet<String>,
     cache_epoch: u64,
     load_gen: u64,
     reload_gen: u64,
@@ -190,6 +212,15 @@ impl App {
         environ: HashMap<String, String>,
     ) -> (App, UnboundedReceiver<Msg>) {
         let (tx, rx) = unbounded_channel();
+        // The palette is process-wide, so every entry point (the binary, the
+        // gate, the test harness) picks it up from the config it was given. An
+        // unknown name keeps the default: the config file is shared with the
+        // Python Bjorn, which knows themes this build does not.
+        let theme_known = crate::ui::theme::set(&config.theme);
+        if !theme_known {
+            crate::ui::theme::set(crate::ui::theme::DEFAULT_THEME);
+        }
+        let unknown_theme = (!theme_known).then(|| config.theme.clone());
         let icons = IconSet::new(
             &config.icon_style,
             &config.icons,
@@ -205,7 +236,7 @@ impl App {
         } else {
             None
         };
-        let app = App {
+        let mut app = App {
             selection: Selection {
                 workspace: ws,
                 ..Selection::default()
@@ -228,6 +259,8 @@ impl App {
             rects: Rects::default(),
             tx,
             content_cache: VecDeque::new(),
+            content_cache_bytes: 0,
+            prefetching: std::collections::HashSet::new(),
             cache_epoch: 0,
             load_gen: 0,
             reload_gen: 0,
@@ -246,6 +279,19 @@ impl App {
             reader_width: 80,
             reader_height: 24,
         };
+        app.reader.clear("Loading\u{2026}");
+        if let Some(name) = unknown_theme {
+            app.notify_titled(
+                "Theme",
+                &format!(
+                    "Unknown theme {name:?}; drawing with {}. This build knows: {}.",
+                    crate::ui::theme::DEFAULT_THEME,
+                    crate::ui::theme::names().collect::<Vec<_>>().join(", ")
+                ),
+                Severity::Warning,
+                Duration::from_secs(10),
+            );
+        }
         (app, rx)
     }
 
@@ -360,7 +406,7 @@ impl App {
         force: bool,
     ) {
         self.reload_inflight = false;
-        let snapshot = match result {
+        let mut snapshot = match result {
             Ok(snapshot) => snapshot,
             Err(err) => {
                 self.error("bearcli", &err);
@@ -370,8 +416,32 @@ impl App {
                 return;
             }
         };
+        // The cold listing reads every body to build the previews; keeping
+        // them means the reader never waits for bearcli again this session.
+        let bodies = std::mem::take(&mut snapshot.bodies);
         self.snapshot = snapshot;
         self.loaded = true;
+        // The previews this snapshot settled on are worth the next launch not
+        // having to read every body again. Off the frame's path, and only when
+        // they moved: the poll takes a snapshot every few seconds.
+        if self.client.preview_cache_dirty() {
+            let client = self.client.clone();
+            tokio::task::spawn_blocking(move || client.save_preview_cache());
+        }
+        // Oldest first, so that if the cache has to evict, the notes Bear
+        // listed first — the most recently modified — are the last to go. The
+        // stamp comes from the note, so it is spelled the way `cached_content`
+        // will look it up.
+        for (id, body) in bodies.into_iter().rev() {
+            let Some(stamp) = self
+                .snapshot
+                .by_id(&id)
+                .map(|n| n.modified.map(|m| m.to_rfc3339()).unwrap_or_default())
+            else {
+                continue;
+            };
+            self.remember_content(&id, &stamp, &body);
+        }
         if let Some(probe) = probe {
             self.last_probe = Some(probe);
         }
@@ -477,6 +547,12 @@ impl App {
 
     pub fn handle_msg(&mut self, msg: Msg) {
         match msg {
+            Msg::Prefetched {
+                epoch,
+                id,
+                stamp,
+                body,
+            } => self.on_prefetched(epoch, id, stamp, body),
             Msg::Loaded {
                 generation,
                 result,
@@ -583,7 +659,10 @@ impl App {
             return;
         }
         self.load_gen += 1;
-        if immediate {
+        // The debounce exists to keep bearcli off the critical path while the
+        // cursor is moving. A body already in memory costs a render, so it is
+        // drawn now: this is what makes holding `j` feel like scrolling.
+        if immediate || self.has_cached_content(&note) {
             self.preview_due = None;
             self.load_note(note);
         } else {
@@ -591,7 +670,18 @@ impl App {
         }
     }
 
-    fn cached_content(&mut self, note: &Note) -> Option<NoteContent> {
+    /// Is this version of the note's body in the cache?
+    fn has_cached_content(&self, note: &Note) -> bool {
+        if note.locked || recently_modified(note.modified, None) {
+            return false;
+        }
+        let stamp = note.modified.map(|m| m.to_rfc3339()).unwrap_or_default();
+        self.content_cache
+            .iter()
+            .any(|(id, s, _)| *id == note.id && *s == stamp)
+    }
+
+    fn cached_content(&mut self, note: &Note) -> Option<String> {
         let stamp = note.modified.map(|m| m.to_rfc3339()).unwrap_or_default();
         if recently_modified(note.modified, None) {
             return None;
@@ -600,28 +690,111 @@ impl App {
             .content_cache
             .iter()
             .position(|(id, s, _)| *id == note.id && *s == stamp)?;
+        // Most recently read last, so the eviction below drops cold bodies.
         let entry = self.content_cache.remove(pos)?;
-        let content = entry.2.clone();
+        let body = entry.2.clone();
         self.content_cache.push_back(entry);
-        Some(content)
+        Some(body)
     }
 
-    fn remember_content(&mut self, note_id: &str, stamp: &str, content: &NoteContent) {
-        self.content_cache.retain(|(id, _, _)| id != note_id);
+    pub fn remember_content(&mut self, note_id: &str, stamp: &str, body: &str) {
+        self.drop_cached(note_id);
+        self.content_cache_bytes += body.len();
         self.content_cache
-            .push_back((note_id.to_string(), stamp.to_string(), content.clone()));
-        while self.content_cache.len() > CONTENT_CACHE_SIZE {
-            self.content_cache.pop_front();
+            .push_back((note_id.to_string(), stamp.to_string(), body.to_string()));
+        while self.content_cache.len() > CONTENT_CACHE_SIZE
+            || (self.content_cache_bytes > CONTENT_CACHE_BYTES && self.content_cache.len() > 1)
+        {
+            if let Some((_, _, body)) = self.content_cache.pop_front() {
+                self.content_cache_bytes = self.content_cache_bytes.saturating_sub(body.len());
+            }
         }
+    }
+
+    fn drop_cached(&mut self, note_id: &str) {
+        let mut kept = VecDeque::with_capacity(self.content_cache.len());
+        while let Some(entry) = self.content_cache.pop_front() {
+            if entry.0 == note_id {
+                self.content_cache_bytes = self.content_cache_bytes.saturating_sub(entry.2.len());
+            } else {
+                kept.push_back(entry);
+            }
+        }
+        self.content_cache = kept;
     }
 
     /// Drop one note's body (or all of them) and outdate any read in flight.
     pub fn forget_content(&mut self, note_id: Option<&str>) {
         match note_id {
-            None => self.content_cache.clear(),
-            Some(id) => self.content_cache.retain(|(cached, _, _)| cached != id),
+            None => {
+                self.content_cache.clear();
+                self.content_cache_bytes = 0;
+            }
+            Some(id) => self.drop_cached(id),
         }
         self.cache_epoch += 1;
+    }
+
+    /// Read the bodies either side of the cursor into the cache, so the next
+    /// step of the cursor draws without waiting for bearcli. At most
+    /// `PREFETCH_INFLIGHT` reads run at once and each note is asked for once.
+    fn prefetch_around_cursor(&mut self) {
+        if self.prefetching.len() >= PREFETCH_INFLIGHT {
+            return;
+        }
+        let Some(cursor) = self.notes.cursor else {
+            return;
+        };
+        let mut wanted: Vec<Note> = Vec::new();
+        for step in 1..=PREFETCH_RADIUS {
+            for index in [cursor.checked_sub(step), Some(cursor + step)]
+                .into_iter()
+                .flatten()
+            {
+                let Some(note) = self.notes.notes.get(index) else {
+                    continue;
+                };
+                if note.locked
+                    || self.prefetching.contains(&note.id)
+                    || self.has_cached_content(note)
+                    || recently_modified(note.modified, None)
+                {
+                    continue;
+                }
+                wanted.push(note.clone());
+            }
+        }
+        for note in wanted
+            .into_iter()
+            .take(PREFETCH_INFLIGHT - self.prefetching.len())
+        {
+            let client = self.client.clone();
+            let tx = self.tx.clone();
+            let epoch = self.cache_epoch;
+            let id = note.id.clone();
+            let stamp = note.modified.map(|m| m.to_rfc3339()).unwrap_or_default();
+            self.prefetching.insert(id.clone());
+            tokio::spawn(async move {
+                let body = client.cat(&id).await.map(|c| c.content).ok();
+                let _ = tx.send(Msg::Prefetched {
+                    epoch,
+                    id,
+                    stamp,
+                    body,
+                });
+            });
+        }
+    }
+
+    fn on_prefetched(&mut self, epoch: u64, id: String, stamp: String, body: Option<String>) {
+        self.prefetching.remove(&id);
+        if epoch == self.cache_epoch
+            && let Some(body) = body
+        {
+            self.remember_content(&id, &stamp, &body);
+        }
+        // One finished, so the next one along can start.
+        self.prefetch_around_cursor();
     }
 
     fn load_note(&mut self, note: Note) {
@@ -633,8 +806,9 @@ impl App {
             );
             return;
         }
-        if let Some(content) = self.cached_content(&note) {
-            self.reader.show(&note, &content.content);
+        if let Some(body) = self.cached_content(&note) {
+            self.reader.show(&note, &body);
+            self.prefetch_around_cursor();
             return;
         }
         let client = self.client.clone();
@@ -664,9 +838,10 @@ impl App {
                 }
                 let stamp = note.modified.map(|m| m.to_rfc3339()).unwrap_or_default();
                 if epoch == self.cache_epoch && !recently_modified(note.modified, None) {
-                    self.remember_content(&note.id, &stamp, &content);
+                    self.remember_content(&note.id, &stamp, &content.content);
                 }
                 self.reader.show(&note, &content.content);
+                self.prefetch_around_cursor();
             }
             Err(err) => self
                 .reader
