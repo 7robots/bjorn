@@ -1605,33 +1605,9 @@ impl App {
         Some(note)
     }
 
-    /// True if there is nothing to run, having said where actions come from.
-    fn warn_without_actions(&mut self) -> bool {
-        if !self.config.actions.is_empty() {
-            return false;
-        }
-        let path = self
-            .config
-            .path
-            .clone()
-            .unwrap_or_else(crate::config::default_config_path);
-        self.notify_titled(
-            "No actions configured",
-            &format!(
-                "Add an [[actions]] entry with a name and a command to {}.",
-                path.display()
-            ),
-            Severity::Warning,
-            Duration::from_secs(8),
-        );
-        true
-    }
-
-    /// `a`: the palette, with the search box focused.
+    /// `a`: the menu, with the search box focused. With no actions configured
+    /// it holds only the row that adds one.
     fn open_actions(&mut self) {
-        if self.warn_without_actions() {
-            return;
-        }
         let Some(note) = self.action_target() else {
             return;
         };
@@ -1642,12 +1618,9 @@ impl App {
         });
     }
 
-    /// `!`: the default action straight away, or the palette when there is no
+    /// `!`: the default action straight away, or the menu when there is no
     /// single obvious one to run.
     fn run_default_action(&mut self) {
-        if self.warn_without_actions() {
-            return;
-        }
         let Some(action) = actions::default_action(&self.config.actions).cloned() else {
             self.open_actions();
             return;
@@ -1656,6 +1629,54 @@ impl App {
             return;
         };
         self.start_action(action, note);
+    }
+
+    /// The config file this run read, which is where a new action is written.
+    pub fn config_path(&self) -> PathBuf {
+        self.config
+            .path
+            .clone()
+            .unwrap_or_else(crate::config::default_config_path)
+    }
+
+    /// Write `action` into the config file and read the actions back, so the
+    /// menu shows it at once. On failure the form stays up with what was typed.
+    fn save_new_action(&mut self, action: Action, form: Overlay, note: Note) {
+        let path = self.config_path();
+        let saved = actions::add_to_config(&path, &action).and_then(|()| {
+            Config::load(Some(&path)).map_err(|e| actions::ActionError(format!("{e:#}")))
+        });
+        match saved {
+            Ok(loaded) => {
+                self.config.actions = loaded.actions;
+                let index = self
+                    .config
+                    .actions
+                    .iter()
+                    .rposition(|a| a.name == action.name && a.command == action.command)
+                    .unwrap_or(0);
+                self.notify_titled(
+                    "Action added",
+                    &format!("“{}” is saved in {}.", action.name, path.display()),
+                    Severity::Information,
+                    Duration::from_secs(6),
+                );
+                self.overlay = Some(Overlay::Actions {
+                    field: Field::default(),
+                    index,
+                    note,
+                });
+            }
+            Err(err) => {
+                self.notify_titled(
+                    "Could not add the action",
+                    &err.0,
+                    Severity::Error,
+                    Duration::from_secs(10),
+                );
+                self.overlay = Some(form);
+            }
+        }
     }
 
     /// Run `action` on `note`, asking first when it says `confirm = true`.
@@ -1900,16 +1921,42 @@ impl App {
                 note,
             } => {
                 let matched = actions::filter(&self.config.actions, &field.value).len();
+                // The last row adds a new action, so there is always one to land on.
+                let rows = matched + 1;
                 let step = |index: usize, delta: i32| {
-                    if matched == 0 {
-                        0
-                    } else {
-                        (index as i32 + delta).rem_euclid(matched as i32) as usize
-                    }
+                    (index as i32 + delta).rem_euclid(rows as i32) as usize
                 };
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let delta = match key.code {
+                    KeyCode::Down | KeyCode::Tab => Some(1),
+                    KeyCode::Up | KeyCode::BackTab => Some(-1),
+                    KeyCode::Char('n') if ctrl => Some(1),
+                    KeyCode::Char('p') if ctrl => Some(-1),
+                    _ => None,
+                };
+                if let Some(delta) = delta {
+                    self.overlay = Some(Overlay::Actions {
+                        field,
+                        index: step(index, delta),
+                        note,
+                    });
+                    return;
+                }
                 match key.code {
                     KeyCode::Esc => self.overlay = None,
+                    KeyCode::Enter if index >= matched => {
+                        // Whatever was typed in the search box is a good name.
+                        let name = field.value.trim().to_string();
+                        self.overlay = Some(Overlay::NewAction {
+                            focus: if name.is_empty() { 0 } else { 1 },
+                            name: Field::new(&name),
+                            command: Field::default(),
+                            format: 0,
+                            confirm: false,
+                            default: false,
+                            note,
+                        });
+                    }
                     KeyCode::Enter => {
                         let chosen = actions::filter(&self.config.actions, &field.value)
                             .get(index)
@@ -1918,34 +1965,6 @@ impl App {
                             self.overlay = None;
                             self.start_action(action, note);
                         }
-                    }
-                    KeyCode::Down | KeyCode::Tab => {
-                        self.overlay = Some(Overlay::Actions {
-                            field,
-                            index: step(index, 1),
-                            note,
-                        })
-                    }
-                    KeyCode::Up | KeyCode::BackTab => {
-                        self.overlay = Some(Overlay::Actions {
-                            field,
-                            index: step(index, -1),
-                            note,
-                        })
-                    }
-                    KeyCode::Char('n') if ctrl => {
-                        self.overlay = Some(Overlay::Actions {
-                            field,
-                            index: step(index, 1),
-                            note,
-                        })
-                    }
-                    KeyCode::Char('p') if ctrl => {
-                        self.overlay = Some(Overlay::Actions {
-                            field,
-                            index: step(index, -1),
-                            note,
-                        })
                     }
                     _ => {
                         // Typing filters, so the highlight goes back to the top.
@@ -1957,6 +1976,76 @@ impl App {
                         self.overlay = Some(Overlay::Actions { field, index, note });
                     }
                 }
+            }
+            Overlay::NewAction {
+                mut name,
+                mut command,
+                mut format,
+                mut confirm,
+                mut default,
+                mut focus,
+                note,
+            } => {
+                let fields = crate::ui::modals::NEW_ACTION_FIELDS;
+                match key.code {
+                    KeyCode::Esc => {
+                        self.overlay = Some(Overlay::Actions {
+                            field: Field::default(),
+                            index: 0,
+                            note,
+                        });
+                        return;
+                    }
+                    KeyCode::Tab | KeyCode::Down => focus = (focus + 1) % fields,
+                    KeyCode::BackTab | KeyCode::Up => focus = (focus + fields - 1) % fields,
+                    KeyCode::Enter if name.value.trim().is_empty() => focus = 0,
+                    KeyCode::Enter if command.value.trim().is_empty() => focus = 1,
+                    KeyCode::Enter => {
+                        let action = Action {
+                            name: name.value.trim().to_string(),
+                            command: command.value.trim().to_string(),
+                            format: FORMATS[format].id.to_string(),
+                            confirm,
+                            default,
+                            ..Action::default()
+                        };
+                        let form = Overlay::NewAction {
+                            name,
+                            command,
+                            format,
+                            confirm,
+                            default,
+                            focus,
+                            note: note.clone(),
+                        };
+                        self.save_new_action(action, form, note);
+                        return;
+                    }
+                    KeyCode::Left if focus == 2 => {
+                        format = (format + FORMATS.len() - 1) % FORMATS.len()
+                    }
+                    KeyCode::Right | KeyCode::Char(' ') if focus == 2 => {
+                        format = (format + 1) % FORMATS.len()
+                    }
+                    KeyCode::Char(' ') if focus == 3 => confirm = !confirm,
+                    KeyCode::Char(' ') if focus == 4 => default = !default,
+                    _ if focus == 0 => {
+                        Self::field_key(&mut name, &key);
+                    }
+                    _ if focus == 1 => {
+                        Self::field_key(&mut command, &key);
+                    }
+                    _ => {}
+                }
+                self.overlay = Some(Overlay::NewAction {
+                    name,
+                    command,
+                    format,
+                    confirm,
+                    default,
+                    focus,
+                    note,
+                });
             }
             Overlay::NewNote {
                 mut title,

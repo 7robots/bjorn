@@ -6,13 +6,30 @@ command of yours and reports what it said — `aws s3 cp`, `scp`, `curl`, `gh
 gist create`, `pbcopy`, a script of your own.
 
 - `!` runs the default action.
-- `a` opens the action palette: a search box over your actions, filtered as you
+- `a` opens the action menu: a search box over your actions, filtered as you
   type. `↑`/`↓` (or `ctrl+p`/`ctrl+n`, or `tab`) picks, `enter` runs, `esc`
-  closes.
+  closes. The default is marked ★, and under the list the highlighted action
+  is shown in full: its command, format, timeout and whether it asks first.
 
-`!` opens the palette instead when there is no default to run, and both keys
-say where to configure actions when none are set. Locked notes are refused, as
-they are for export.
+`!` opens the menu instead when there is no default to run; with no actions at
+all, the menu holds just **+ New action**. Locked notes are refused, as they
+are for export.
+
+## Adding one from the menu
+
+The last row of the menu, **+ New action**, opens a form: the name, the
+command, the format to render, whether it asks first, and whether it is the
+default. Type in the search box first and the name is filled in from it. `tab`
+or `↑`/`↓` moves between fields, `←`/`→` changes the format, `space` ticks a
+box, `enter` saves and `esc` goes back to the menu.
+
+Saving adds an `[[actions]]` entry to the end of the config file Bjorn read at
+start-up (or the one `--config` named). The file is edited as text, not
+rewritten, so your comments and layout stay as they were. Only one action is
+the default: if the new one is, the old entry's `default = true` becomes
+`default = false`, and the form says which one that is before you save.
+Nothing is written if the file does not parse, and the new action is in the
+menu straight away.
 
 ## Configuring
 

@@ -211,15 +211,20 @@ async fn html_actions_get_the_rendered_note() {
 }
 
 #[tokio::test]
-async fn without_actions_the_keys_say_where_to_configure_them() {
+async fn without_actions_the_menu_offers_to_add_one() {
     let fake = Fake::new();
     let mut h = fake.harness();
     h.load().await;
     h.press("a");
-    assert!(h.app.overlay.is_none());
-    assert!(h.text().contains("No actions configured"), "{}", h.text());
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Actions"));
+    assert!(h.text().contains("+ New action…"), "{}", h.text());
+    h.press("escape");
     h.press("!");
-    assert!(h.app.overlay.is_none());
+    assert_eq!(
+        h.app.overlay.as_ref().map(|o| o.name()),
+        Some("Actions"),
+        "with nothing to run, ! opens the menu"
+    );
 }
 
 #[tokio::test]
@@ -318,4 +323,185 @@ async fn actions_come_from_the_config_file() {
     let text = std::fs::read_to_string(&receipt).unwrap();
     assert!(text.starts_with("Sprint Planning\n"), "{text}");
     assert!(!text.contains("- [ ]"), "txt renders the checkbox: {text}");
+}
+
+#[tokio::test]
+async fn the_menu_marks_the_default_and_shows_the_highlighted_command() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![
+            Action {
+                name: "Copy".into(),
+                command: "pbcopy".into(),
+                ..Action::default()
+            },
+            Action {
+                name: "Publish".into(),
+                command: "aws s3 cp \"$BJORN_NOTE_FILE\" s3://notes/".into(),
+                format: "html".into(),
+                confirm: true,
+                default: true,
+                timeout: Duration::from_secs(300),
+            },
+        ],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("a");
+    let screen = h.text();
+    assert!(screen.contains("on “Sprint Planning”"), "{screen}");
+    assert_eq!(screen.matches("★ default").count(), 1, "{screen}");
+    assert!(
+        screen.contains("★ Publish is the default: ! runs it without opening this menu"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("$ pbcopy"),
+        "the first row's command: {screen}"
+    );
+
+    h.press("down");
+    let screen = h.text();
+    assert!(screen.contains("$ aws s3 cp"), "{screen}");
+    assert!(
+        screen.contains("renders as HTML · stops after 300 s · asks before running · runs on !"),
+        "{screen}"
+    );
+}
+
+#[tokio::test]
+async fn the_menu_says_how_to_set_a_default_when_there_is_none() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![
+            recording(fake.dir.path(), "Copy"),
+            recording(fake.dir.path(), "Publish"),
+        ],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("a");
+    let screen = h.text();
+    assert!(!screen.contains("★ default"), "{screen}");
+    assert!(screen.contains("no default yet"), "{screen}");
+}
+
+/// A harness whose config comes from a real file, so saving has somewhere to
+/// write that is not the user's own config.
+fn file_config(fake: &Fake, body: &str) -> (Config, std::path::PathBuf) {
+    let path = fake.dir.path().join("config.toml");
+    std::fs::write(&path, body).unwrap();
+    let loaded = Config::load(Some(&path)).unwrap();
+    let config = Config {
+        poll_seconds: 0,
+        icon_style: "none".into(),
+        export_dir: fake.dir.path().join("exports"),
+        ..loaded
+    };
+    (config, path)
+}
+
+#[tokio::test]
+async fn a_new_action_from_the_menu_is_saved_and_runs() {
+    let fake = Fake::new();
+    let receipt = fake.dir.path().join("saved");
+    let (config, path) = file_config(
+        &fake,
+        "# my notes config\nexport_format = \"md\"\n\n[[actions]]\nname = \"Copy\"\ncommand = \"true\"\ndefault = true  # keep me\n",
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+
+    h.press("a");
+    h.type_text("Save");
+    assert!(h.text().contains("+ New action “Save”"), "{}", h.text());
+    h.press("enter");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("NewAction"));
+    h.type_text(&format!(
+        "cp \"$BJORN_NOTE_FILE\" {}",
+        shell_quote(&receipt.to_string_lossy())
+    ));
+    for _ in 0..3 {
+        h.press("tab");
+    }
+    h.press("space");
+    assert!(
+        h.text().contains("“Copy” stops being the default"),
+        "{}",
+        h.text()
+    );
+    h.press("enter");
+    assert_eq!(
+        h.app.overlay.as_ref().map(|o| o.name()),
+        Some("Actions"),
+        "saving goes back to the menu"
+    );
+    assert!(
+        h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.contains("“Save” is saved in")),
+        "{:?}",
+        h.app.toast_messages()
+    );
+
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        body.starts_with("# my notes config\nexport_format = \"md\"\n"),
+        "{body}"
+    );
+    assert!(body.contains("default = false  # keep me"), "{body}");
+    let actions = Config::load(Some(&path)).unwrap().actions;
+    assert_eq!(actions.len(), 2, "{body}");
+    assert_eq!(
+        bjorn::actions::default_action(&actions).unwrap().name,
+        "Save"
+    );
+    assert_eq!(
+        h.app.config.actions, actions,
+        "the menu has it without a restart"
+    );
+
+    h.press("escape");
+    h.press("!");
+    h.until(|_| receipt.exists()).await;
+}
+
+#[tokio::test]
+async fn the_new_action_form_wants_a_name_and_a_command() {
+    let fake = Fake::new();
+    let (config, path) = file_config(&fake, "export_format = \"md\"\n");
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("a");
+    assert!(h.text().contains("+ New action…"), "{}", h.text());
+    h.press("enter");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("NewAction"));
+    h.press("enter");
+    assert_eq!(
+        h.app.overlay.as_ref().map(|o| o.name()),
+        Some("NewAction"),
+        "no name yet"
+    );
+    h.type_text("Nothing");
+    h.press("enter");
+    assert_eq!(
+        h.app.overlay.as_ref().map(|o| o.name()),
+        Some("NewAction"),
+        "no command yet"
+    );
+    h.press("escape");
+    assert_eq!(
+        h.app.overlay.as_ref().map(|o| o.name()),
+        Some("Actions"),
+        "esc goes back to the menu"
+    );
+    h.press("escape");
+    assert!(h.app.overlay.is_none());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "export_format = \"md\"\n"
+    );
 }

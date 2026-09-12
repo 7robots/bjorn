@@ -81,8 +81,11 @@ command = "pbcopy"
 format = "txt"
 ```
 
-`!` runs the default action; `a` opens the palette — a search box over your
-actions, filtered as you type, `enter` runs. The note is rendered the way
+`a` opens the action menu — a search box over your actions, filtered as you
+type, with the default marked ★ and the highlighted command shown in full;
+`enter` runs. `!` skips the menu and runs the default straight away. The
+menu's last row, **+ New action**, adds one and writes it into the config for
+you, comments and all. The note is rendered the way
 export renders it, written to a temp file the command gets as
 `$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in the
 environment; the file goes away when the command ends. The first line the
@@ -145,7 +148,7 @@ draws styled lines.
 ## Development
 
 ```sh
-cargo test                                 # 189 tests: unit, client, UI through a headless harness
+cargo test                                 # 195 tests: unit, client, UI through a headless harness
 cargo clippy --all-targets -- -D warnings
 cargo run --release --bin bjorn-gate       # acceptance gate against the live library
 cargo run --release --bin bjorn-gate -- --bench

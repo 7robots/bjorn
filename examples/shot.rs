@@ -61,6 +61,7 @@ async fn main() {
             .map(|name| bjorn::actions::Action {
                 name: (*name).to_string(),
                 command: "true".into(),
+                default: *name == "Publish to S3",
                 ..bjorn::actions::Action::default()
             })
             .collect(),
@@ -74,6 +75,17 @@ async fn main() {
     }
     if screen == "actions" {
         h.press("a");
+        h.settle().await;
+    }
+    if screen == "new-action" {
+        h.press("a");
+        h.type_text("Upload");
+        h.press("enter");
+        h.type_text("scp \"$BJORN_NOTE_FILE\" notes-host:notes/");
+        for _ in 0..3 {
+            h.press("tab");
+        }
+        h.press("space");
         h.settle().await;
     }
     h.draw();

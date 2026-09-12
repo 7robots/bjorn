@@ -25,7 +25,7 @@ Three columns: smart views and tags · notes · the rendered note.
 | `u` | restore from Trash or Archive |
 | `p` | toggle the global pin |
 | `!` | run the default action on the note; the action palette if no default is set |
-| `a` | the action palette: your `[[actions]]` from the config, filtered as you type (`enter` runs, `esc` closes) |
+| `a` | the action menu: your `[[actions]]` with a search box on top; ★ marks the default, the highlighted command is shown in full, and the last row (+ New action) adds one to the config (`enter` runs, `esc` closes) |
 | `x` | export the note: Markdown, HTML, plain text, RTF or TextBundle (`←` `→` pick, `export_format` sets the default) |
 | `b` | open the note in Bear.app |
 | `w` | make the highlighted tag the workspace; again to leave it (`W` also clears) |
@@ -118,6 +118,9 @@ impl Field {
     }
 }
 
+/// Rows in the new-action form: name, command, format, confirm, default.
+pub const NEW_ACTION_FIELDS: usize = 5;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Overlay {
     Confirm {
@@ -146,6 +149,18 @@ pub enum Overlay {
         index: usize,
         note: Note,
     },
+    /// The form behind the menu's last row: a new action for the config.
+    /// `focus` is the row: 0 name, 1 command, 2 format, 3 confirm, 4 default.
+    NewAction {
+        name: Field,
+        command: Field,
+        /// An index into `export::FORMATS`.
+        format: usize,
+        confirm: bool,
+        default: bool,
+        focus: usize,
+        note: Note,
+    },
     /// Title and tags for a new note; `field` is 0 for the title, 1 for the tags.
     NewNote {
         title: Field,
@@ -162,6 +177,7 @@ impl Overlay {
             Overlay::Format { .. } => "Format",
             Overlay::Text { .. } => "Text",
             Overlay::Actions { .. } => "Actions",
+            Overlay::NewAction { .. } => "NewAction",
             Overlay::NewNote { .. } => "NewNote",
         }
     }
