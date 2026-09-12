@@ -12,6 +12,7 @@ pub mod fake;
 pub mod harness;
 pub mod icons;
 pub mod model;
+pub mod pty;
 pub mod reminders;
 pub mod render;
 pub mod render_html;

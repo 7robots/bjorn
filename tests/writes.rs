@@ -518,3 +518,55 @@ async fn b_exports_a_textbundle_with_assets_and_rewritten_links() {
             .starts_with(b"\x89PNG")
     );
 }
+
+#[tokio::test]
+async fn editor_runs_inside_the_reader_pane() {
+    let fake = Fake::new();
+    // Draws a banner, waits for a line of input, appends it to the note.
+    let editor = fake_editor(
+        fake.dir.path(),
+        "editor.sh",
+        "printf 'EDITOR SCREEN %s' \"$COLUMNS$LINES\"; stty -echo 2>/dev/null; read -r line; printf '\\n%s\\n' \"$line\" >> \"$1\"",
+    );
+    let mut h = fake.harness_env(env(&[("EDITOR", &editor)]));
+    h.load().await;
+    h.press("e");
+    h.until(|app| app.editing.is_some()).await;
+    h.until(|app| {
+        app.editing
+            .as_ref()
+            .is_some_and(|e| e.pty.contents().contains("EDITOR SCREEN"))
+    })
+    .await;
+    h.draw();
+    let text = h.text();
+    // The editor's screen shows in the reader pane; the other columns stay up.
+    assert!(text.contains("EDITOR SCREEN"), "{text}");
+    assert!(text.contains("Editing · Sprint Planning"), "{text}");
+    assert!(text.contains("Sprint Planning"), "{text}");
+    assert!(text.contains("Keys go to the editor"), "{text}");
+    // The pty was sized to the pane, not the whole terminal.
+    let (cols, rows) = {
+        let e = h.app.editing.as_ref().unwrap();
+        let (rows, cols) = e.pty.size();
+        (cols, rows)
+    };
+    assert!((20..120).contains(&cols), "cols {cols}");
+    assert!((1..40).contains(&rows), "rows {rows}");
+    // Keys go to the editor, not to bjorn: `q` does not open the quit prompt.
+    h.press("q");
+    assert!(h.app.overlay.is_none());
+    for key in ["t", "y", "p", "e", "d", "enter"] {
+        h.press(key);
+    }
+    h.until(|app| app.editing.is_none()).await;
+    h.until(|app| app.reader.plain_text().contains("qtyped"))
+        .await;
+    let content = fake.client().cat("NOTE-PLANNING").await.unwrap();
+    assert!(
+        content.content.ends_with("qtyped\n"),
+        "{:?}",
+        content.content
+    );
+    assert!(!h.text().contains("Keys go to the editor"));
+}

@@ -10,8 +10,9 @@ of `bearcli` and `remctl` pass the Python suite.
 
 Three columns, like the app: smart views and a nested tag tree on the left,
 the notes list in the middle, the rendered note on the right. Editing is
-delegated to `$VISUAL`, then `$EDITOR`, then `vim`; writes back are
-hash-guarded. Search uses Bear's syntax through `bearcli search`, with
+delegated to `$VISUAL`, then `$EDITOR`, then `vim`, which runs in a
+pseudo-terminal drawn inside the reader pane so the other columns stay up;
+writes back are hash-guarded. Search uses Bear's syntax through `bearcli search`, with
 operator and tag completion in the box and match highlighting in the reader.
 `t` opens todo triage, with Apple Reminders through `remctl` when enabled.
 The keys, the config and the triage screen are documented in the Python

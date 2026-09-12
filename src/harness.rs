@@ -56,15 +56,11 @@ impl Harness {
             .expect("draw");
     }
 
-    /// Deliver pending messages, editor sessions and timers, then redraw.
+    /// Deliver pending messages and timers, then redraw. Editors run in a
+    /// pty here exactly as in the real main loop.
     fn pump(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             self.app.handle_msg(msg);
-        }
-        // Editors run inline here; the real main loop suspends the terminal first.
-        if let Some(job) = self.app.take_editor_job() {
-            let outcome = crate::editor::run(&job, true);
-            self.app.editor_done(job, outcome);
         }
         self.app.tick(Instant::now());
         self.draw();

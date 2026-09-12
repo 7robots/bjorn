@@ -63,9 +63,11 @@ untouched. Phase numbers continue from bjorn's last (21).
 - **Terminal.** Alternate screen, raw mode, cell-mode mouse capture. crossterm
   never negotiates pixel mouse mode, so the Tecolot workaround is moot;
   `mouse_pixels` and `--no-mouse-pixels` are accepted and ignored so the shared
-  config file keeps working. Editor: leave the alternate screen and raw mode,
-  run `$VISUAL`/`$EDITOR`/`vim` (config `editor` wins), restore; headless runs
-  it inline with a null stdin. Toasts are a timed queue drawn bottom-right.
+  config file keeps working. Editor: `$VISUAL`/`$EDITOR`/`vim` (config
+  `editor` wins) runs in a pty (`portable-pty`) sized to the reader pane; a
+  `vt100` screen parses its output and `tui-term` draws it there, keys and
+  mouse are encoded back as xterm sequences (`src/pty.rs`). The headless
+  harness takes the same path. Toasts are a timed queue drawn bottom-right.
 - **Config and icons.** Same `~/.config/bjorn/config.toml`, same keys and
   defaults, so both implementations can share it. `lucide-codepoints.json`
   copied and embedded with `include_str!`; the same style detection.

@@ -26,6 +26,7 @@ use crate::export::{
 };
 use crate::icons::IconSet;
 use crate::model::{Selection, View, duplicate_titles, select_notes, today};
+use crate::pty::PtySession;
 use crate::reminders::{
     RemctlClient, Status, join as join_reminders, remctl_found, resolve_remctl,
 };
@@ -83,6 +84,10 @@ pub enum Msg {
         job: EditorJob,
         result: Result<(), BearError>,
     },
+    /// The editor drew something; a redraw is due.
+    EditorOutput,
+    /// The editor process ended.
+    EditorExited(std::io::Result<portable_pty::ExitStatus>),
     Trashed {
         note: Note,
         result: Result<(), BearError>,
@@ -124,6 +129,14 @@ pub struct Rects {
     pub note_bar: Rect,
     pub glyph: Rect,
     pub reader_body: Rect,
+    /// Where the editor's screen is drawn while one is open.
+    pub editor: Rect,
+}
+
+/// An editor open in the reader pane.
+pub struct Editing {
+    pub job: EditorJob,
+    pub pty: PtySession,
 }
 
 pub struct App {
@@ -154,11 +167,11 @@ pub struct App {
     next_poll: Option<Instant>,
     poll_inflight: bool,
     reload_inflight: bool,
-    /// Set while the terminal is handed to an editor; the poll waits.
+    /// Set while an editor is open; the poll waits.
     pub busy: bool,
     written_titles: Vec<String>,
-    /// An editor session the main loop must run with the terminal suspended.
-    editor_job: Option<EditorJob>,
+    /// The editor running in the reader pane, if any. Every key goes to it.
+    pub editing: Option<Editing>,
     /// A note just created, to open in the editor once the reload shows it.
     pending_edit: Option<String>,
     /// The triage screen while it is up; it covers the three columns.
@@ -225,7 +238,7 @@ impl App {
             reload_inflight: false,
             busy: false,
             written_titles: Vec::new(),
-            editor_job: None,
+            editing: None,
             pending_edit: None,
             triage: None,
             remctl,
@@ -495,6 +508,8 @@ impl App {
                 Err(err) => self.error("Read failed", &err),
             },
             Msg::Written { job, result } => self.on_written(job, result),
+            Msg::EditorOutput => {}
+            Msg::EditorExited(status) => self.editor_exited(status),
             Msg::Trashed { note, result } => match result {
                 Ok(()) => {
                     self.forget_content(Some(&note.id));
@@ -1109,29 +1124,63 @@ impl App {
 
     fn open_editor(&mut self, note: Note, before: NoteContent) {
         let editor = resolve_editor(&self.config, &|name| self.env(name));
-        match editor::prepare(&note, &before, &editor) {
-            Ok(job) => {
-                self.busy = true;
-                self.editor_job = Some(job);
+        let job = match editor::prepare(&note, &before, &editor) {
+            Ok(job) => job,
+            Err(err) => {
+                self.notify_titled(
+                    "Edit failed",
+                    &format!("Could not write the temp file: {err}"),
+                    Severity::Error,
+                    Duration::from_secs(10),
+                );
+                return;
             }
-            Err(err) => self.notify_titled(
-                "Edit failed",
-                &format!("Could not write the temp file: {err}"),
-                Severity::Error,
-                Duration::from_secs(10),
-            ),
+        };
+        let output = self.tx.clone();
+        let exited = self.tx.clone();
+        let sink = (
+            move || {
+                let _ = output.send(Msg::EditorOutput);
+            },
+            move |status| {
+                let _ = exited.send(Msg::EditorExited(status));
+            },
+        );
+        let (cols, rows) = self.editor_viewport();
+        match PtySession::spawn(&job.command, rows, cols, sink) {
+            Ok(pty) => {
+                self.busy = true;
+                self.editing = Some(Editing { job, pty });
+            }
+            Err(err) => {
+                editor::cleanup(&job);
+                self.notify_titled(
+                    "Edit failed",
+                    &format!("Could not run the editor: {err}"),
+                    Severity::Error,
+                    Duration::from_secs(10),
+                );
+            }
         }
     }
 
-    /// The main loop (or the harness) asks for the editor session to run with
-    /// the terminal suspended, then reports back with `editor_done`.
-    pub fn take_editor_job(&mut self) -> Option<EditorJob> {
-        self.editor_job.take()
+    /// The pane the editor draws into, as (cols, rows).
+    fn editor_viewport(&self) -> (u16, u16) {
+        let (width, height) = self.reader_viewport();
+        (
+            width.min(u16::MAX as usize) as u16,
+            height.min(u16::MAX as usize) as u16,
+        )
     }
 
-    pub fn editor_done(&mut self, job: EditorJob, run: std::io::Result<()>) {
+    /// The editor process ended: read the file back and write it to Bear
+    /// if it changed.
+    fn editor_exited(&mut self, status: std::io::Result<portable_pty::ExitStatus>) {
+        let Some(Editing { job, .. }) = self.editing.take() else {
+            return;
+        };
         self.busy = false;
-        if let Err(err) = run {
+        if let Err(err) = status {
             self.notify_titled(
                 "Edit failed",
                 &format!("Could not run the editor: {err}"),
@@ -1165,6 +1214,13 @@ impl App {
                 .await;
             let _ = tx.send(Msg::Written { job, result });
         });
+    }
+
+    /// Stop an editor that is still running, for shutdown.
+    pub fn shutdown(&mut self) {
+        if let Some(editing) = self.editing.as_mut() {
+            editing.pty.kill();
+        }
     }
 
     fn on_written(&mut self, job: EditorJob, result: Result<(), BearError>) {
@@ -1336,6 +1392,10 @@ impl App {
     // -- input ---------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if let Some(editing) = self.editing.as_mut() {
+            editing.pty.send_key(key);
+            return;
+        }
         if let Some(overlay) = self.overlay.clone() {
             self.handle_overlay_key(overlay, key);
             return;
@@ -1558,6 +1618,19 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(editing) = self.editing.as_mut() {
+            let pane = self.rects.editor;
+            if mouse.column >= pane.x
+                && mouse.column < pane.right()
+                && mouse.row >= pane.y
+                && mouse.row < pane.bottom()
+            {
+                editing
+                    .pty
+                    .send_mouse(mouse, mouse.column - pane.x, mouse.row - pane.y);
+            }
+            return;
+        }
         if self.overlay.is_some() {
             return;
         }

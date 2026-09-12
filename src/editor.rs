@@ -1,4 +1,5 @@
 //! Handing a note to `$EDITOR`: the temp file, the command, the round trip.
+//! The editor itself runs in a pty inside the reader pane; see `pty`.
 
 use std::path::PathBuf;
 
@@ -28,21 +29,6 @@ pub fn prepare(note: &Note, before: &NoteContent, editor: &str) -> std::io::Resu
         tmp,
         command,
     })
-}
-
-/// Run the editor and wait for it. `headless` runs it with no stdin, for
-/// tests and the harness; the real main loop hands over the terminal first.
-pub fn run(job: &EditorJob, headless: bool) -> std::io::Result<()> {
-    let (program, args) = job
-        .command
-        .split_first()
-        .ok_or_else(|| std::io::Error::other("empty editor command"))?;
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args);
-    if headless {
-        cmd.stdin(std::process::Stdio::null());
-    }
-    cmd.status().map(|_| ())
 }
 
 /// The edited text, or the error reading it.

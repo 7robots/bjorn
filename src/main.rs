@@ -86,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
         ])));
     }
 
-    let mut guard = Some(TerminalGuard::enter()?);
+    let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut events = EventStream::new();
     app.start();
@@ -118,16 +118,8 @@ async fn main() -> anyhow::Result<()> {
         while let Ok(msg) = rx.try_recv() {
             app.handle_msg(msg);
         }
-        // An editor takes the terminal: leave the alternate screen, run it, come back.
-        if let Some(job) = app.take_editor_job() {
-            drop(guard.take());
-            let outcome = bjorn::editor::run(&job, false);
-            guard = Some(TerminalGuard::enter()?);
-            terminal.clear()?;
-            app.editor_done(job, outcome);
-        }
         app.tick(Instant::now());
     }
-    drop(guard);
+    app.shutdown();
     Ok(())
 }

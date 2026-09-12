@@ -22,6 +22,7 @@ use crate::search_box::HINT;
 use crate::ui::modals::{Field, Overlay, Severity};
 use crate::ui::note_list::ROW_HEIGHT;
 use crate::ui::note_view::column_glyph;
+use tui_term::widget::{Cursor, PseudoTerminal};
 
 pub const SIDEBAR_WIDTH: u16 = 30;
 pub const NOTES_WIDTH: u16 = 36;
@@ -79,7 +80,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         next += 1;
     }
     draw_reader(frame, app, areas[next], &mut rects);
-    draw_footer(frame, footer);
+    if app.editing.is_some() {
+        draw_footer_entries(frame, footer, EDITING_FOOTER);
+    } else {
+        draw_footer(frame, footer);
+    }
     app.rects = rects;
 
     draw_toasts(frame, app, body);
@@ -309,7 +314,10 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
         theme::header()
     };
     let glyph_width = UnicodeWidthStr::width(glyph) + 2;
-    let title = app.reader.header.clone();
+    let title = match &app.editing {
+        Some(editing) => format!("Editing · {}", editing.job.note.title),
+        None => app.reader.header.clone(),
+    };
     let pad =
         (bar.width as usize).saturating_sub(glyph_width + UnicodeWidthStr::width(title.as_str()));
     let line = Line::from(vec![
@@ -335,17 +343,46 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
     rects.reader_body = body;
     frame.render_widget(Clear, body);
     app.set_reader_viewport(inner.width as usize, inner.height as usize);
-    let lines = app
-        .reader
-        .visible(inner.width as usize, inner.height as usize);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    if let Some(editing) = app.editing.as_mut() {
+        // The editor's screen fills the reader body; the pane's own cursor
+        // stands in for the editor's.
+        rects.editor = inner;
+        editing.pty.resize(inner.height, inner.width);
+        let parser = editing.pty.parser();
+        let screen = parser.screen();
+        let widget = PseudoTerminal::new(screen).cursor(Cursor::default().visibility(false));
+        frame.render_widget(widget, inner);
+        if !screen.hide_cursor() {
+            let (row, col) = screen.cursor_position();
+            if row < inner.height && col < inner.width {
+                frame.set_cursor_position((inner.x + col, inner.y + row));
+            }
+        }
+    } else {
+        let lines = app
+            .reader
+            .visible(inner.width as usize, inner.height as usize);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
 
-    let meta_text = format!(" {}", app.reader.meta);
+    let meta_text = match &app.editing {
+        Some(editing) => format!(
+            " {} · quit the editor to save back to Bear",
+            editing.job.command[0]
+        ),
+        None => format!(" {}", app.reader.meta),
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(meta_text, theme::muted()))),
         meta,
     );
 }
+
+/// While an editor is open every key goes to it; the footer says so.
+pub const EDITING_FOOTER: &[(&str, &str)] = &[
+    ("editor", "Keys go to the editor"),
+    ("quit it", "Save back to Bear"),
+];
 
 pub const TRIAGE_FOOTER: &[(&str, &str)] = &[
     ("esc", "Close"),
