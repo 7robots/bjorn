@@ -1,17 +1,20 @@
 """The Python Bjorn's input-to-frame latency, the way `bjorn-gate --latency` measures the Rust one.
 
-    cd ~/GitHub/bjorn && .venv/bin/python ~/GitHub/bjorn-rust/tools/latency_python.py
+    cd ../bjorn && .venv/bin/python ../bjorn-rust/tools/latency_python.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import statistics
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path.home() / "GitHub" / "bjorn" / "src"))
+# The Python Bjorn: $BJORN_PY, else a `bjorn` checkout beside this one.
+BJORN_PY = Path(os.environ.get("BJORN_PY") or Path(__file__).resolve().parents[2] / "bjorn")
+sys.path.insert(0, str(BJORN_PY / "src"))
 
 from bjorn.app import BjornApp  # noqa: E402
 from bjorn.bear import BearClient, resolve_bearcli  # noqa: E402
@@ -34,7 +37,9 @@ def ms(seconds: float) -> float:
 
 
 async def main() -> None:
-    client = BearClient(resolve_bearcli(""))
+    from bjorn.config import preview_cache_path
+
+    client = BearClient(resolve_bearcli("")).use_preview_cache(preview_cache_path())
     app = BjornApp(Config(poll_seconds=0, icon_style="none"), client=client, environ={})
     async with app.run_test(size=(140, 44)) as pilot:
         await wait_until(lambda: app.loaded and app.note_list.notes)
@@ -56,7 +61,7 @@ async def main() -> None:
             await wait_until(lambda: app.note_view.note is not None and app.note_view.note.id != before and app.note_view._full_text is not None)
             reader_follow.append(ms(time.perf_counter() - t))
         print(f"cursor_key_to_frame_ms={statistics.median(key_frame):.1f}")
-        print(f"cursor_to_reader_ms={statistics.median(reader_follow):.0f}   (includes the 120 ms debounce and one bearcli cat)")
+        print(f"cursor_to_reader_ms={statistics.median(reader_follow):.0f}   (0 when the body is already in hand; else the 120 ms debounce and one bearcli cat)")
 
         # 2. View switches on the whole library.
         views = []

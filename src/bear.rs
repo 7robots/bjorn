@@ -37,6 +37,8 @@ pub const LIST_FIELDS: &str =
 /// When more notes than this need a fresh preview, one `list` with content is
 /// cheaper than a `cat` apiece.
 pub const PREVIEW_CAT_LIMIT: usize = 24;
+/// Bumped when the on-disk preview cache's shape changes.
+pub const PREVIEW_CACHE_VERSION: i64 = 1;
 /// How many `cat` processes run at once while previews are refreshed.
 pub const PREVIEW_CAT_CONCURRENCY: usize = 6;
 /// bearcli stamps `modified` to the second, so a note edited twice within one
@@ -369,11 +371,21 @@ pub struct Probe {
 pub struct Snapshot {
     pub notes: Vec<Note>,
     pub taken_at: Option<DateTime<Utc>>,
+    /// Bodies this snapshot already had in hand, by note id. The listing that
+    /// computes previews reads every note's content, so on a cold start the
+    /// whole library comes back for free and the reader never has to `cat`
+    /// again. Empty on the warm path, which lists metadata only. The stamp to
+    /// key them by is the note's own, so take it from `notes`.
+    pub bodies: Vec<(String, String)>,
     index: HashMap<String, usize>,
 }
 
 impl Snapshot {
     pub fn new(notes: Vec<Note>) -> Snapshot {
+        Snapshot::with_bodies(notes, Vec::new())
+    }
+
+    pub fn with_bodies(notes: Vec<Note>, bodies: Vec<(String, String)>) -> Snapshot {
         let index = notes
             .iter()
             .enumerate()
@@ -382,6 +394,7 @@ impl Snapshot {
         Snapshot {
             notes,
             taken_at: Some(Utc::now()),
+            bodies,
             index,
         }
     }
@@ -500,6 +513,13 @@ pub struct BearClient {
     /// a `list` with content, so a snapshot lists metadata only and fetches
     /// bodies just for the notes whose stamp moved.
     previews: Mutex<HashMap<String, (String, String)>>,
+    /// Where the previews are kept between runs, when the caller asked for it.
+    /// Without this every launch is a cold start: the preview listing has to
+    /// read every body, which is most of the second a cold start costs.
+    preview_cache: Option<PathBuf>,
+    /// What was last written, so an unchanged library is not rewritten on
+    /// every poll.
+    preview_cache_written: Mutex<Option<u64>>,
 }
 
 impl BearClient {
@@ -521,6 +541,106 @@ impl BearClient {
             runner,
             write_lock: tokio::sync::Mutex::new(()),
             previews: Mutex::new(HashMap::new()),
+            preview_cache: None,
+            preview_cache_written: Mutex::new(None),
+        }
+    }
+
+    /// Keep previews in `path` between runs, and read whatever is there now.
+    /// The file is a cache: anything unreadable, or from another bearcli, is
+    /// ignored and overwritten.
+    pub fn with_preview_cache(mut self, path: PathBuf) -> BearClient {
+        self.preview_cache = Some(path.clone());
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return self;
+        };
+        let Ok(doc) = serde_json::from_str::<Value>(&raw) else {
+            return self;
+        };
+        if doc.get("version").and_then(Value::as_i64) != Some(PREVIEW_CACHE_VERSION)
+            || text_of(doc.get("bearcli")) != self.describe()
+        {
+            return self;
+        }
+        if let Some(entries) = doc.get("previews").and_then(Value::as_object) {
+            {
+                let mut previews = self.previews.lock().unwrap();
+                previews.reserve(entries.len());
+                for (id, pair) in entries {
+                    if let Some(pair) = pair.as_array()
+                        && pair.len() == 2
+                    {
+                        previews.insert(
+                            id.clone(),
+                            (text_of(Some(&pair[0])), text_of(Some(&pair[1]))),
+                        );
+                    }
+                }
+            }
+            *self.preview_cache_written.lock().unwrap() = Some(self.preview_signature());
+        }
+        self
+    }
+
+    /// A cheap signature of which notes are covered and at which stamp.
+    fn preview_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // Order-independent: the map's iteration order is not stable.
+        let mut total: u64 = 0;
+        for (id, (stamp, _)) in self.previews.lock().unwrap().iter() {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut hasher);
+            stamp.hash(&mut hasher);
+            total = total.wrapping_add(hasher.finish());
+        }
+        total
+    }
+
+    /// Is there anything new to write? Polling takes a snapshot every few
+    /// seconds and an unchanged library must not rewrite the file each time.
+    pub fn preview_cache_dirty(&self) -> bool {
+        self.preview_cache.is_some()
+            && *self.preview_cache_written.lock().unwrap() != Some(self.preview_signature())
+    }
+
+    /// Write the previews out, if a cache path was given. Called after a
+    /// snapshot; a failure is not worth reporting, the next run just runs cold.
+    pub fn save_preview_cache(&self) {
+        let Some(path) = self.preview_cache.as_ref() else {
+            return;
+        };
+        let signature = self.preview_signature();
+        let entries: serde_json::Map<String, Value> = self
+            .previews
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, (stamp, text))| {
+                (
+                    id.clone(),
+                    Value::Array(vec![
+                        Value::String(stamp.clone()),
+                        Value::String(text.clone()),
+                    ]),
+                )
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "version": PREVIEW_CACHE_VERSION,
+            "bearcli": self.describe(),
+            "previews": Value::Object(entries),
+        });
+        let Ok(body) = serde_json::to_vec(&doc) else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Written beside the target and renamed, so a killed process never
+        // leaves half a cache behind.
+        let temp = path.with_extension("json.tmp");
+        if std::fs::write(&temp, &body).is_ok() && std::fs::rename(&temp, path).is_ok() {
+            *self.preview_cache_written.lock().unwrap() = Some(signature);
         }
     }
 
@@ -598,6 +718,7 @@ impl BearClient {
         let mut rows: Vec<Value> = Vec::new();
         let mut stale: Vec<Value> = Vec::new();
         let mut previews: HashMap<String, String> = HashMap::new();
+        let mut bodies: Vec<(String, String)> = Vec::new();
         let warm = !self.previews.lock().unwrap().is_empty();
         if warm {
             rows = Self::rows(
@@ -644,8 +765,13 @@ impl BearClient {
                 .await?,
             );
             for row in &rows {
-                let text = preview(&text_of(row.get("content")), PREVIEW_LIMIT);
-                previews.insert(text_of(row.get("id")), self.remember_preview(row, text));
+                let body = text_of(row.get("content"));
+                let text = preview(&body, PREVIEW_LIMIT);
+                let id = text_of(row.get("id"));
+                if !recently_modified_str(&Self::stamp(row)) {
+                    bodies.push((id.clone(), body));
+                }
+                previews.insert(id, self.remember_preview(row, text));
             }
         } else if !stale.is_empty() {
             let semaphore = Arc::new(Semaphore::new(PREVIEW_CAT_CONCURRENCY));
@@ -658,11 +784,15 @@ impl BearClient {
                         Ok(content) => content.content,
                         Err(_) => String::new(), // locked, or gone since the list
                     };
-                    (row, preview(&body, PREVIEW_LIMIT))
+                    (row, preview(&body, PREVIEW_LIMIT), body)
                 }
             });
-            for (row, text) in futures::future::join_all(reads).await {
-                previews.insert(text_of(row.get("id")), self.remember_preview(row, text));
+            for (row, text, body) in futures::future::join_all(reads).await {
+                let id = text_of(row.get("id"));
+                if !body.is_empty() && !recently_modified_str(&Self::stamp(row)) {
+                    bodies.push((id.clone(), body));
+                }
+                previews.insert(id, self.remember_preview(row, text));
             }
         }
         let notes: Vec<Note> = rows
@@ -680,7 +810,7 @@ impl BearClient {
             .lock()
             .unwrap()
             .retain(|id, _| live.contains(id.as_str()));
-        Ok(Snapshot::new(notes))
+        Ok(Snapshot::with_bodies(notes, bodies))
     }
 
     fn stamp(row: &Value) -> String {
@@ -1336,6 +1466,62 @@ mod tests {
         let mut ids = client.preview_ids();
         ids.sort();
         assert_eq!(ids, vec!["N1", "N2"]);
+    }
+
+    #[tokio::test]
+    async fn previews_survive_a_restart_through_the_cache_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("previews.json");
+        let rows: Vec<Value> = (0..3).map(|i| row(i, "2026-09-01T00:00:00Z")).collect();
+
+        let rec = Recorder::new(rows.clone());
+        let first = client(&rec).with_preview_cache(path.clone());
+        assert!(first.preview_cache_dirty(), "nothing written yet");
+        first.snapshot().await.unwrap();
+        assert_eq!(rec.kinds(), vec!["list+content"], "a cold start reads bodies");
+        first.save_preview_cache();
+        assert!(!first.preview_cache_dirty(), "the file is up to date");
+
+        // A second run, same library: the cache means metadata only.
+        let rec = Recorder::new(rows);
+        let restarted = client(&rec).with_preview_cache(path.clone());
+        let snap = restarted.snapshot().await.unwrap();
+        assert_eq!(rec.kinds(), vec!["list"]);
+        assert!(snap.by_id("N0").unwrap().preview.contains("2026-09-01"));
+        assert!(snap.bodies.is_empty(), "no bodies were read to get there");
+
+        // Another bearcli's cache is not this one's.
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({
+                "version": PREVIEW_CACHE_VERSION,
+                "bearcli": "somewhere/else/bearcli",
+                "previews": {"N0": ["2026-09-01T00:00:00Z", "stale"]},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let rec = Recorder::new((0..3).map(|i| row(i, "2026-09-01T00:00:00Z")).collect());
+        let elsewhere = client(&rec).with_preview_cache(path.clone());
+        elsewhere.snapshot().await.unwrap();
+        assert_eq!(rec.kinds(), vec!["list+content"]);
+
+        // So is a corrupt one.
+        std::fs::write(&path, "{not json").unwrap();
+        let rec = Recorder::new((0..3).map(|i| row(i, "2026-09-01T00:00:00Z")).collect());
+        let broken = client(&rec).with_preview_cache(path);
+        broken.snapshot().await.unwrap();
+        assert_eq!(rec.kinds(), vec!["list+content"]);
+    }
+
+    #[tokio::test]
+    async fn a_cold_snapshot_hands_back_the_bodies_it_read() {
+        let rec = Recorder::new((0..3).map(|i| row(i, "2026-09-01T00:00:00Z")).collect());
+        let snap = client(&rec).snapshot().await.unwrap();
+        let mut ids: Vec<&str> = snap.bodies.iter().map(|(id, _)| id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["N0", "N1", "N2"]);
+        assert!(snap.bodies.iter().all(|(_, body)| !body.is_empty()));
     }
 
     #[tokio::test]

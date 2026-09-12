@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::bear::display_tag;
@@ -323,22 +323,19 @@ impl Triage {
         let mut spans: Vec<Span<'static>> = Vec::new();
         spans.push(Span::styled(
             if row.marked { "● " } else { "  " },
-            base.fg(if row.marked {
-                Color::Yellow
+            if row.marked {
+                base.fg(theme::warning_color())
             } else {
-                Color::Reset
-            }),
+                base
+            },
         ));
         if self.reminders_enabled {
-            let color = match row.status {
-                Status::Done => Color::Green,
-                Status::Added => Color::Cyan,
-                Status::New => Color::Reset,
+            let style = match row.status {
+                Status::Done => base.fg(theme::success_color()),
+                Status::Added => base.fg(theme::accent_color()),
+                Status::New => base,
             };
-            spans.push(Span::styled(
-                format!("{} ", status_glyph(row.status)),
-                base.fg(color),
-            ));
+            spans.push(Span::styled(format!("{} ", status_glyph(row.status)), style));
         }
         spans.push(Span::styled(
             "☐ ",

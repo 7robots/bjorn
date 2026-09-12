@@ -34,11 +34,39 @@ bjorn-rs --demo       # sample notes through the built-in fake bearcli, no Bear 
 
 The launcher is `bjorn-rs` so the Python `bjorn` can stay installed beside it.
 
+## Themes
+
+The palette comes from `theme` in the shared config file, or `--theme` on the
+command line (`--list-themes` prints them):
+
+| Name | |
+|---|---|
+| `textual-dark` | the default; what the Python Bjorn draws through Textual's own theme, matched colour for colour |
+| `red-graphite` | Bear's Red Graphite: the graphite sidebar beside a white page, coral red (`#CD5654`) on the focused column, the cursor, the bullets, the links and the tags |
+| `red-graphite-dark` | the same red over Bear's graphite, for a dark terminal |
+
+```sh
+bjorn-rs --theme red-graphite
+```
+
+```toml
+# ~/.config/bjorn/config.toml
+theme = "red-graphite"
+```
+
+The Python Bjorn carries the same three, so one config file dresses both. An
+unknown name falls back to the default rather than stopping the app, because
+the config is shared and the Python build also accepts Textual's own themes.
+
 ## What differs from the Python Bjorn
 
 - The reader renders the whole note in one pass and draws only the viewport.
   The Python version renders long notes in two halves (80 lines, then the
   rest) and mounts the notes list in windows of 120 rows; neither exists here.
+- The reader does not wait for a note it already has: the cursor's neighbours
+  are read ahead, a cold start keeps the bodies the preview listing had to read
+  anyway, and the 120 ms debounce applies only to a body that has to come from
+  bearcli. Holding `j` down scrolls the reader with the list.
 - Search highlighting reaches fenced code and table cells.
 - Every `bearcli` and `remctl` call has a 30 s timeout.
 - `mouse_pixels` and `--no-mouse-pixels` are accepted and ignored: the mouse
@@ -47,41 +75,59 @@ The launcher is `bjorn-rs` so the Python `bjorn` can stay installed beside it.
 
 ## Measurements
 
-Both implementations against the same live library of 1002 notes, headless,
-under `caffeinate`, each number the second of two runs that agreed. Timings
-that go through `bearcli` are the same in both, as they should be: the Rust
-build changes what happens after bearcli answers.
+Both implementations against the same live library, headless, under
+`caffeinate`. Timings that go through `bearcli` are the same in both, as they
+should be: the Rust build changes what happens after bearcli answers.
 
 | | Python (Textual) | Rust (ratatui) |
 |---|---|---|
-| Start to first frame | 1189 ms | 1088 ms |
-| Cold snapshot (`list` with content) | 986 ms | 893 ms |
-| Warm snapshot (metadata only) | 291 ms | 286 ms |
-| Change probe (two `list` calls) | 38 ms | 36 ms |
-| Longest note (169 KB, 3313 lines): render and show | 5848 ms | 62 ms |
+| Start to first frame, previews cached | 883 ms | 440 ms |
+| Start to first frame, no cache | 1331 ms | 1197 ms |
+| Cold snapshot (`list` with content) | 1143 ms | 1022 ms |
+| Warm snapshot (metadata only) | 301 ms | 293 ms |
+| Change probe (two `list` calls) | 63 ms | 40 ms |
+| Longest note (97 KB, 1778 lines): render and show | 5437 ms | 46 ms |
 | Peak resident memory | 379 MB | 43 MB |
 | Installed size | 23 MB venv plus Python 3.12 | 4.2 MB binary |
 
-The Rust build's own work at startup is under 200 ms of the 1.1 s; the rest is
-bearcli listing a thousand notes with their content. The long-note number is
-the difference that is felt: Textual mounts one widget per markdown block,
-ratatui draws styled lines.
+Input to frame, median of repeated presses on a 213-note library:
+
+| | Python (Textual) | Rust (ratatui) |
+|---|---|---|
+| `j` in the notes list, key to frame | 120 ms | 0.4 ms |
+| the reader catching up with the cursor | 55 ms | 0 ms |
+| switching smart views (whole library) | 307 ms | 0.4 ms |
+| `tab` between columns | 106 ms | 0.3 ms |
+| a frame with nothing changed | 43 ms | 0.3 ms |
+| `F`, unfolding every tag | 213 ms | 0.4 ms |
+
+Everything the app does itself lands inside a frame; what is left is bearcli,
+which both pay equally. Two things made the difference to how it feels: the
+previews are kept in `~/.cache/bjorn/previews.json` between runs, so a launch
+lists metadata instead of reading every body to build them again; and the
+reader never waits for a note it already has — the cold listing's bodies are
+kept, the cursor's neighbours are read ahead, and only a body that has to come
+from bearcli waits out the debounce. The long-note number is the other
+difference that is felt: Textual mounts one widget per markdown block, ratatui
+draws styled lines.
 
 ## Development
 
 ```sh
-cargo test                                 # 153 tests: unit, client, UI through a headless harness
+cargo test                                 # 167 tests: unit, client, UI through a headless harness
 cargo clippy --all-targets -- -D warnings
 cargo run --release --bin bjorn-gate       # acceptance gate against the live library
 cargo run --release --bin bjorn-gate -- --bench
+cargo run --release --bin bjorn-gate -- --latency
+cargo run --example shot -- --theme red-graphite --out /tmp/shot.json
+uv run --with pillow python tools/shot.py /tmp/shot.json /tmp/shot.png
 ```
 
 The Python suite runs against the Rust fakes with the plugin in `tools/`:
 
 ```sh
-cd ~/GitHub/bjorn
-BJORN_RUST_BIN=~/GitHub/bjorn-rust/target/release PYTHONPATH=~/GitHub/bjorn-rust/tools \
-  uv run pytest -p pytest_rust_fake -q
+cd ../bjorn
+PYTHONPATH=../bjorn-rust/tools uv run pytest -p pytest_rust_fake -q
 ```
 
 The plan and its status live in `docs/plans/bjorn-rust.md`; deferred work in

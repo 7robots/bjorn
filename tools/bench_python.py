@@ -1,17 +1,20 @@
 """The Python Bjorn measured the way `bjorn-gate --bench` measures the Rust one.
 
-    cd ~/GitHub/bjorn && .venv/bin/python ~/GitHub/bjorn-rust/tools/bench_python.py
+    cd ../bjorn && .venv/bin/python ../bjorn-rust/tools/bench_python.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 from pathlib import Path
 
 STARTED = time.perf_counter()
-sys.path.insert(0, str(Path.home() / "GitHub" / "bjorn" / "src"))
+# The Python Bjorn: $BJORN_PY, else a `bjorn` checkout beside this one.
+BJORN_PY = Path(os.environ.get("BJORN_PY") or Path(__file__).resolve().parents[2] / "bjorn")
+sys.path.insert(0, str(BJORN_PY / "src"))
 
 from bjorn.app import BjornApp  # noqa: E402
 from bjorn.bear import BearClient, resolve_bearcli  # noqa: E402
@@ -30,7 +33,11 @@ async def wait_until(pred, timeout: float = 60.0) -> None:
 
 
 async def main() -> None:
-    client = BearClient(resolve_bearcli(""))
+    # As the app starts: previews from the last run are what make the first
+    # frame warm.
+    from bjorn.config import preview_cache_path
+
+    client = BearClient(resolve_bearcli("")).use_preview_cache(preview_cache_path())
     app = BjornApp(Config(poll_seconds=0, icon_style="none"), client=client, environ={})
     async with app.run_test(size=(140, 44)) as pilot:
         await wait_until(lambda: app.loaded and app.note_list.notes)

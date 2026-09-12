@@ -31,6 +31,12 @@ struct Cli {
     /// run against a built-in fake bearcli with sample notes
     #[arg(long)]
     demo: bool,
+    /// palette to draw with (overrides config): textual-dark, red-graphite, red-graphite-dark
+    #[arg(long, value_name = "NAME")]
+    theme: Option<String>,
+    /// list the palettes `--theme` accepts and exit
+    #[arg(long)]
+    list_themes: bool,
     /// accepted for compatibility with the Python Bjorn; the Rust build always keeps the mouse in cell mode
     #[arg(long)]
     no_mouse_pixels: bool,
@@ -68,7 +74,23 @@ impl Drop for TerminalGuard {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if cli.list_themes {
+        for name in bjorn::ui::theme::names() {
+            println!("{name}");
+        }
+        return Ok(());
+    }
     let mut config = Config::load(cli.config.as_deref())?;
+    if let Some(theme) = cli.theme.as_deref() {
+        config.theme = theme.trim().to_lowercase();
+    }
+    if bjorn::ui::theme::lookup(&config.theme).is_none() {
+        anyhow::bail!(
+            "unknown theme {:?}; try one of: {}",
+            config.theme,
+            bjorn::ui::theme::names().collect::<Vec<_>>().join(", ")
+        );
+    }
     if cli.demo {
         config.reminders.enabled = true;
     }
@@ -77,7 +99,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         vec![resolve_bearcli(&config.bearcli)]
     };
-    let client = Arc::new(BearClient::new(command));
+    // Previews from the last run turn what would be a cold snapshot (every
+    // body read to build them) into a warm one. Demo runs get their own file
+    // so the fake library never stands in for the real one.
+    let cache = if cli.demo {
+        bjorn::config::cache_dir().join("previews-demo.json")
+    } else {
+        bjorn::config::preview_cache_path()
+    };
+    let client = Arc::new(BearClient::new(command).with_preview_cache(cache));
     let environ: std::collections::HashMap<String, String> = std::env::vars().collect();
     let (mut app, mut rx) = App::new(config, client, cli.tag.as_deref(), environ);
     if cli.demo {

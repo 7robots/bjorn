@@ -408,7 +408,12 @@ async fn gate(body_term: String, title_term: String, tag_prefix: String) {
 
 async fn bench() {
     let started = Instant::now();
-    let client = Arc::new(BearClient::new(vec![resolve_bearcli("")]));
+    // As the binary starts: previews from the last run are what make the
+    // first frame warm.
+    let client = Arc::new(
+        BearClient::new(vec![resolve_bearcli("")])
+            .with_preview_cache(bjorn::config::preview_cache_path()),
+    );
     let mut h = Harness::new(config(), client.clone(), None, (140, 44));
     h.load().await;
     let first_frame = started.elapsed();
@@ -467,7 +472,10 @@ async fn bench() {
 /// list cursor, the reader following it, switching views, cycling focus,
 /// and a broad search. Each figure is the median of `n` repetitions.
 async fn latency() {
-    let client = Arc::new(BearClient::new(vec![resolve_bearcli("")]));
+    let client = Arc::new(
+        BearClient::new(vec![resolve_bearcli("")])
+            .with_preview_cache(bjorn::config::preview_cache_path()),
+    );
     let mut h = Harness::new(config(), client.clone(), None, (140, 44));
     h.load().await;
     let n = h.app.notes.len();
@@ -497,7 +505,7 @@ async fn latency() {
     }
     println!("cursor_key_to_frame_ms={:.1}", median(key_frame));
     println!(
-        "cursor_to_reader_ms={:.0}   (includes the 120 ms debounce and one bearcli cat)",
+        "cursor_to_reader_ms={:.0}   (0 when the body is already in hand; else the 120 ms debounce and one bearcli cat)",
         median(reader_follow)
     );
 

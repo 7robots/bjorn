@@ -236,6 +236,11 @@ impl Harness {
             .collect()
     }
 
+    /// The whole drawn buffer, for tools that dump it.
+    pub fn buffer(&self) -> &ratatui::buffer::Buffer {
+        self.terminal.backend().buffer()
+    }
+
     pub fn cell_bg(&self, x: u16, y: u16) -> Color {
         self.terminal.backend().buffer()[(x, y)].bg
     }
