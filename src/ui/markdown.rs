@@ -612,7 +612,10 @@ pub fn wrap(line: &RLine, width: usize) -> Vec<Line<'static>> {
             new_row(&mut rows, &mut current, &mut used);
             continue;
         }
-        if used > cont_width || (used > 0 && rows.is_empty() && used > cont_width) {
+        // Break only if this row holds something of its own: on a continuation
+        // row `used` starts at the prefix's width, and the first row's spans
+        // carry that same prefix, so `cont_width` is the empty mark on both.
+        if used > cont_width {
             new_row(&mut rows, &mut current, &mut used);
         }
         if used + w <= width {

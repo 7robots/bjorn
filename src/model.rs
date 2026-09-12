@@ -229,7 +229,8 @@ pub fn build_tag_tree(snapshot: &Snapshot, workspace: &str, location: Location) 
             continue;
         }
         for tag in &note.tags {
-            if !workspace.is_empty() && !(*tag == workspace || tag.starts_with(&prefix)) {
+            let outside = !workspace.is_empty() && *tag != workspace && !tag.starts_with(&prefix);
+            if outside {
                 continue;
             }
             let parts: Vec<&str> = tag.split('/').collect();
