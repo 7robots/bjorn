@@ -7,7 +7,7 @@
 //! base theme's `$base.accent color` picks up the child's accent.
 //!
 //! Each file becomes one `Theme`, named after the file (`Rosé Pine.theme` is
-//! `rosé-pine`). Bear ships no dark Red Graphite, so `red-graphite-dark` is
+//! `rose-pine`). Bear ships no dark Red Graphite, so `red-graphite-dark` is
 //! derived: Dark Graphite with Red Graphite's accent.
 //!
 //! Bear.app is strictly read-only to Bjorn. Nothing here writes, creates,
@@ -37,12 +37,29 @@ const MAX_DEPTH: usize = 16;
 /// Bear's theme files are about 5 KB; anything past this is not one.
 const MAX_BYTES: u64 = 256 * 1024;
 
-/// The name a theme file goes by: lowercase, words joined by `-`.
+/// The name a theme file goes by: lowercase, words joined by `-`, accents
+/// folded away (`Rosé Pine` is `rose-pine`). macOS stores file names
+/// decomposed (`e` + U+0301) while a typed `é` is one character, so folding
+/// both to `e` is what lets the two meet.
 pub fn slug(name: &str) -> String {
     name.split_whitespace()
         .collect::<Vec<_>>()
         .join("-")
         .to_lowercase()
+        .chars()
+        .filter(|c| !('\u{300}'..='\u{36F}').contains(c))
+        .map(|c| match c {
+            'à'..='å' => 'a',
+            'ç' => 'c',
+            'è'..='ë' => 'e',
+            'ì'..='ï' => 'i',
+            'ñ' => 'n',
+            'ò'..='ö' | 'ø' => 'o',
+            'ù'..='ü' => 'u',
+            'ý' | 'ÿ' => 'y',
+            c => c,
+        })
+        .collect()
 }
 
 /// Every theme in `dir` that parses, plus the derived `red-graphite-dark`,
@@ -347,7 +364,10 @@ mod tests {
 
     #[test]
     fn names_are_slugs_of_the_file_name() {
-        assert_eq!(slug("Rosé Pine Dawn"), "rosé-pine-dawn");
+        assert_eq!(slug("Rosé Pine Dawn"), "rose-pine-dawn");
+        // A macOS file name: `e` followed by a combining acute accent.
+        assert_eq!(slug("Rose\u{301} Pine"), "rose-pine");
+        assert_eq!(slug("Rose\u{301} Pine"), slug("Rosé Pine"));
         assert_eq!(slug("  Red   Graphite "), "red-graphite");
     }
 

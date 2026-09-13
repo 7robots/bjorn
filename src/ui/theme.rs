@@ -295,8 +295,8 @@ pub fn current() -> &'static Theme {
         .unwrap_or_else(|| &bear()[index - BUILT_IN.len()])
 }
 
-/// The theme called `name`, ignoring case and spacing (`Rosé Pine`,
-/// `rosé-pine`); `None` when there is no such theme.
+/// The theme called `name`, ignoring case, spacing and accents (`Rosé Pine`,
+/// `rose-pine`); `None` when there is no such theme.
 pub fn lookup(name: &str) -> Option<usize> {
     find(name, bear)
 }

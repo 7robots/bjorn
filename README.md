@@ -57,7 +57,7 @@ theme = "red-graphite"
 
 Every theme Bear ships is available too: `--theme nord`, `--theme "Rosé Pine"`,
 `--theme solarized-dark`. Names are the file names, lowercased, with spaces as
-`-`, and a theme that names a `base theme` inherits from it, as in Bear.
+`-` and accents dropped (`rose-pine`), and a theme that names a `base theme` inherits from it, as in Bear.
 
 Bear's themes are read from
 `/Applications/Bear.app/Contents/Frameworks/BearCore.framework/Versions/A/Resources`,
