@@ -73,6 +73,10 @@ async fn main() {
         h.press("t");
         h.settle().await;
     }
+    if screen == "help" {
+        h.press("?");
+        h.settle().await;
+    }
     if screen == "actions" {
         h.press("a");
         h.settle().await;

@@ -405,7 +405,7 @@ async fn unknown_theme_in_the_config_keeps_the_default_and_says_so() {
     // default and says so.
     let fake = Fake::new();
     let config = bjorn::config::Config {
-        theme: "gruvbox".into(),
+        theme: "mauve-mist".into(),
         ..fake.config()
     };
     let mut h = fake.harness_with(config, None);
@@ -415,7 +415,7 @@ async fn unknown_theme_in_the_config_keeps_the_default_and_says_so() {
         h.app
             .toast_messages()
             .iter()
-            .any(|m| m.contains("gruvbox") && m.contains(theme::DEFAULT_THEME)),
+            .any(|m| m.contains("mauve-mist") && m.contains(theme::DEFAULT_THEME)),
         "{:?}",
         h.app.toast_messages()
     );

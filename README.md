@@ -149,25 +149,30 @@ command line (`--list-themes` prints them):
 | `textual-dark` | the default: a dark grey page with blue accents |
 | `red-graphite` | Bear's Red Graphite: the graphite sidebar beside a white page, coral red (`#CD5654`) on the focused column, the cursor, the bullets, the links and the tags |
 | `red-graphite-dark` | the same red over Bear's graphite, for a dark terminal |
-| `nord` | Bear's Nord: polar night surfaces, frost blue accent |
-| `dracula` | Bear's Dracula: purple on near-black, pink cursor |
-| `tokyo-night` | Bear's Tokyo Night: navy page, blue accent |
-| `tokyo-night-light` | Bear's Tokyo Night Light: the same palette over a pale grey page |
-| `catppuccin-latte` | Bear's Catppuccin Latte: warm white page, mauve accent |
-| `catppuccin-macchiato` | Bear's Catppuccin Macchiato: the dark roast, lavender accent |
-| `shibuya-jazz` | Bear's Shibuya Jazz: black page, teal headings, dusty pink accent |
-| `shibuya-lo-fi` | Bear's Shibuya Lo-fi: black page, lilac headings, sea-green accent |
+
+Every other theme Bear ships is here too, under its Bear name in lower case
+with hyphens for spaces:
+
+> `academia` `atom` `ayu` `ayu-mirage` `catppuccin-latte`
+> `catppuccin-macchiato` `charcoal` `cobalt` `d-boring` `dark-graphite`
+> `dark-notes` `dieci` `dracula` `duotone-heat` `duotone-light`
+> `duotone-snow` `everforest-dark` `everforest-light` `gandalf` `gotham`
+> `gruvbox` `high-contrast` `lighthaus` `nord` `nord-light` `notes`
+> `olive-dunk` `panic-mode` `print` `rose-pine` `rose-pine-dawn`
+> `shibuya-jazz` `shibuya-lo-fi` `solarized-dark` `solarized-light`
+> `tokyo-night` `tokyo-night-light` `toothpaste`
 
 ```sh
-bjorn --theme red-graphite
+bjorn --theme nord
 ```
 
-The eight Bear themes are generated from the theme files inside Bear.app by
+They are generated from the theme files inside Bear.app by
 `tools/bear_theme.py`, which maps Bear's keys onto the app's palette fields
-(page, sidebar, headers, cursor, links, code, tags) and takes the toast
-colours from the palette each theme is named after. Adding another Bear theme
-is one line in that script; `python3 tools/bear_theme.py > src/ui/palettes.rs`
-regenerates the file.
+(page, sidebar, headers, cursor, links, code, tags). The toast colours come
+from the palette a theme is named after, or from Bear's highlighter colours
+for Bear's own designs; text over the accent is chosen for contrast. When a
+Bear update adds a theme, `python3 tools/bear_theme.py > src/ui/palettes.rs`
+picks it up. `?` inside the app lists the names and marks the one in use.
 
 An unknown name in the config falls back to the default with a warning rather
 than stopping the app. An unknown `--theme` on the command line is an error.

@@ -10,35 +10,53 @@ references and maps Bear's keys onto the fields of `ui::theme::Theme`, filling
 the few things Bear has no word for (a focus tint, the toast colours) by
 blending or from the palette the theme is named after.
 
-The mapping is fixed here rather than tuned per theme, so a new Bear theme is
-one line in THEMES. `red-graphite` and its dark twin stay hand-tuned in
-theme.rs; they were sampled from the app before this existed.
+The mapping is fixed here rather than tuned per theme, and every theme file
+Bear ships is converted, so a Bear update that adds one needs only a rerun.
+`red-graphite` and its dark twin stay hand-tuned in theme.rs; they were
+sampled from the app before this existed.
 """
 
 from __future__ import annotations
 
+import colorsys
 import json
 import sys
+import unicodedata
 from pathlib import Path
 
 BEAR = Path(
     "/Applications/Bear.app/Contents/Frameworks/BearCore.framework/Versions/A/Resources"
 )
 
-# (Bear theme file, config name, (success, warning, error)). The three toast
-# colours are the green, yellow and red of the palette each theme is named
-# after; Bear's files carry none. The Shibuya pair are Bear originals, so
-# theirs come from their own syntax-highlight tables.
-THEMES = [
-    ("Nord", "nord", ("#A3BE8C", "#EBCB8B", "#BF616A")),
-    ("Dracula", "dracula", ("#50FA7B", "#F1FA8C", "#FF5555")),
-    ("Tokyo Night", "tokyo-night", ("#9ECE6A", "#E0AF68", "#F7768E")),
-    ("Tokyo Night Light", "tokyo-night-light", ("#587539", "#8F5E15", "#F52A65")),
-    ("Catppuccin Latte", "catppuccin-latte", ("#40A02B", "#DF8E1D", "#D20F39")),
-    ("Catppuccin Macchiato", "catppuccin-macchiato", ("#A6DA95", "#EED49F", "#ED8796")),
-    ("Shibuya Jazz", "shibuya-jazz", ("#4EA9A9", "#E38E13", "#D84848")),
-    ("Shibuya Lo-fi", "shibuya-lo-fi", ("#2FA288", "#FBA80B", "#D84848")),
-]
+# The three toast colours (success, warning, error) are the green, yellow and
+# red of the palette each theme is named after; Bear's files carry none. A
+# theme that is Bear's own, or whose palette has no such triad, is left out
+# here and gets them derived from its highlighter colours instead.
+SEMANTICS = {
+    "Atom": ("#98C379", "#E5C07B", "#E06C75"),
+    "Ayu": ("#86B300", "#F2AE49", "#F51818"),
+    "Ayu Mirage": ("#BAE67E", "#FFD580", "#FF3333"),
+    "Catppuccin Latte": ("#40A02B", "#DF8E1D", "#D20F39"),
+    "Catppuccin Macchiato": ("#A6DA95", "#EED49F", "#ED8796"),
+    "Cobalt": ("#3AD900", "#FFC600", "#FF628C"),
+    "Dracula": ("#50FA7B", "#F1FA8C", "#FF5555"),
+    "Everforest Dark": ("#A7C080", "#DBBC7F", "#E67E80"),
+    "Everforest Light": ("#8DA101", "#DFA000", "#F85552"),
+    "Gruvbox": ("#79740E", "#B57614", "#9D0006"),
+    "Nord": ("#A3BE8C", "#EBCB8B", "#BF616A"),
+    "Rosé Pine": ("#31748F", "#F6C177", "#EB6F92"),
+    "Rosé Pine Dawn": ("#286983", "#EA9D34", "#B4637A"),
+    "Shibuya Jazz": ("#4EA9A9", "#E38E13", "#D84848"),
+    "Shibuya Lo-fi": ("#2FA288", "#FBA80B", "#D84848"),
+    "Solarized Dark": ("#859900", "#B58900", "#DC322F"),
+    "Solarized Light": ("#859900", "#B58900", "#DC322F"),
+    "Tokyo Night": ("#9ECE6A", "#E0AF68", "#F7768E"),
+    "Tokyo Night Light": ("#587539", "#8F5E15", "#F52A65"),
+}
+
+# Hand-tuned in theme.rs before this script existed; not regenerated.
+SKIP = {"Red Graphite"}
+
 
 
 def deep_merge(base: dict, over: dict) -> dict:
@@ -86,19 +104,67 @@ def luminance(hex_: str) -> float:
     return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
 
 
-def on(bg: str, dark_text: str) -> str:
-    """Text over `bg`: the theme's darkest surface when the fill is light, white otherwise."""
-    return dark_text if luminance(bg) > 0.3 else "#FFFFFF"
+def contrast(a: str, b: str) -> float:
+    x, y = luminance(a) + 0.05, luminance(b) + 0.05
+    return x / y if x > y else y / x
 
 
-def theme(bear_name: str, name: str, semantics: tuple[str, str, str]) -> str:
+def on(bg: str, candidates: list[str]) -> str:
+    """Text over `bg`: the theme's own colour that reads best, when one reads
+    at 3:1; plain white or near-black otherwise (a mid-orange accent on a
+    light theme has neither its page nor its text colour legible over it)."""
+    best = max(candidates, key=lambda c: contrast(c, bg))
+    if contrast(best, bg) >= 3.0:
+        return best
+    return max(["#FFFFFF", "#111111"], key=lambda c: contrast(c, bg))
+
+
+def legible(fg: str, bg: str, toward: str, ratio: float = 3.0) -> str:
+    """`fg` pushed toward `toward` until it reads at `ratio` on `bg`."""
+    t = 0.0
+    while contrast(hexstr(blend(fg, toward, t)), bg) < ratio and t < 1.0:
+        t += 0.05
+    return hexstr(blend(fg, toward, t))
+
+
+def hexstr(c: tuple[int, int, int]) -> str:
+    return "#%02X%02X%02X" % c
+
+
+def recolor(hex_: str, dark: bool) -> str:
+    """A highlighter background's hue as a foreground: same hue, full enough
+    saturation, and a lightness that sits on the page."""
+    r, g, b = (v / 255 for v in parse(hex_))
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    l = 0.68 if dark else 0.36
+    s = max(s, 0.45)
+    return hexstr(tuple(round(v * 255) for v in colorsys.hls_to_rgb(h, l, s)))
+
+
+def derived_semantics(d: dict, dark: bool) -> tuple[str, str, str]:
+    return tuple(
+        recolor(get(d, f"editor.highlighter.{c}.background color"), dark)
+        for c in ("green", "yellow", "red")
+    )
+
+
+def slug(bear_name: str) -> str:
+    ascii_ = unicodedata.normalize("NFKD", bear_name).encode("ascii", "ignore").decode()
+    return "-".join("".join(c if c.isalnum() else " " for c in ascii_).lower().split())
+
+
+def theme(bear_name: str) -> str:
+    name = slug(bear_name)
     d = load(bear_name)
     g = lambda p: get(d, p)  # noqa: E731
     bg, text, muted = g("base.background color"), g("base.text color"), g("base.text secondary color")
     bg2, accent = g("base.background secondary color"), g("base.accent color")
     sb_bg, sb_text = g("sidebar.background color"), g("sidebar.text color")
     dark = luminance(bg) < 0.5
-    darkest = bg if dark else text
+    semantics = SEMANTICS.get(bear_name) or derived_semantics(d, dark)
+    over_accent = on(accent, [bg, text, sb_bg])
+    blur_bg, sb_blur_bg = g("notes.selection background color"), g("sidebar.background secondary color")
+    semantics = tuple(legible(c, bg, text) for c in semantics)
     fields = {
         "background": parse(bg),
         "surface": parse(bg),
@@ -116,16 +182,16 @@ def theme(bear_name: str, name: str, semantics: tuple[str, str, str]) -> str:
         "sidebar_header_bg": blend(sb_bg, sb_text, 0.06),
         "sidebar_header_fg": parse(sb_text),
         "header_focus_bg": parse(accent),
-        "header_focus_fg": parse(on(accent, darkest)),
+        "header_focus_fg": parse(over_accent),
         "cursor_bg": parse(accent),
-        "cursor_fg": parse(on(accent, darkest)),
-        "cursor_blur_bg": parse(g("notes.selection background color")),
-        "cursor_blur_fg": parse(text),
-        "sidebar_cursor_blur_bg": parse(g("sidebar.background secondary color")),
-        "sidebar_cursor_blur_fg": parse(g("sidebar.text secondary color")),
+        "cursor_fg": parse(over_accent),
+        "cursor_blur_bg": parse(blur_bg),
+        "cursor_blur_fg": parse(on(blur_bg, [text, g("editor.headers.text color")])),
+        "sidebar_cursor_blur_bg": parse(sb_blur_bg),
+        "sidebar_cursor_blur_fg": parse(on(sb_blur_bg, [g("sidebar.text secondary color"), sb_text, text])),
         "footer_bg": parse(bg2),
         "footer_fg": parse(muted),
-        "footer_key": parse(accent),
+        "footer_key": parse(legible(accent, bg2, text)),
         "accent": parse(accent),
         "primary": parse(accent),
         "success": parse(semantics[0]),
@@ -150,14 +216,17 @@ def theme(bear_name: str, name: str, semantics: tuple[str, str, str]) -> str:
 def main() -> None:
     out = [
         "//! Palettes generated from Bear's own theme files by `tools/bear_theme.py`.",
-        "//! Do not edit by hand: change the script or the list in it and rerun",
+        "//! Do not edit by hand: change the script and rerun",
         "//!",
-        "//!     python3 tools/bear_theme.py > src/ui/palettes.rs",
+        "//! ```text",
+        "//! python3 tools/bear_theme.py > src/ui/palettes.rs",
+        "//! ```",
         "",
         "use super::theme::{rgb, Theme};",
         "",
     ]
-    out += [theme(*t) + "\n" for t in THEMES]
+    names = sorted(p.stem for p in BEAR.glob("*.theme") if p.stem not in SKIP)
+    out += [theme(n) + "\n" for n in names]
     sys.stdout.write("\n".join(out))
 
 

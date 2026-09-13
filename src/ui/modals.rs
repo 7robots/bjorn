@@ -1,45 +1,10 @@
 //! Overlays: confirm dialog, format picker, text prompt, new-note prompt,
-//! help, and the toast queue.
+//! and the toast queue. The help overlay's text lives in `ui::help`.
 
 use std::time::{Duration, Instant};
 
 use crate::actions::Action;
 use crate::bear::Note;
-
-pub const HELP_TEXT: &str = "# Bjorn
-
-Three columns: smart views and tags · notes · the rendered note.
-
-| Key | Action |
-|---|---|
-| `tab` / `shift+tab` | cycle panes |
-| `j` `k` / `↑` `↓` | move within a pane |
-| `enter` | open the highlighted note in the reader, at the first match while searching |
-| `1`–`7` | Notes, Untagged, Todo, Today, Pinned, Archive, Trash |
-| `/` | search with Bear syntax (`@todo`, `#tag`, `\"phrase\"`, `-term`); `@` and `#` complete as you type, `tab` or `→` accepts; a bare sub-tag is searched as `#*/name` |
-| `esc` | clear the search and its highlights |
-| `]` / `[` | next / previous match in the reader while searching |
-| `n` | new note (title, tags) then edit |
-| `e` | edit in `$VISUAL` / `$EDITOR` |
-| `d` | move the note to the trash |
-| `u` | restore from Trash or Archive |
-| `p` | toggle the global pin |
-| `!` | run the default action on the note; the action palette if no default is set |
-| `a` | the action menu: your `[[actions]]` with a search box on top; ★ marks the default, the highlighted command is shown in full, the last row (+ New action) adds one to the config `ctrl+e` edits the highlighted one and `ctrl+d` deletes it after asking (`enter` runs, `esc` closes) |
-| `x` | export the note: Markdown, HTML, plain text, RTF or TextBundle (`←` `→` pick, `export_format` sets the default) |
-| `b` | open the note in Bear.app |
-| `w` | make the highlighted tag the workspace; again to leave it (`W` also clears) |
-| `f` | fold / unfold the highlighted tag's subtree |
-| `F` | fold every tag, or unfold every tag when all are folded (within the workspace if one is set) |
-| `t` | triage: every open todo in the workspace, grouped by note |
-| `c` | cycle the columns: hide tags, then notes too, then show all three (or click ▮▮▮ in the note header) |
-| `r` | refresh from Bear now |
-| `?` | this help · `q` quit (asks first) |
-
-In triage: `space` marks, `x` ticks the marked (or highlighted) todos in Bear, `enter` goes to the note, `b` opens it in Bear at the section, `/` filters, `r` reloads, `esc` or `q` closes. With `[reminders] enabled = true`, `a` adds marked todos to Apple Reminders and rows show ⏰ (added) or ✓ (completed there).
-
-Edits are hash-guarded: if the note changed in Bear while you were in the editor, nothing is written and your version is kept in a temp file.
-";
 
 /// What a confirmed dialog goes on to do.
 #[derive(Debug, Clone, PartialEq)]
