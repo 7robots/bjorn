@@ -55,7 +55,17 @@ bjorn --theme red-graphite
 theme = "red-graphite"
 ```
 
-The Python Bjorn carries the same three, so one config file dresses both. An
+Every theme Bear ships is available too: `--theme nord`, `--theme "Rosé Pine"`,
+`--theme solarized-dark`. Names are the file names, lowercased, with spaces as
+`-`, and a theme that names a `base theme` inherits from it, as in Bear.
+
+Bear's themes are read from
+`/Applications/Bear.app/Contents/Frameworks/BearCore.framework/Versions/A/Resources`,
+and only when you name one that is not built in, or run `--list-themes`. The
+three built-in themes, the default among them, never open Bear.app. Bjorn
+never writes there: it opens the `.theme` files read-only, skips symlinks and
+anything larger than a theme file, and a test checks that loading leaves a
+read-only copy of the directory untouched. An
 unknown name in the config falls back to the default with a warning rather
 than stopping the app, because the config is shared and the Python build also
 accepts Textual's own themes. An unknown `--theme` on the command line is an

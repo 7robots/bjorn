@@ -11,9 +11,13 @@
 //! config at startup, so drawing code can read it without threading a
 //! reference through every function.
 
+use std::path::Path;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};
+
+use crate::ui::bear_theme;
 
 const fn rgb(hex: u32) -> Color {
     Color::Rgb(
@@ -26,7 +30,7 @@ const fn rgb(hex: u32) -> Color {
 /// Every colour the app draws with. Panes carry their own surface and text
 /// colours because Bear's Red Graphite puts a graphite sidebar next to a white
 /// notes list; in `textual-dark` the two are simply equal.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
     pub name: &'static str,
     /// True when the terminal behind this theme is expected to be dark. Only
@@ -214,7 +218,7 @@ pub const RED_GRAPHITE_DARK: Theme = Theme {
     foreground: rgb(0xDFE0E0),    // base.text
     muted: rgb(0xA2A3A4),         // base.text secondary
     sidebar_fg: rgb(0xA5A6A6),    // sidebar.text
-    sidebar_muted: rgb(0xA2A3A4), // base.text secondary
+    sidebar_muted: rgb(0xABACAB), // sidebar.icon
 
     border: rgb(0x525354),         // editor.separator
     sidebar_border: rgb(0x2C2D2F), // sidebar.stroke
@@ -250,28 +254,63 @@ pub const RED_GRAPHITE_DARK: Theme = Theme {
     tag_bg: rgb(0x454647),  // editor.tag.background
 };
 
-pub const THEMES: &[Theme] = &[TEXTUAL_DARK, RED_GRAPHITE, RED_GRAPHITE_DARK];
+/// The themes compiled in, so Bjorn has a palette without Bear.app.
+pub const BUILT_IN: &[Theme] = &[TEXTUAL_DARK, RED_GRAPHITE, RED_GRAPHITE_DARK];
 
 /// The default is Bear's Red Graphite, dark.
 pub const DEFAULT_THEME: &str = "red-graphite-dark";
 
-/// `DEFAULT_THEME`'s index in `THEMES`, so drawing before `set` still uses it.
+/// `DEFAULT_THEME`'s index in `themes()`, so drawing before `set` still uses it.
 const DEFAULT_INDEX: usize = 2;
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(DEFAULT_INDEX);
 
-/// The theme every drawing function reads.
+static BEAR: OnceLock<Vec<Theme>> = OnceLock::new();
+
+/// The themes read (read-only) from Bear.app, minus any a built-in already
+/// names: the built-ins always win, and match Bear's files (a test checks).
+/// Loaded once, and only when something asks past the built-ins.
+fn bear() -> &'static [Theme] {
+    BEAR.get_or_init(|| {
+        bear_theme::load_dir(Path::new(bear_theme::BEAR_THEMES_DIR))
+            .into_iter()
+            .filter(|t| BUILT_IN.iter().all(|b| b.name != t.name))
+            .collect()
+    })
+}
+
+/// Every theme: the built-ins in their fixed order, then Bear's. Opens
+/// Bear.app, so it is for listing, not for drawing.
+pub fn themes() -> Vec<&'static Theme> {
+    BUILT_IN.iter().chain(bear()).collect()
+}
+
+/// The theme every drawing function reads. A built-in never touches Bear.app.
 #[inline]
 pub fn current() -> &'static Theme {
     // The index only ever comes from `set`, which bounds it.
-    &THEMES[ACTIVE.load(Ordering::Relaxed)]
+    let index = ACTIVE.load(Ordering::Relaxed);
+    BUILT_IN
+        .get(index)
+        .unwrap_or_else(|| &bear()[index - BUILT_IN.len()])
 }
 
-/// The theme called `name`, spelling-insensitively; `None` when there is no
-/// such theme.
+/// The theme called `name`, ignoring case and spacing (`Rosé Pine`,
+/// `rosé-pine`); `None` when there is no such theme.
 pub fn lookup(name: &str) -> Option<usize> {
-    let wanted = name.trim().to_ascii_lowercase();
-    THEMES.iter().position(|t| t.name == wanted)
+    find(name, bear)
+}
+
+/// `lookup` over the built-ins, then over `extra` — called only when no
+/// built-in matches, so naming a built-in never reads Bear.app.
+fn find(name: &str, extra: impl FnOnce() -> &'static [Theme]) -> Option<usize> {
+    let wanted = bear_theme::slug(name);
+    BUILT_IN.iter().position(|t| t.name == wanted).or_else(|| {
+        extra()
+            .iter()
+            .position(|t| t.name == wanted)
+            .map(|i| BUILT_IN.len() + i)
+    })
 }
 
 /// Make `name` the active theme; false (and no change) when there is no such
@@ -288,7 +327,7 @@ pub fn set(name: &str) -> bool {
 
 /// Every theme name, in the order they are offered.
 pub fn names() -> impl Iterator<Item = &'static str> {
-    THEMES.iter().map(|t| t.name)
+    BUILT_IN.iter().chain(bear()).map(|t| t.name)
 }
 
 // -- the styles the drawing code asks for ------------------------------------
@@ -485,19 +524,30 @@ mod tests {
     // with logic in it.
     #[test]
     fn themes_are_found_by_name() {
-        assert_eq!(THEMES[lookup(DEFAULT_THEME).unwrap()].name, DEFAULT_THEME);
-        assert_eq!(THEMES[DEFAULT_INDEX].name, DEFAULT_THEME);
+        assert_eq!(themes()[lookup(DEFAULT_THEME).unwrap()].name, DEFAULT_THEME);
+        assert_eq!(themes()[DEFAULT_INDEX].name, DEFAULT_THEME);
+        assert_eq!(BUILT_IN[DEFAULT_INDEX].name, DEFAULT_THEME);
         assert_eq!(
-            THEMES[lookup("  Red-Graphite ").unwrap()].name,
+            themes()[lookup("  Red Graphite ").unwrap()].name,
             "red-graphite"
         );
         assert!(lookup("mauve").is_none());
-        assert_eq!(names().count(), THEMES.len());
+        assert_eq!(names().count(), themes().len());
+    }
+
+    #[test]
+    fn built_in_names_never_read_bear_app() {
+        let untouched = || -> &'static [Theme] { panic!("Bear.app was read") };
+        for theme in BUILT_IN {
+            assert!(find(&theme.name.to_uppercase(), untouched).is_some());
+        }
+        assert_eq!(find("mauve", || &[]), None);
+        assert_eq!(find("Nord", || &BUILT_IN[..1]), None);
     }
 
     #[test]
     fn every_theme_is_complete() {
-        for theme in THEMES {
+        for theme in themes() {
             assert_eq!(theme.name, theme.name.to_ascii_lowercase());
             // A true colour everywhere: an ANSI name would let the terminal's
             // own palette decide and the two implementations would diverge.

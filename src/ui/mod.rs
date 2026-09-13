@@ -1,5 +1,6 @@
 //! Drawing: the three columns, their headers, the footer, overlays and toasts.
 
+pub mod bear_theme;
 pub mod highlight;
 pub mod markdown;
 pub mod modals;
