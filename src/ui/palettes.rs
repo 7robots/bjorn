@@ -5,7 +5,7 @@
 //! python3 tools/bear_theme.py > src/ui/palettes.rs
 //! ```
 
-use super::theme::{rgb, Theme};
+use super::theme::{Theme, rgb};
 
 /// Bear's Academia.
 pub const ACADEMIA: Theme = Theme {

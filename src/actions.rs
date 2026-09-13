@@ -58,15 +58,25 @@ impl Default for Action {
 }
 
 impl Action {
-    /// Case-insensitive subsequence match on the name, then on the command, so
-    /// `s3` finds "Publish to S3" and `curl` finds an action by what it runs.
+    /// Case-insensitive: a subsequence of the name, so `pts3` finds
+    /// "Publish to S3", or a substring of the command, so `curl` finds an
+    /// action by what it runs.
+    ///
+    /// The command is matched as a substring and not as a subsequence on
+    /// purpose. Commands are long, and scattered letters match almost
+    /// anything inside one: `pub` matched a command whose only p, u and b
+    /// were in `printf` and a temp path, so the box stopped filtering.
     pub fn matches(&self, query: &str) -> bool {
         let query = query.trim();
         if query.is_empty() {
             return true;
         }
-        subsequence(&self.name, query) || subsequence(&self.command, query)
+        subsequence(&self.name, query) || contains_ignore_case(&self.command, query)
     }
+}
+
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 fn subsequence(haystack: &str, needle: &str) -> bool {
@@ -614,8 +624,34 @@ mod tests {
         }
     }
 
+    /// Scattered letters inside a command must not match: a long command
+    /// contains almost any short query as a subsequence, which made the menu
+    /// keep rows the query had nothing to do with.
     #[test]
-    fn matching_is_a_case_insensitive_subsequence() {
+    fn scattered_letters_in_a_command_do_not_match() {
+        let a = action(
+            "Copy",
+            "{ printf '%s' \"$BJORN_ACTION\"; cat; } > '/tmp/.tmpu0b1/Copy.receipt'; echo sent",
+        );
+        assert!(
+            !a.matches("pub"),
+            "p, u and b appear in order but 'pub' does not"
+        );
+        assert!(a.matches("copy"), "its own name still matches");
+        assert!(
+            a.matches("printf"),
+            "a real substring of the command matches"
+        );
+    }
+
+    #[test]
+    fn an_empty_query_keeps_everything() {
+        let actions = vec![action("Copy", "pbcopy"), action("Publish", "scp x y")];
+        assert_eq!(filter(&actions, "   ").len(), 2);
+    }
+
+    #[test]
+    fn matching_is_the_name_by_subsequence_and_the_command_by_substring() {
         let a = action(
             "Publish to S3",
             "aws s3 cp \"$BJORN_NOTE_FILE\" s3://notes/",
@@ -625,6 +661,7 @@ mod tests {
         assert!(a.matches("PUB"));
         assert!(a.matches("pblsh"), "letters in order, gaps allowed");
         assert!(a.matches("aws"), "the command is searched too");
+        assert!(a.matches("S3://NOTES"), "and case-insensitively");
         assert!(!a.matches("zebra"));
     }
 
