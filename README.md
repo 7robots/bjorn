@@ -42,9 +42,9 @@ command line (`--list-themes` prints them):
 
 | Name | |
 |---|---|
-| `textual-dark` | the default; what the Python Bjorn draws through Textual's own theme, matched colour for colour |
-| `red-graphite` | Bear's Red Graphite: the graphite sidebar beside a white page, coral red (`#CD5654`) on the focused column, the cursor, the bullets, the links and the tags |
-| `red-graphite-dark` | the same red over Bear's graphite, for a dark terminal |
+| `red-graphite-dark` | the default; Bear ships no dark Red Graphite, so this is Bear's Dark Graphite with Red Graphite's brick red (`#DD4C4F`) as the accent |
+| `red-graphite` | Bear's Red Graphite, from its own theme file: the graphite sidebar beside a white page, brick red (`#DD4C4F`) on the focused column, the cursor, the bullets and the links |
+| `textual-dark` | what the Python Bjorn draws through Textual's own theme, matched colour for colour |
 
 ```sh
 bjorn --theme red-graphite

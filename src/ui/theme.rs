@@ -3,9 +3,9 @@
 //! One `Theme` is a flat table of true colours. `textual-dark` reproduces what
 //! the Python Bjorn draws through Textual's default theme, down to the blended
 //! values Textual computes for its `auto`/alpha colours, so the two
-//! implementations look the same side by side. `red-graphite` and
-//! `red-graphite-dark` are Bear's Red Graphite: graphite chrome, one coral red
-//! (`#CD5654`, sampled from Bear) for every accent.
+//! implementations look the same side by side. `red-graphite` is Bear's Red
+//! Graphite theme file; `red-graphite-dark` (the default) is Bear's Dark
+//! Graphite with Red Graphite's brick red (`#DD4C4F`) as the accent.
 //!
 //! The active theme is a process-wide index into `THEMES`, set once from the
 //! config at startup, so drawing code can read it without threading a
@@ -147,114 +147,118 @@ pub const TEXTUAL_DARK: Theme = Theme {
 };
 
 /// Bear's Red Graphite, light: a graphite sidebar beside a white notes list
-/// and a white page, with `#CD5654` on every accent. The greys are sampled
-/// from Bear itself.
+/// and a white page, with `#DD4C4F` on every accent. Colours are taken from
+/// Bear's own `Red Graphite.theme`; only the status colours are Bjorn's.
 pub const RED_GRAPHITE: Theme = Theme {
     name: "red-graphite",
     dark: false,
 
-    background: rgb(0xFFFFFF),
-    surface: rgb(0xFDFDFD),
-    surface_focus: rgb(0xFFFFFF),
-    sidebar_bg: rgb(0x2F3235),
-    sidebar_focus: rgb(0x35383B),
+    background: rgb(0xFFFFFF),    // base.background
+    surface: rgb(0xFFFFFF),       // base.background
+    surface_focus: rgb(0xFFFFFF), // base.background
+    sidebar_bg: rgb(0x2E3235),    // sidebar.background
+    sidebar_focus: rgb(0x2E3235), // sidebar.background
 
-    foreground: rgb(0x2B2B2D),
-    muted: rgb(0x6B6B6D),
-    sidebar_fg: rgb(0xD8DADC),
-    sidebar_muted: rgb(0x9A9DA0),
+    foreground: rgb(0x444444),    // base.text
+    muted: rgb(0x888888),         // base.text secondary
+    sidebar_fg: rgb(0xD1D1D1),    // sidebar.text
+    sidebar_muted: rgb(0x9FA09F), // sidebar.icon
 
-    border: rgb(0xE3E4E6),
-    sidebar_border: rgb(0x2F3235),
-    header_bg: rgb(0xF3F5F7),
-    header_fg: rgb(0x2B2B2D),
-    sidebar_header_bg: rgb(0x3A3D40),
-    sidebar_header_fg: rgb(0xD8DADC),
-    header_focus_bg: rgb(0xCD5654),
+    border: rgb(0xD9D9D9),         // base.stroke
+    sidebar_border: rgb(0x2E3235), // sidebar.stroke
+    header_bg: rgb(0xF3F5F7),      // base.background secondary
+    header_fg: rgb(0x444444),
+    sidebar_header_bg: rgb(0x474747), // sidebar.background secondary
+    sidebar_header_fg: rgb(0xFFFFFF), // sidebar.text secondary
+    header_focus_bg: rgb(0xDD4C4F),
     header_focus_fg: rgb(0xFFFFFF),
-    cursor_bg: rgb(0xCD5654),
+    cursor_bg: rgb(0xDD4C4F),
     cursor_fg: rgb(0xFFFFFF),
-    cursor_blur_bg: rgb(0xF3F5F7),
-    sidebar_cursor_blur_bg: rgb(0x3F403F),
-    cursor_blur_fg: rgb(0x2B2B2D),
-    sidebar_cursor_blur_fg: rgb(0xEDEEEF),
+    cursor_blur_bg: rgb(0xF3F5F7),         // notes.selection background
+    sidebar_cursor_blur_bg: rgb(0x474747), // sidebar.background secondary
+    cursor_blur_fg: rgb(0x444444),
+    sidebar_cursor_blur_fg: rgb(0xFFFFFF),
     footer_bg: rgb(0xF3F5F7),
-    footer_fg: rgb(0x4A4A4C),
-    footer_key: rgb(0xCD5654),
+    footer_fg: rgb(0x444444),
+    footer_key: rgb(0xDD4C4F),
 
-    accent: rgb(0xCD5654),
-    primary: rgb(0xCD5654),
+    accent: rgb(0xDD4C4F), // base.accent
+    primary: rgb(0xDD4C4F),
     success: rgb(0x3F9D63),
     warning: rgb(0xB7791F),
     error: rgb(0xC0392B),
 
-    heading: rgb(0x2B2B2D),
-    heading_alt: rgb(0x2B2B2D),
-    link: rgb(0xCD5654),
-    bullet: rgb(0xCD5654),
-    code_fg: rgb(0x4A4A4C),
-    code_bg: rgb(0xE4E5E6),
-    tag_fg: rgb(0x6B6B6D),
-    tag_bg: rgb(0xE4E5E6),
+    heading: rgb(0x444444), // editor.headers.text
+    heading_alt: rgb(0x444444),
+    link: rgb(0xDD4C4F),    // editor.link
+    bullet: rgb(0xDD4C4F),  // editor.list marker
+    code_fg: rgb(0x444444), // editor.code.text
+    code_bg: rgb(0xF3F5F7), // editor.code.background
+    tag_fg: rgb(0x444444),  // editor.tag.text
+    tag_bg: rgb(0xE4E5E6),  // editor.tag.background
 };
 
-/// Red Graphite in the dark: the same coral red over Bear's graphite, for a
-/// dark terminal. The sidebar is a shade below the page, as it is in Bear.
+/// Red Graphite in the dark. Bear ships no dark Red Graphite, so this is
+/// Bear's `Dark Graphite.theme` with its blue accent swapped for Red
+/// Graphite's `#DD4C4F`. The sidebar sits a shade above the page, as in Bear.
 pub const RED_GRAPHITE_DARK: Theme = Theme {
     name: "red-graphite-dark",
     dark: true,
 
-    background: rgb(0x1B1C1E),
-    surface: rgb(0x232528),
-    surface_focus: rgb(0x2A2C30),
-    sidebar_bg: rgb(0x1F2123),
-    sidebar_focus: rgb(0x26282B),
+    background: rgb(0x1D1E1F),    // base.background
+    surface: rgb(0x1D1E1F),       // base.background
+    surface_focus: rgb(0x1D1E1F), // base.background
+    sidebar_bg: rgb(0x2C2D2F),    // sidebar.background
+    sidebar_focus: rgb(0x2C2D2F), // sidebar.background
 
-    foreground: rgb(0xD7D9DC),
-    muted: rgb(0x8A8D92),
-    sidebar_fg: rgb(0xD7D9DC),
-    sidebar_muted: rgb(0x8A8D92),
+    foreground: rgb(0xDFE0E0),    // base.text
+    muted: rgb(0xA2A3A4),         // base.text secondary
+    sidebar_fg: rgb(0xA5A6A6),    // sidebar.text
+    sidebar_muted: rgb(0xA2A3A4), // base.text secondary
 
-    border: rgb(0x3A3D42),
-    sidebar_border: rgb(0x3A3D42),
-    header_bg: rgb(0x2E3135),
-    header_fg: rgb(0xE0736A),
-    sidebar_header_bg: rgb(0x2E3135),
-    sidebar_header_fg: rgb(0xE0736A),
-    header_focus_bg: rgb(0xCD5654),
-    header_focus_fg: rgb(0xFFF3F2),
-    cursor_bg: rgb(0xCD5654),
-    cursor_fg: rgb(0xFFF3F2),
-    cursor_blur_bg: rgb(0x4A2F30),
-    sidebar_cursor_blur_bg: rgb(0x462C2D),
-    cursor_blur_fg: rgb(0xD7D9DC),
-    sidebar_cursor_blur_fg: rgb(0xD7D9DC),
-    footer_bg: rgb(0x2E3135),
-    footer_fg: rgb(0xD7D9DC),
-    footer_key: rgb(0xE0736A),
+    border: rgb(0x525354),         // editor.separator
+    sidebar_border: rgb(0x2C2D2F), // sidebar.stroke
+    header_bg: rgb(0x2E2F30),      // base.background secondary
+    header_fg: rgb(0xDFE0E0),
+    sidebar_header_bg: rgb(0x535354), // sidebar.background secondary
+    sidebar_header_fg: rgb(0xD9D8DA), // sidebar.text secondary
+    header_focus_bg: rgb(0xDD4C4F),
+    header_focus_fg: rgb(0xFFFFFF),
+    cursor_bg: rgb(0xDD4C4F),
+    cursor_fg: rgb(0xFFFFFF),
+    cursor_blur_bg: rgb(0x2E2F30),         // notes.selection background
+    sidebar_cursor_blur_bg: rgb(0x535354), // sidebar.background secondary
+    cursor_blur_fg: rgb(0xDFE0E0),
+    sidebar_cursor_blur_fg: rgb(0xD9D8DA),
+    footer_bg: rgb(0x2E2F30),
+    footer_fg: rgb(0xDFE0E0),
+    footer_key: rgb(0xDD4C4F),
 
-    accent: rgb(0xCD5654),
-    primary: rgb(0xCD5654),
+    accent: rgb(0xDD4C4F),
+    primary: rgb(0xDD4C4F),
     success: rgb(0x6FB98F),
     warning: rgb(0xE0A458),
     error: rgb(0xE05C5C),
 
-    heading: rgb(0xEDEFF2),
-    heading_alt: rgb(0xD7D9DC),
-    link: rgb(0xE0736A),
-    bullet: rgb(0xCD5654),
-    code_fg: rgb(0xE0A98F),
-    code_bg: rgb(0x2E3135),
-    tag_fg: rgb(0xB9BCC0),
-    tag_bg: rgb(0x2E3135),
+    heading: rgb(0xCCDBE5), // editor.headers.text
+    heading_alt: rgb(0xDFE0E0),
+    link: rgb(0xDD4C4F),
+    bullet: rgb(0xDD4C4F),
+    code_fg: rgb(0xDFE0E0), // editor.code.text
+    code_bg: rgb(0x2E2F30), // editor.code.background
+    tag_fg: rgb(0xDFE0E0),  // editor.tag.text
+    tag_bg: rgb(0x454647),  // editor.tag.background
 };
 
 pub const THEMES: &[Theme] = &[TEXTUAL_DARK, RED_GRAPHITE, RED_GRAPHITE_DARK];
 
-/// The default is Textual's, so an unconfigured Rust Bjorn matches the Python one.
-pub const DEFAULT_THEME: &str = "textual-dark";
+/// The default is Bear's Red Graphite, dark.
+pub const DEFAULT_THEME: &str = "red-graphite-dark";
 
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// `DEFAULT_THEME`'s index in `THEMES`, so drawing before `set` still uses it.
+const DEFAULT_INDEX: usize = 2;
+
+static ACTIVE: AtomicUsize = AtomicUsize::new(DEFAULT_INDEX);
 
 /// The theme every drawing function reads.
 #[inline]
@@ -482,6 +486,7 @@ mod tests {
     #[test]
     fn themes_are_found_by_name() {
         assert_eq!(THEMES[lookup(DEFAULT_THEME).unwrap()].name, DEFAULT_THEME);
+        assert_eq!(THEMES[DEFAULT_INDEX].name, DEFAULT_THEME);
         assert_eq!(
             THEMES[lookup("  Red-Graphite ").unwrap()].name,
             "red-graphite"
