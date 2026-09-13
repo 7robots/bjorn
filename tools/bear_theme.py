@@ -222,7 +222,8 @@ def main() -> None:
         "//! python3 tools/bear_theme.py > src/ui/palettes.rs",
         "//! ```",
         "",
-        "use super::theme::{rgb, Theme};",
+        # rustfmt's order, so a regenerated file needs no `cargo fmt` after it.
+        "use super::theme::{Theme, rgb};",
         "",
     ]
     names = sorted(p.stem for p in BEAR.glob("*.theme") if p.stem not in SKIP)
