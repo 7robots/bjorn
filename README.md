@@ -8,6 +8,8 @@ out how the same design behaves as a native binary. Everything goes through
 implementations share one config file and one feature set, and the Rust fakes
 of `bearcli` and `remctl` pass the Python suite.
 
+![Bjorn: smart views and tags, notes list, rendered note](docs/screenshot.png)
+
 Three columns, like the app: smart views and a nested tag tree on the left,
 the notes list in the middle, the rendered note on the right. Editing is
 delegated to `$VISUAL`, then `$EDITOR`, then `vim`, which runs in a
@@ -17,6 +19,8 @@ operator and tag completion in the box and match highlighting in the reader.
 `t` opens todo triage, with Apple Reminders through `remctl` when enabled.
 The keys, the config and the triage screen are documented in the Python
 project's README; they are the same here.
+
+![Triage: open todos grouped by note, with Reminders status](docs/screenshot-triage.png)
 
 ## Install
 
@@ -155,8 +159,13 @@ cargo run --release --bin bjorn-gate       # acceptance gate against the live li
 cargo run --release --bin bjorn-gate -- --bench
 cargo run --release --bin bjorn-gate -- --latency
 cargo run --example shot -- --theme red-graphite --out /tmp/shot.json
-uv run --with pillow python tools/shot.py /tmp/shot.json /tmp/shot.png
+uv run --with pillow --with fonttools python tools/shot.py /tmp/shot.json /tmp/shot.png
 ```
+
+The screenshots above come from the same pipeline, drawn against the demo
+library the fake bearcli seeds (`--height 34` for the main screen, `--screen
+triage --height 22` for triage, then `tools/shot.py ... --scale 2`). A Nerd
+Font in `~/Library/Fonts` is what draws the sidebar icons.
 
 The Python suite runs against the Rust fakes with the plugin in `tools/`:
 
