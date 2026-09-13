@@ -1,12 +1,9 @@
-# Bjorn in Rust
+# Bjorn
 
 A terminal front end for [Bear](https://bear.app), written in Rust with
-[ratatui](https://ratatui.rs). It is a re-implementation of
-[Bjorn](https://github.com/7robots/bjorn) (Python and Textual), built to find
-out how the same design behaves as a native binary. Everything goes through
-`bearcli`, the command line tool that ships inside Bear.app; the two
-implementations share one config file and one feature set, and the Rust fakes
-of `bearcli` and `remctl` pass the Python suite.
+[ratatui](https://ratatui.rs). Everything goes through `bearcli`, the command
+line tool that ships inside Bear.app, so Bjorn works with Bear open or closed
+and never touches the database directly.
 
 ![Bjorn: smart views and tags, notes list, rendered note](docs/screenshot.png)
 
@@ -14,18 +11,17 @@ Three columns, like the app: smart views and a nested tag tree on the left,
 the notes list in the middle, the rendered note on the right. Editing is
 delegated to `$VISUAL`, then `$EDITOR`, then `vim`, which runs in a
 pseudo-terminal drawn inside the reader pane so the other columns stay up;
-writes back are hash-guarded. Search uses Bear's syntax through `bearcli search`, with
-operator and tag completion in the box and match highlighting in the reader.
-`t` opens todo triage, with Apple Reminders through `remctl` when enabled.
-The keys, the config and the triage screen are documented in the Python
-project's README; they are the same here.
-
-![Triage: open todos grouped by note, with Reminders status](docs/screenshot-triage.png)
+writes back are hash-guarded, so if the note changed in Bear while you were
+editing, nothing is written and your version is kept in a temp file. Search
+uses Bear's syntax through `bearcli search`, with operator and tag completion
+in the box and match highlighting in the reader. `t` opens todo triage, with
+Apple Reminders through `remctl` when enabled.
 
 ## Install
 
 Requires macOS with Bear installed and a Rust toolchain (`brew install rustup
-&& rustup default stable`).
+&& rustup default stable`). Bjorn finds `bearcli` on `PATH` or inside
+`/Applications/Bear.app`; set `bearcli = "..."` in the config for anywhere else.
 
 ```sh
 git clone https://github.com/7robots/bjorn.git
@@ -36,17 +32,121 @@ bjorn --tag work      # start scoped to a tag subtree
 bjorn --demo          # sample notes through the built-in fake bearcli, no Bear needed
 ```
 
-The launcher was `bjorn-rs` while the Python build held the `bjorn` name; the
-Python build is archived at `7robots/bjorn-python` and the name is this one's now.
+`git pull && ./install.sh` is the update path.
 
-## Themes
+## Keys
 
-The palette comes from `theme` in the shared config file, or `--theme` on the
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `tab` / `shift+tab` | cycle panes | `/` | search (Bear syntax); `@` and `#` complete, `tab` or `→` accepts; `enter` runs it |
+| `j` `k` `↑` `↓` | move within a pane; in the sidebar the cursor runs from the views into the tags; in the reader they scroll | `esc` | clear the search and its highlights |
+| `enter` | move into the reader for the highlighted note, at the first match while searching | `1`–`7` | Notes, Untagged, Todo, Today, Pinned, Archive, Trash |
+| `n` | new note (title, tags), then edit | `d` | move the note to the trash, after a confirm |
+| `e` | edit in `$VISUAL` / `$EDITOR` | `u` | restore from Trash or Archive |
+| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle (`←` `→` pick, `enter` confirms) |
+| `b` | open in Bear.app | `!` / `a` | run the default action / open the action menu (see [Actions](#actions)) |
+| `w` | make the highlighted tag the workspace; again on it to leave | `W` | clear the workspace |
+| `f` | fold / unfold the highlighted tag's subtree | `F` | fold every tag, or unfold them all when all are folded |
+| `t` | triage the workspace's open todos | `c` / click `▮▮▮` | hide the tag column, then the note column too, then show all three |
+| `]` / `[` | next / previous match in the reader while searching | `r` | refresh now |
+| `?` | help (`esc` `q` `?` close it) | `q` | quit, after a confirm |
+
+The **workspace** is a tag subtree that scopes the whole app: the tag tree
+shows only it, the smart views count only inside it, search results are
+filtered to it, and new notes default to it.
+
+Search goes to `bearcli search` unchanged, so Bear's whole syntax works and
+plain terms match body text, not just titles. While you type, `@` completes
+bearcli's operators (`@todo`, `@title`, `@last7days`, `@date(`…) and `#`
+completes your tags, workspace first, as ghost text that `tab` or `→`
+accepts; a one-line cheat sheet sits under the box. Bear matches `#name`
+against full tag paths only, so a bare sub-tag (`#Build` for
+`#kybernetes/Build`) is completed and searched as `#*/Build`, Bear's
+sub-tag form. `enter` runs the search and moves to the results; the box
+stays open with the query, dimmed until you press `/` or click it to edit
+again. While a search is active the reader highlights the terms, including
+inside fenced code and table cells, the header counts the matching blocks,
+`]` and `[` step through them, and `enter` on a note lands on its first match.
+
+Views are computed from one `bearcli list` snapshot, so the counts in the
+sidebar and the notes list always agree. **Pinned** means any pin, global or
+inside a tag. **Today** means modified today, local time.
+
+The reader renders the whole note in one pass and draws only the viewport, so
+a 100 KB note shows as fast as a short one. It does not wait for a note it
+already has: the cursor's neighbours are read ahead, a cold start keeps the
+bodies the preview listing had to read anyway, and only a body that has to
+come from bearcli waits out a 120 ms debounce. Holding `j` down scrolls the
+reader with the list. Every `bearcli` and `remctl` call has a 30 s timeout.
+
+## Todo triage
+
+`t` opens a screen listing every open `- [ ]` item from the `@todo` notes in
+the workspace (all notes when none is set), grouped by note with the section
+each item sits under. `space` marks rows, `x` ticks the marked (or highlighted)
+items in Bear through `bearcli edit`, `enter` jumps to the note, `b` opens it
+in Bear.app at that section, `/` filters, `r` reloads, `esc` or `q` closes.
+
+![Triage: open todos grouped by note, with Reminders status](docs/screenshot-triage.png)
+
+With `[reminders] enabled = true` and [remctl](https://github.com/7robots/remctl)
+on your PATH, `a` also pushes marked items to Apple Reminders. Each reminder's
+notes carry the note's `bear://` link and a `bear-todo: <key>` line (the same
+scheme remtui uses, so reminders it created are recognised); on every load
+they are read back and rows show ⏰ for an open reminder or ✓ for one you
+completed in Reminders, ready to `x` in Bear. Nothing is written into Bear when
+a reminder is added.
+
+## Configuration
+
+`~/.config/bjorn/config.toml` (or `$XDG_CONFIG_HOME/bjorn/config.toml`), or
+`--config PATH`. Every key is optional:
+
+```toml
+editor = "nvim"               # overrides $VISUAL / $EDITOR
+export_dir = "~/Downloads"    # where `x` proposes to write
+export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle
+poll_seconds = 5              # 0 disables the background refresh
+workspace = "work"            # start scoped to this tag
+bearcli = "/usr/local/bin/bearcli"  # optional; default searches PATH, then Bear.app
+icon_style = "auto"           # auto | nerd | emoji | lucide | none
+theme = "textual-dark"        # textual-dark | red-graphite | red-graphite-dark (see below)
+
+[icons]                       # top-level tag -> Lucide icon name, or emoji:<glyph>
+tech = "terminal"
+school = "emoji:🎓"
+
+[reminders]                   # triage can push todos to Apple Reminders
+enabled = false               # off by default
+list = "Bear"                 # target list; remctl's default when empty
+due = "today"                 # due date for new reminders; "" for none
+remctl = ""                   # path to remctl; default searches PATH
+
+[[actions]]                   # shell commands for `!` and `a`; see Actions below
+```
+
+`mouse_pixels` and `--no-mouse-pixels` are accepted from older config files
+and ignored: the mouse always stays in cell mode.
+
+Bjorn keeps one cache file, `~/.cache/bjorn/previews.json` (or under
+`$XDG_CACHE_HOME`): the notes list's body previews, keyed by note id and
+modification stamp. It is what lets a launch list metadata only instead of
+reading every note's body to build the previews again. Deleting it costs one
+slow start. `--demo` runs keep their own copy, so the sample library never
+stands in for the real one.
+
+The poll is cheap: two `bearcli list` probes run together and a reload only
+when something changed. A reload lists metadata only and reads the body of
+just the notes whose modification time moved.
+
+### Themes
+
+The palette comes from `theme` in the config file, or `--theme` on the
 command line (`--list-themes` prints them):
 
 | Name | |
 |---|---|
-| `textual-dark` | the default; what the Python Bjorn draws through Textual's own theme, matched colour for colour |
+| `textual-dark` | the default: a dark grey page with blue accents |
 | `red-graphite` | Bear's Red Graphite: the graphite sidebar beside a white page, coral red (`#CD5654`) on the focused column, the cursor, the bullets, the links and the tags |
 | `red-graphite-dark` | the same red over Bear's graphite, for a dark terminal |
 
@@ -54,16 +154,40 @@ command line (`--list-themes` prints them):
 bjorn --theme red-graphite
 ```
 
-```toml
-# ~/.config/bjorn/config.toml
-theme = "red-graphite"
+An unknown name in the config falls back to the default with a warning rather
+than stopping the app. An unknown `--theme` on the command line is an error.
+
+### Icons
+
+Top-level tags and the smart views carry icons: Nerd Font (Material Design)
+glyphs when the terminal is Ghostty or WezTerm or a Nerd Font is installed,
+emoji otherwise. Built-in defaults cover common top-level tags (`work`, `home`,
+`projects`, `ideas`, `journal`, `books`, `reading`, `tech`, `code`, `garden`,
+`travel`, `health`, `music`, `robotics`, `school`); anything else gets a tag
+glyph. Names are Lucide's (`bot`, `book-open`, `compass`, ...); see
+`src/icons.rs` for the table.
+
+`icon_style = "lucide"` draws Lucide's own glyphs from its icon font instead of
+Nerd Font look-alikes, and any of Lucide's 2,000+ names works under `[icons]`.
+It is opt-in because the terminal has to be told about the font:
+
+```sh
+# 1. Install the font. Pin the version Bjorn's codepoint table was built from.
+curl -L -o ~/Library/Fonts/lucide.ttf https://unpkg.com/lucide-static@1.43.0/font/lucide.ttf
+
+# 2. Ghostty: route Lucide's codepoint range to it (~/.config/ghostty/config).
+font-codepoint-map = U+E038-U+E768=Lucide
 ```
 
-The Python Bjorn carries the same three, so one config file dresses both. An
-unknown name in the config falls back to the default with a warning rather
-than stopping the app, because the config is shared and the Python build also
-accepts Textual's own themes. An unknown `--theme` on the command line is an
-error.
+Open a new Ghostty window afterwards. Kitty's `symbol_map` does the same job.
+
+Two caveats. Lucide reassigns codepoints between releases, so the installed
+`lucide.ttf` must match the bundled table (lucide-static 1.43.0; both are noted
+in `src/icons.rs`). And U+E000–U+E7FF is where Nerd Fonts keep the
+Powerline, Pomicons, Seti and Codicons sets, so that mapping takes those glyphs
+away from everything in the window: prompt themes, `eza`/`lsd` file icons,
+Neovim statuslines. Bjorn's Material Design glyphs live above U+F0000 and are
+unaffected.
 
 ## Actions
 
@@ -97,63 +221,10 @@ environment; the file goes away when the command ends. The first line the
 command prints comes back as a toast, and a non-zero exit is reported with its
 stderr. Full reference: [docs/actions.md](docs/actions.md).
 
-## What differs from the Python Bjorn
-
-- The reader renders the whole note in one pass and draws only the viewport.
-  The Python version renders long notes in two halves (80 lines, then the
-  rest) and mounts the notes list in windows of 120 rows; neither exists here.
-- The reader does not wait for a note it already has: the cursor's neighbours
-  are read ahead, a cold start keeps the bodies the preview listing had to read
-  anyway, and the 120 ms debounce applies only to a body that has to come from
-  bearcli. Holding `j` down scrolls the reader with the list.
-- Search highlighting reaches fenced code and table cells.
-- Every `bearcli` and `remctl` call has a 30 s timeout.
-- `mouse_pixels` and `--no-mouse-pixels` are accepted and ignored: the mouse
-  always stays in cell mode, so the SwiftTerm workaround is moot.
-- HTML export percent-encodes image URLs that point at paths.
-
-## Measurements
-
-Both implementations against the same live library, headless, under
-`caffeinate`. Timings that go through `bearcli` are the same in both, as they
-should be: the Rust build changes what happens after bearcli answers.
-
-| | Python (Textual) | Rust (ratatui) |
-|---|---|---|
-| Start to first frame, previews cached | 883 ms | 440 ms |
-| Start to first frame, no cache | 1331 ms | 1197 ms |
-| Cold snapshot (`list` with content) | 1143 ms | 1022 ms |
-| Warm snapshot (metadata only) | 301 ms | 293 ms |
-| Change probe (two `list` calls) | 63 ms | 40 ms |
-| Longest note (97 KB, 1778 lines): render and show | 5437 ms | 46 ms |
-| Peak resident memory | 379 MB | 43 MB |
-| Installed size | 23 MB venv plus Python 3.12 | 4.2 MB binary |
-
-Input to frame, median of repeated presses on a 213-note library:
-
-| | Python (Textual) | Rust (ratatui) |
-|---|---|---|
-| `j` in the notes list, key to frame | 120 ms | 0.4 ms |
-| the reader catching up with the cursor | 55 ms | 0 ms |
-| switching smart views (whole library) | 307 ms | 0.4 ms |
-| `tab` between columns | 106 ms | 0.3 ms |
-| a frame with nothing changed | 43 ms | 0.3 ms |
-| `F`, unfolding every tag | 213 ms | 0.4 ms |
-
-Everything the app does itself lands inside a frame; what is left is bearcli,
-which both pay equally. Two things made the difference to how it feels: the
-previews are kept in `~/.cache/bjorn/previews.json` between runs, so a launch
-lists metadata instead of reading every body to build them again; and the
-reader never waits for a note it already has — the cold listing's bodies are
-kept, the cursor's neighbours are read ahead, and only a body that has to come
-from bearcli waits out the debounce. The long-note number is the other
-difference that is felt: Textual mounts one widget per markdown block, ratatui
-draws styled lines.
-
 ## Development
 
 ```sh
-cargo test                                 # 201 tests: unit, client, UI through a headless harness
+cargo test                                 # unit, client, UI through a headless harness
 cargo clippy --all-targets -- -D warnings
 cargo run --release --bin bjorn-gate       # acceptance gate against the live library
 cargo run --release --bin bjorn-gate -- --bench
@@ -167,16 +238,8 @@ library the fake bearcli seeds (`--height 34` for the main screen, `--screen
 triage --height 22` for triage, then `tools/shot.py ... --scale 2`). A Nerd
 Font in `~/Library/Fonts` is what draws the sidebar icons.
 
-The Python suite runs against the Rust fakes with the plugin in `tools/`:
-
-```sh
-cd ../bjorn-python
-PYTHONPATH=../bjorn/tools uv run pytest -p pytest_rust_fake -q
-```
-
 The plan and its status live in `docs/plans/bjorn-rust.md`; deferred work in
-`docs/ROADMAP.md`. Module names mirror the Python package so the two trees
-read side by side.
+`docs/ROADMAP.md`.
 
 ## Acknowledgements
 
