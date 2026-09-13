@@ -1,11 +1,10 @@
 //! The palette.
 //!
-//! One `Theme` is a flat table of true colours. `textual-dark` reproduces what
-//! the Python Bjorn draws through Textual's default theme, down to the blended
-//! values Textual computes for its `auto`/alpha colours, so the two
-//! implementations look the same side by side. `red-graphite` and
+//! One `Theme` is a flat table of true colours. `textual-dark` is the original
+//! palette, a dark grey page with blue and amber accents. `red-graphite` and
 //! `red-graphite-dark` are Bear's Red Graphite: graphite chrome, one coral red
-//! (`#CD5654`, sampled from Bear) for every accent.
+//! (`#CD5654`, sampled from Bear) for every accent. The rest, in `palettes`,
+//! are generated from Bear's own theme files by `tools/bear_theme.py`.
 //!
 //! The active theme is a process-wide index into `THEMES`, set once from the
 //! config at startup, so drawing code can read it without threading a
@@ -15,7 +14,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};
 
-const fn rgb(hex: u32) -> Color {
+use super::palettes;
+
+pub const fn rgb(hex: u32) -> Color {
     Color::Rgb(
         ((hex >> 16) & 0xff) as u8,
         ((hex >> 8) & 0xff) as u8,
@@ -94,9 +95,8 @@ pub struct Theme {
     pub tag_bg: Color,
 }
 
-/// Textual's default theme, the one the Python Bjorn runs under. The blended
-/// values are what Textual resolves `auto 60%`, `$warning 10%` and the rest to
-/// over the surface underneath them.
+/// The original palette: a dark grey page, blue for the cursor and headings,
+/// amber for the focused header and the key hints.
 pub const TEXTUAL_DARK: Theme = Theme {
     name: "textual-dark",
     dark: true,
@@ -249,9 +249,20 @@ pub const RED_GRAPHITE_DARK: Theme = Theme {
     tag_bg: rgb(0x2E3135),
 };
 
-pub const THEMES: &[Theme] = &[TEXTUAL_DARK, RED_GRAPHITE, RED_GRAPHITE_DARK];
+pub const THEMES: &[Theme] = &[
+    TEXTUAL_DARK,
+    RED_GRAPHITE,
+    RED_GRAPHITE_DARK,
+    palettes::NORD,
+    palettes::DRACULA,
+    palettes::TOKYO_NIGHT,
+    palettes::TOKYO_NIGHT_LIGHT,
+    palettes::CATPPUCCIN_LATTE,
+    palettes::CATPPUCCIN_MACCHIATO,
+    palettes::SHIBUYA_JAZZ,
+    palettes::SHIBUYA_LO_FI,
+];
 
-/// The default is Textual's, so an unconfigured Rust Bjorn matches the Python one.
 pub const DEFAULT_THEME: &str = "textual-dark";
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
@@ -488,6 +499,57 @@ mod tests {
         );
         assert!(lookup("mauve").is_none());
         assert_eq!(names().count(), THEMES.len());
+    }
+
+    #[test]
+    fn theme_names_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for theme in THEMES {
+            assert!(seen.insert(theme.name), "duplicate theme {}", theme.name);
+        }
+    }
+
+    /// Relative luminance per WCAG, for the contrast check below.
+    fn luminance(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            unreachable!()
+        };
+        let lin = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (x, y) = (luminance(a) + 0.05, luminance(b) + 0.05);
+        if x > y { x / y } else { y / x }
+    }
+
+    /// The generated palettes pick text over the accent by luminance; make
+    /// sure that and the body text stay readable on every theme.
+    #[test]
+    fn text_is_legible_on_every_theme() {
+        for theme in THEMES {
+            for (what, fg, bg) in [
+                ("body", theme.foreground, theme.surface),
+                ("sidebar", theme.sidebar_fg, theme.sidebar_bg),
+                ("cursor", theme.cursor_fg, theme.cursor_bg),
+                (
+                    "focused header",
+                    theme.header_focus_fg,
+                    theme.header_focus_bg,
+                ),
+                ("footer key", theme.footer_key, theme.footer_bg),
+            ] {
+                let ratio = contrast(fg, bg);
+                assert!(ratio >= 3.0, "{}: {what} contrast {ratio:.2}", theme.name);
+            }
+        }
     }
 
     #[test]

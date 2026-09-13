@@ -5,6 +5,7 @@ pub mod markdown;
 pub mod modals;
 pub mod note_list;
 pub mod note_view;
+pub mod palettes;
 pub mod sidebar;
 pub mod theme;
 pub mod triage;
