@@ -1,10 +1,11 @@
 //! The palette.
 //!
-//! One `Theme` is a flat table of true colours. `textual-dark` is the original
-//! palette, a dark grey page with blue and amber accents. `red-graphite` and
-//! `red-graphite-dark` are Bear's Red Graphite: graphite chrome, one coral red
-//! (`#CD5654`, sampled from Bear) for every accent. The rest, in `palettes`,
-//! are generated from Bear's own theme files by `tools/bear_theme.py`.
+//! One `Theme` is a flat table of true colours. `red-graphite-dark`, the
+//! default, and `red-graphite` are Bear's Red Graphite: graphite chrome, one
+//! coral red (`#CD5654`, sampled from Bear) for every accent. `textual-dark`
+//! is the original palette, a dark grey page with blue and amber accents. The
+//! rest, in `palettes`, are generated from Bear's own theme files by
+//! `tools/bear_theme.py`.
 //!
 //! The active theme is a process-wide index into `THEMES`, set once from the
 //! config at startup, so drawing code can read it without threading a
@@ -250,9 +251,9 @@ pub const RED_GRAPHITE_DARK: Theme = Theme {
 };
 
 pub const THEMES: &[Theme] = &[
-    TEXTUAL_DARK,
-    RED_GRAPHITE,
     RED_GRAPHITE_DARK,
+    RED_GRAPHITE,
+    TEXTUAL_DARK,
     palettes::ACADEMIA,
     palettes::ATOM,
     palettes::AYU,
@@ -293,7 +294,9 @@ pub const THEMES: &[Theme] = &[
     palettes::TOOTHPASTE,
 ];
 
-pub const DEFAULT_THEME: &str = "textual-dark";
+/// Must be `THEMES[0]`: `ACTIVE` starts at zero, so anything that draws
+/// before the config is read gets this one.
+pub const DEFAULT_THEME: &str = "red-graphite-dark";
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
@@ -529,6 +532,12 @@ mod tests {
         );
         assert!(lookup("mauve").is_none());
         assert_eq!(names().count(), THEMES.len());
+    }
+
+    #[test]
+    fn the_default_is_the_theme_drawn_before_the_config_is_read() {
+        assert_eq!(THEMES[0].name, DEFAULT_THEME);
+        assert_eq!(current().name, DEFAULT_THEME);
     }
 
     #[test]

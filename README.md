@@ -110,7 +110,7 @@ poll_seconds = 5              # 0 disables the background refresh
 workspace = "work"            # start scoped to this tag
 bearcli = "/usr/local/bin/bearcli"  # optional; default searches PATH, then Bear.app
 icon_style = "auto"           # auto | nerd | emoji | lucide | none
-theme = "textual-dark"        # see Themes below; `bjorn --list-themes` prints the names
+theme = "red-graphite-dark"   # see Themes below; `bjorn --list-themes` prints the names
 
 [icons]                       # top-level tag -> Lucide icon name, or emoji:<glyph>
 tech = "terminal"
@@ -146,9 +146,9 @@ command line (`--list-themes` prints them):
 
 | Name | |
 |---|---|
-| `textual-dark` | the default: a dark grey page with blue accents |
-| `red-graphite` | Bear's Red Graphite: the graphite sidebar beside a white page, coral red (`#CD5654`) on the focused column, the cursor, the bullets, the links and the tags |
-| `red-graphite-dark` | the same red over Bear's graphite, for a dark terminal |
+| `red-graphite-dark` | the default: Bear's Red Graphite over graphite, coral red (`#CD5654`) on the focused column, the cursor, the bullets, the links and the tags |
+| `red-graphite` | the same red in Bear's light Red Graphite: a graphite sidebar beside a white page |
+| `textual-dark` | the original palette: a dark grey page with blue and amber accents |
 
 Every other theme Bear ships is here too, under its Bear name in lower case
 with hyphens for spaces:
