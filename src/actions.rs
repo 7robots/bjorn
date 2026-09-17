@@ -500,6 +500,13 @@ pub fn update_in_config(
         ("format", toml_string(&updated.format), true),
         ("confirm", updated.confirm.to_string(), updated.confirm),
         ("default", updated.default.to_string(), updated.default),
+        // Written as "" when cleared: `parse_action` reads a blank one back as
+        // None, so the read-back below still matches.
+        (
+            "prompt",
+            toml_string(updated.prompt.as_deref().unwrap_or("")),
+            updated.prompt.is_some(),
+        ),
         (
             "timeout",
             seconds.to_string(),
@@ -791,6 +798,53 @@ mod tests {
         .unwrap();
         assert!(!std::path::Path::new(&path).exists(), "{path}");
     }
+    #[test]
+    fn a_prompt_can_be_added_changed_and_cleared_by_an_edit() {
+        // `update_in_config` compares the whole Action on read-back, so a key it
+        // cannot write is a key that makes every edit fail.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bjorn/config.toml");
+        let plain = Action {
+            name: "Sync".into(),
+            command: "sync".into(),
+            ..Action::default()
+        };
+        add_to_config(&path, &plain).unwrap();
+
+        let asking = Action {
+            prompt: Some("Range".into()),
+            ..plain.clone()
+        };
+        update_in_config(&path, &plain, &asking).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("prompt = \"Range\"\n"),
+            "{}",
+            std::fs::read_to_string(&path).unwrap()
+        );
+        assert_eq!(
+            crate::config::Config::load(Some(&path)).unwrap().actions[0],
+            asking
+        );
+
+        let reworded = Action {
+            prompt: Some("Which range".into()),
+            ..plain.clone()
+        };
+        update_in_config(&path, &asking, &reworded).unwrap();
+        assert_eq!(
+            crate::config::Config::load(Some(&path)).unwrap().actions[0],
+            reworded
+        );
+
+        update_in_config(&path, &reworded, &plain).unwrap();
+        assert_eq!(
+            crate::config::Config::load(Some(&path)).unwrap().actions[0],
+            plain
+        );
+    }
+
     #[test]
     fn a_new_action_is_appended_and_the_file_around_it_survives() {
         let dir = tempfile::tempdir().unwrap();

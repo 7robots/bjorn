@@ -1747,10 +1747,12 @@ impl App {
     /// The confirm dialog when the action asks for one, else straight to it.
     fn confirm_action(&mut self, action: Action, note: Note, input: String) {
         if action.confirm {
-            let target = if input.is_empty() {
-                format!("“{}”", note.title)
-            } else {
-                format!("“{input}”")
+            let target = match (input.is_empty(), action.prompt.is_some()) {
+                // A prompt action acts on the answer, not on the note, so an
+                // empty answer must not name the note the cursor happens to be on.
+                (true, true) => "no input".to_string(),
+                (true, false) => format!("“{}”", note.title),
+                _ => format!("“{input}”"),
             };
             self.overlay = Some(Overlay::Confirm {
                 message: format!("Run “{}” on {target}?", action.name),
@@ -2135,7 +2137,8 @@ impl App {
                     KeyCode::Enter if name.value.trim().is_empty() => focus = 0,
                     KeyCode::Enter if command.value.trim().is_empty() => focus = 1,
                     KeyCode::Enter => {
-                        // An edit keeps what the form does not show, the timeout.
+                        // An edit keeps what the form does not show: the timeout
+                        // and the prompt. A test pins the prompt half of that.
                         let action = Action {
                             name: name.value.trim().to_string(),
                             command: command.value.trim().to_string(),

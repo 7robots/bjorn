@@ -359,6 +359,20 @@ async fn x_exports_to_the_prefilled_path_and_can_be_cancelled() {
     assert!(h.text().contains("Export as"));
     h.press("escape");
     assert!(!fake.config().export_dir.exists());
+
+    // An empty path is not a path: enter on a cleared field cancels. (The check
+    // lives in the ExportPath arm, since an empty answer to an action's prompt
+    // is a real answer.)
+    h.press("x");
+    h.press("enter");
+    for _ in 0..prefill(&h).chars().count() {
+        h.press("backspace");
+    }
+    h.press("enter");
+    h.settle().await;
+    assert!(h.app.overlay.is_none());
+    assert!(!fake.config().export_dir.exists(), "nothing was written");
+
     h.press("x");
     h.press("enter");
     assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Text"));

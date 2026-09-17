@@ -407,10 +407,11 @@ mod tests {
              format = \"HTML\"\nconfirm = true\ntimeout = 300\ndefault = true\n\n\
              prompt = \"Which bucket\"\n\n\
              [[actions]]\ncommand = \"pbcopy\"\nformat = \"nonsense\"\nprompt = \"  \"\n\n\
+             [[actions]]\nname = \"Typo\"\ncommand = \"true\"\nprompt = 5\n\n\
              [[actions]]\nname = \"No command\"\n",
         );
         let actions = Config::load(Some(&path)).unwrap().actions;
-        assert_eq!(actions.len(), 2, "the entry without a command is dropped");
+        assert_eq!(actions.len(), 3, "the entry without a command is dropped");
         assert_eq!(actions[0].name, "Publish to S3");
         assert_eq!(actions[0].format, "html");
         assert!(actions[0].confirm && actions[0].default);
@@ -420,6 +421,7 @@ mod tests {
         assert_eq!(actions[1].format, "md", "an unknown format falls back");
         assert!(!actions[1].confirm && !actions[1].default);
         assert_eq!(actions[1].prompt, None, "a blank prompt is no prompt");
+        assert_eq!(actions[2].prompt, None, "a non-string prompt is no prompt");
         assert_eq!(
             actions[1].timeout,
             std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)

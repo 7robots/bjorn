@@ -102,6 +102,11 @@ command = 'notes-sync "$BJORN_ACTION_INPUT"'
 prompt = "Range: today, week, last-week, 2w, or a date"
 ```
 
+The menu's detail line says `asks: <title>` for an action that has one. The
+add and edit form does not show `prompt`, so set it by hand in the config;
+editing an action through the form keeps the prompt it already has, the way it
+keeps a `timeout`.
+
 `enter` runs it, `esc` cancels. An empty answer still runs: a command that has
 a sensible default ("today", here) can treat "nothing typed" as asking for it,
 so the quick path stays two keys. With `confirm = true` as well the prompt comes
@@ -144,7 +149,18 @@ it up.
 ## Safety
 
 An action is a shell command you wrote, run with your credentials, on demand.
-Bjorn does not sandbox it and does not parse it. Two habits are worth keeping:
-set `confirm = true` on anything that publishes, deletes or costs money, and
-quote `"$BJORN_NOTE_FILE"` and `"$BJORN_NOTE_TITLE"` — note titles carry
-spaces, quotes and slashes, and only the filename is sanitized.
+Bjorn does not sandbox it and does not parse it. Three habits are worth keeping:
+set `confirm = true` on anything that publishes, deletes or costs money; quote
+`"$BJORN_NOTE_FILE"` and `"$BJORN_NOTE_TITLE"` — note titles carry spaces,
+quotes and slashes, and only the filename is sanitized; and quote
+`"$BJORN_ACTION_INPUT"` as well.
+
+The variables reach the command through its environment, never spliced into the
+command text, so a `;` or a `$(…)` inside one is inert. Two things undo that.
+Leaving a variable unquoted lets the shell split it into words, so a typed
+`--force` arrives as an *option* rather than as text and a `*` is expanded
+against the working directory. And handing one to something that evaluates its
+input — `eval`, `sh -c "$VAR"`, an arithmetic context like `$(( VAR ))` or
+`[[ $VAR -eq 1 ]]` — turns the text back into code. An action that cannot avoid
+that should carry `confirm = true`, which shows the answer back to you, quoted,
+before the command sees it.

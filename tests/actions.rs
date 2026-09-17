@@ -727,3 +727,68 @@ async fn a_prompt_action_that_confirms_quotes_the_answer() {
         .await;
     assert_eq!(receipt(&fake, "Sync"), "2w");
 }
+
+#[tokio::test]
+async fn an_action_without_a_prompt_still_gets_the_variable_set_and_empty() {
+    // Documented in docs/actions.md: `$BJORN_ACTION_INPUT` is always defined, so
+    // a command under `set -u` can read it without guarding.
+    let fake = Fake::new();
+    let receipt = fake.dir.path().join("Plain.receipt");
+    let config = config_with(
+        &fake,
+        vec![Action {
+            name: "Plain".into(),
+            command: format!(
+                "set -u; printf '[%s]' \"$BJORN_ACTION_INPUT\" > {}; echo sent",
+                shell_quote(&receipt.to_string_lossy())
+            ),
+            default: true,
+            ..Action::default()
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    h.until(|_| receipt.exists()).await;
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "[]");
+}
+
+#[tokio::test]
+async fn an_empty_answer_is_not_confirmed_as_the_note_title() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            confirm: true,
+            default: true,
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    h.press("enter");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
+    // The note under the cursor is "Sprint Planning"; naming it here would point
+    // at something this command never touches.
+    let text = h.text();
+    assert!(text.contains("Run “Sync” on no input?"), "{text}");
+    assert!(!text.contains("on “Sprint Planning”?"), "{text}");
+}
+
+#[tokio::test]
+async fn the_menu_says_an_action_asks_and_what_it_asks() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("a");
+    assert!(h.text().contains("asks: Range"), "{}", h.text());
+}
