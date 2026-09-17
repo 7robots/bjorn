@@ -66,6 +66,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    // An interactive action owns the window while it runs: its program draws its
+    // own screen and there is nothing useful to keep beside it, unlike the
+    // editor, which sits next to the note it is editing.
+    if app.session.is_some() {
+        rects.window = area;
+        draw_session(frame, app, body, &mut rects);
+        draw_footer_entries(frame, footer, SESSION_FOOTER);
+        app.rects = rects;
+        draw_toasts(frame, app, body);
+        return;
+    }
+
     let columns: Vec<Constraint> = match app.columns {
         3 => vec![
             Constraint::Length(SIDEBAR_WIDTH),
@@ -85,6 +97,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_notes(frame, app, areas[next], &mut rects);
         next += 1;
     }
+    rects.window = area;
     draw_reader(frame, app, areas[next], &mut rects);
     if app.editing.is_some() {
         draw_footer_entries(frame, footer, EDITING_FOOTER);
@@ -414,6 +427,39 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
         meta,
     );
 }
+
+/// The interactive action's screen, filling the body, with a title line naming
+/// it so the window never looks like it has been taken over by nothing.
+fn draw_session(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) {
+    let Some(session) = app.session.as_mut() else {
+        return;
+    };
+    let block = Block::bordered()
+        .border_style(theme::border())
+        .title(Line::from(format!(" {} ", session.name)).style(theme::header()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    rects.editor = inner;
+    session.pty.resize(inner.height, inner.width);
+    let parser = session.pty.parser();
+    let screen = parser.screen();
+    frame.render_widget(
+        PseudoTerminal::new(screen).cursor(Cursor::default().visibility(false)),
+        inner,
+    );
+    if !screen.hide_cursor() {
+        let (row, col) = screen.cursor_position();
+        if row < inner.height && col < inner.width {
+            frame.set_cursor_position((inner.x + col, inner.y + row));
+        }
+    }
+}
+
+/// While an interactive action runs every key goes to it.
+pub const SESSION_FOOTER: &[(&str, &str)] = &[
+    ("action", "Keys go to the command"),
+    ("quit it", "Back to Bjorn"),
+];
 
 /// While an editor is open every key goes to it; the footer says so.
 pub const EDITING_FOOTER: &[(&str, &str)] = &[

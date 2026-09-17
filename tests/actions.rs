@@ -347,6 +347,7 @@ async fn the_menu_marks_the_default_and_shows_the_highlighted_command() {
                 format: "html".into(),
                 confirm: true,
                 prompt: None,
+                interactive: false,
                 default: true,
                 timeout: Duration::from_secs(300),
             },
@@ -791,4 +792,61 @@ async fn the_menu_says_an_action_asks_and_what_it_asks() {
     h.load().await;
     h.press("a");
     assert!(h.text().contains("asks: Range"), "{}", h.text());
+}
+
+#[tokio::test]
+async fn an_interactive_action_takes_the_window_and_the_keyboard() {
+    let fake = Fake::new();
+    let receipt = fake.dir.path().join("typed");
+    // Draws a banner, waits for a line, writes it out: a stand-in for anything
+    // that talks back.
+    let config = config_with(
+        &fake,
+        vec![Action {
+            name: "Session".into(),
+            command: format!(
+                "printf 'SESSION UP %s' \"$BJORN_ACTION_INPUT\"; read -r line; printf '%s' \"$line\" > {}",
+                shell_quote(&receipt.to_string_lossy())
+            ),
+            interactive: true,
+            prompt: Some("Range".into()),
+            default: true,
+            ..Action::default()
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+
+    h.press("!");
+    h.type_text("week");
+    h.press("enter");
+    h.until(|app| app.session.is_some()).await;
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("SESSION UP"))
+    })
+    .await;
+    h.draw();
+    let text = h.text();
+    // The prompt's answer reached it, and the window is its own: the note
+    // columns are gone and the footer says where the keys go.
+    assert!(text.contains("SESSION UP week"), "{text}");
+    assert!(text.contains("Session"), "{text}");
+    assert!(text.contains("Keys go to the command"), "{text}");
+    assert!(
+        !text.contains("Garden Plan"),
+        "the note list is not drawn: {text}"
+    );
+
+    // Keys reach the command, not Bjorn: "q" would otherwise ask to quit.
+    h.type_text("qq");
+    h.press("enter");
+    h.until(|_| receipt.exists()).await;
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "qq");
+
+    // When it ends, Bjorn comes back.
+    h.until(|app| app.session.is_none()).await;
+    h.draw();
+    assert!(h.text().contains("Garden Plan"), "{}", h.text());
 }

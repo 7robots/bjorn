@@ -232,6 +232,12 @@ format = "txt"
 name = "Mail it to someone"
 command = 'mail -s "$BJORN_NOTE_TITLE" "$BJORN_ACTION_INPUT" < "$BJORN_NOTE_FILE"'
 prompt = "Send to which address"   # asks first, answer in $BJORN_ACTION_INPUT
+
+[[actions]]
+name = "Open a session"
+command = 'my-session "$BJORN_ACTION_INPUT"'
+prompt = "What should it do?"
+interactive = true                 # takes the window, like the editor does
 ```
 
 `a` opens the action menu — a search box over your actions, filtered as you
@@ -246,7 +252,9 @@ rendered the way export renders it, written to a temp file the command gets
 as `$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in
 the environment; the file goes away when the command ends. The first line
 the command prints comes back as a toast, and a non-zero exit is reported
-with its stderr. Full reference: [docs/actions.md](docs/actions.md).
+with its stderr. An action marked `interactive` instead takes the window and the
+keyboard in a pseudo-terminal until its command exits, for the ones that ask
+their own questions. Full reference: [docs/actions.md](docs/actions.md).
 
 ## Development
 

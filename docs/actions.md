@@ -83,6 +83,7 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 | `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`. An unknown name falls back to `md` |
 | `confirm` | `false` | ask before running. Worth setting on anything that publishes or deletes |
 | `prompt` | — | ask for one line of text first and pass it as `$BJORN_ACTION_INPUT`. The value is the prompt's title (`prompt = "Which bucket"`). A blank one is no prompt at all |
+| `interactive` | `false` | give the command the window and the keyboard in a pty, instead of capturing its output. For anything that talks back |
 | `timeout` | `60` | seconds; a command that overruns is killed and reported |
 | `default` | `false` | the action `!` runs. With exactly one action configured, that one is the default whether or not it says so |
 
@@ -113,6 +114,37 @@ so the quick path stays two keys. With `confirm = true` as well the prompt comes
 first and the dialog quotes the answer — *Run "Sync my notes" on "last-week"?* —
 so a fat-fingered range is caught before the command sees it.
 
+## Commands that talk back
+
+An ordinary action is a one-shot: Bjorn runs it, keeps the first line it printed
+and shows that as a toast. A command that wants to *ask* something — a session,
+a repl, an installer, a tool with its own prompts — has nowhere to ask it.
+`interactive = true` gives it the window instead:
+
+```toml
+[[actions]]
+name = "Sync my notes"
+command = 'notes-sync "$BJORN_ACTION_INPUT"'
+prompt = "Range: today, week, last-week, or a date"
+interactive = true
+```
+
+The command runs in a pseudo-terminal that fills the window, titled with the
+action's name, and every key goes to it until it exits — the same machinery the
+editor uses, which is why `$EDITOR` works the way it does. Then Bjorn comes
+back, and a non-zero exit is reported as a toast, since there is no captured
+output to report instead.
+
+It gets everything a captured action gets: the rendered note as
+`$BJORN_NOTE_FILE`, the temp directory as its working directory, and the whole
+`BJORN_*` environment including `$BJORN_ACTION_INPUT`. The one difference is
+stdin, which belongs to the terminal rather than to the note — a command that
+wants the text reads `"$BJORN_NOTE_FILE"`.
+
+The editor fills the reader pane so the note list stays beside it; an
+interactive action fills the window, because its program owns its own screen and
+there is nothing useful to keep next to it.
+
 ## What the command gets
 
 The note is rendered exactly as export renders it and written to a temp
@@ -121,7 +153,8 @@ after the note (`Sprint Planning.md`), and it is deleted as soon as the command
 ends.
 
 - **stdin** — the note's text in the chosen format. A TextBundle is a folder, so
-  stdin gets its `text.md`.
+  stdin gets its `text.md`. An `interactive` action is the exception: its stdin
+  is the terminal, so it reads the note from `"$BJORN_NOTE_FILE"`.
 - `BJORN_NOTE_FILE` — the full path to that file. Quote it; titles have spaces.
 - `BJORN_ACTION_INPUT` — what `prompt` collected; empty when the action has no
   prompt, and empty when the prompt was answered with nothing.

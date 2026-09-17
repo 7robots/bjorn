@@ -102,6 +102,15 @@ pub enum Msg {
         job: EditorJob,
         result: Result<(), BearError>,
     },
+    /// An interactive action is ready to start, or could not be prepared.
+    SessionReady {
+        action: Box<Action>,
+        payload: Result<Box<crate::actions::Payload>, String>,
+    },
+    /// The interactive action drew something; a redraw is due.
+    SessionOutput,
+    /// The interactive action's command ended.
+    SessionExited(std::io::Result<portable_pty::ExitStatus>),
     /// The editor drew something; a redraw is due.
     EditorOutput,
     /// The editor process ended.
@@ -154,12 +163,23 @@ pub struct Rects {
     pub reader_body: Rect,
     /// Where the editor's screen is drawn while one is open.
     pub editor: Rect,
+    /// The whole frame, for an interactive action that fills it.
+    pub window: Rect,
 }
 
 /// An editor open in the reader pane.
 pub struct Editing {
     pub job: EditorJob,
     pub pty: PtySession,
+}
+
+/// An `interactive = true` action, running in a pty with the window and the
+/// keyboard, until its command exits.
+pub struct Session {
+    pub name: String,
+    pub pty: PtySession,
+    /// Holds the rendered note on disk for as long as the command can read it.
+    pub payload: crate::actions::Payload,
 }
 
 pub struct App {
@@ -200,6 +220,7 @@ pub struct App {
     written_titles: Vec<String>,
     /// The editor running in the reader pane, if any. Every key goes to it.
     pub editing: Option<Editing>,
+    pub session: Option<Session>,
     /// A note just created, to open in the editor once the reload shows it.
     pending_edit: Option<String>,
     /// The triage screen while it is up; it covers the three columns.
@@ -278,6 +299,7 @@ impl App {
             busy: false,
             written_titles: Vec::new(),
             editing: None,
+            session: None,
             pending_edit: None,
             triage: None,
             remctl,
@@ -590,6 +612,9 @@ impl App {
                 Err(err) => self.error("Read failed", &err),
             },
             Msg::Written { job, result } => self.on_written(job, result),
+            Msg::SessionReady { action, payload } => self.start_session(*action, payload),
+            Msg::SessionOutput => {}
+            Msg::SessionExited(status) => self.session_exited(status),
             Msg::EditorOutput => {}
             Msg::EditorExited(status) => self.editor_exited(status),
             Msg::Trashed { note, result } => match result {
@@ -1344,7 +1369,7 @@ impl App {
             },
         );
         let (cols, rows) = self.editor_viewport();
-        match PtySession::spawn(&job.command, rows, cols, sink) {
+        match PtySession::spawn(&job.command, rows, cols, &[], None, sink) {
             Ok(pty) => {
                 self.busy = true;
                 self.editing = Some(Editing { job, pty });
@@ -1362,6 +1387,130 @@ impl App {
     }
 
     /// The pane the editor draws into, as (cols, rows).
+    /// Render the note and describe the command's world, the same way a
+    /// captured action does.
+    async fn action_payload(
+        client: &BearClient,
+        action: &Action,
+        note: &Note,
+        input: &str,
+    ) -> Result<crate::actions::Payload, String> {
+        let fmt = crate::export::format_by_id(&action.format);
+        let content = client.cat(&note.id).await.map_err(|e| e.to_string())?;
+        let mut images: HashMap<String, Vec<u8>> = HashMap::new();
+        if fmt.needs_attachments && note.attachments > 0 {
+            for name in client
+                .attachments(&note.id)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                let bytes = client
+                    .attachment(&note.id, &name)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                images.insert(name, bytes);
+            }
+        }
+        actions::prepare(action, note, &content.content, &images, input)
+            .await
+            .map_err(|e| e.0)
+    }
+
+    /// Give an `interactive = true` action the window and the keyboard.
+    fn start_session(
+        &mut self,
+        action: Action,
+        payload: Result<Box<crate::actions::Payload>, String>,
+    ) {
+        let payload = match payload {
+            Ok(payload) => *payload,
+            Err(err) => {
+                self.notify_titled(
+                    &format!("“{}” could not start", action.name),
+                    &err,
+                    Severity::Error,
+                    Duration::from_secs(10),
+                );
+                return;
+            }
+        };
+        let output = self.tx.clone();
+        let exited = self.tx.clone();
+        let sink = (
+            move || {
+                let _ = output.send(Msg::SessionOutput);
+            },
+            move |status| {
+                let _ = exited.send(Msg::SessionExited(status));
+            },
+        );
+        let (cols, rows) = self.session_viewport();
+        let command = vec!["sh".to_string(), "-c".to_string(), action.command.clone()];
+        match PtySession::spawn(
+            &command,
+            rows,
+            cols,
+            &payload.env,
+            Some(payload.dir.path()),
+            sink,
+        ) {
+            Ok(pty) => {
+                self.busy = true;
+                self.session = Some(Session {
+                    name: action.name.clone(),
+                    pty,
+                    payload,
+                });
+            }
+            Err(err) => self.notify_titled(
+                &format!("“{}” could not start", action.name),
+                &format!("Could not run the command: {err}"),
+                Severity::Error,
+                Duration::from_secs(10),
+            ),
+        }
+    }
+
+    /// The command ended: the window comes back, and a non-zero exit is said
+    /// out loud because nothing was captured to say it.
+    fn session_exited(&mut self, status: std::io::Result<portable_pty::ExitStatus>) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        self.busy = false;
+        match status {
+            Err(err) => self.notify_titled(
+                &session.name,
+                &format!("Could not run the command: {err}"),
+                Severity::Error,
+                Duration::from_secs(10),
+            ),
+            Ok(status) if !status.success() => self.notify_titled(
+                &session.name,
+                &format!("exit {}", status.exit_code()),
+                Severity::Error,
+                Duration::from_secs(10),
+            ),
+            Ok(_) => self.notify(
+                &format!("“{}” finished.", session.name),
+                Duration::from_secs(3),
+            ),
+        }
+    }
+
+    /// An interactive action gets the whole window: its program owns the screen,
+    /// unlike the editor, which sits beside the note it is editing.
+    fn session_viewport(&self) -> (u16, u16) {
+        let window = self.rects.window;
+        // A first guess only: the draw that follows resizes the pty to the
+        // pane it actually gets, the way the editor does.
+        (
+            window.width.max(1),
+            // The footer keeps its line, so the keys stay visible.
+            window.height.saturating_sub(1).max(1),
+        )
+    }
+
     fn editor_viewport(&self) -> (u16, u16) {
         let (width, height) = self.reader_viewport();
         (
@@ -1768,6 +1917,17 @@ impl App {
         let client = self.client.clone();
         let tx = self.tx.clone();
         let name = action.name.clone();
+        if action.interactive {
+            self.notify(&format!("Starting “{name}”…"), Duration::from_secs(3));
+            tokio::spawn(async move {
+                let payload = Self::action_payload(&client, &action, &note, &input).await;
+                let _ = tx.send(Msg::SessionReady {
+                    action: Box::new(action),
+                    payload: payload.map(Box::new),
+                });
+            });
+            return;
+        }
         self.notify(&format!("Running “{name}”…"), Duration::from_secs(3));
         tokio::spawn(async move {
             let result: Result<String, String> = async {
@@ -1799,6 +1959,10 @@ impl App {
     // -- input ---------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if let Some(session) = self.session.as_mut() {
+            session.pty.send_key(key);
+            return;
+        }
         if let Some(editing) = self.editing.as_mut() {
             editing.pty.send_key(key);
             return;

@@ -26,6 +26,9 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
+- An action can take the window and the keyboard (`interactive = true`), running
+  in a pty like the editor does, for commands that ask their own questions
+  rather than printing one line and leaving.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog

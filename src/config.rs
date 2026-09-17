@@ -266,6 +266,7 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
         format: crate::export::format_by_id(&format).id.to_string(),
         confirm: truthy(entry.get("confirm"), false),
         prompt,
+        interactive: truthy(entry.get("interactive"), false),
         timeout: std::time::Duration::from_secs(timeout),
         default: truthy(entry.get("default"), false),
     })

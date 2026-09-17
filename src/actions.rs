@@ -42,6 +42,10 @@ pub struct Action {
     /// Ask for one line of text first, shown as the prompt's title, and pass it
     /// to the command as `$BJORN_ACTION_INPUT`. `None` runs straight away.
     pub prompt: Option<String>,
+    /// Give the command the window and the keyboard, in a pty, instead of
+    /// capturing its output. For anything that talks back: a session, a repl,
+    /// a tool that asks its own questions.
+    pub interactive: bool,
     pub timeout: Duration,
     /// Run by `!` without opening the palette.
     pub default: bool,
@@ -55,6 +59,7 @@ impl Default for Action {
             format: crate::export::DEFAULT_FORMAT.to_string(),
             confirm: false,
             prompt: None,
+            interactive: false,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
             default: false,
         }
@@ -158,13 +163,27 @@ pub fn summarize(stdout: &str, stderr: &str) -> String {
 
 /// Render the note and run the command. Returns whatever the command said, or
 /// the failure. `images` is only read by the formats that want attachments.
-pub async fn run(
+/// The rendered note on disk, plus everything its command needs. Both the
+/// captured path (`run`) and the interactive one start here, so an action sees
+/// the same file, the same environment and the same working directory either way.
+#[derive(Debug)]
+pub struct Payload {
+    /// Held for as long as the command may read it; dropping it removes the file.
+    pub dir: tempfile::TempDir,
+    pub file: PathBuf,
+    pub env: Vec<(String, String)>,
+    /// The note's text, for the commands that take it on stdin.
+    pub stdin: Vec<u8>,
+}
+
+/// Render `note` the way export renders it and describe the command's world.
+pub async fn prepare(
     action: &Action,
     note: &Note,
     content: &str,
     images: &HashMap<String, Vec<u8>>,
     input: &str,
-) -> Result<String, ActionError> {
+) -> Result<Payload, ActionError> {
     let fmt = format_by_id(&action.format);
     let dir = tempfile::Builder::new()
         .prefix("bjorn-action-")
@@ -185,17 +204,39 @@ pub async fn run(
 
     // The text goes to stdin as well, so `curl --data-binary @-` works without
     // touching the file. A TextBundle is a folder; its markdown is inside.
-    let stdin_body = if file.is_dir() {
+    let stdin = if file.is_dir() {
         std::fs::read(file.join("text.md")).unwrap_or_default()
     } else {
         std::fs::read(&file).unwrap_or_default()
     };
+    let env = environment(action, note, &file, input);
+    Ok(Payload {
+        dir,
+        file,
+        env,
+        stdin,
+    })
+}
+
+pub async fn run(
+    action: &Action,
+    note: &Note,
+    content: &str,
+    images: &HashMap<String, Vec<u8>>,
+    input: &str,
+) -> Result<String, ActionError> {
+    let Payload {
+        dir,
+        file: _,
+        env,
+        stdin: stdin_body,
+    } = prepare(action, note, content, images, input).await?;
 
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")
         .arg(&action.command)
         .current_dir(dir.path())
-        .envs(environment(action, note, &file, input))
+        .envs(env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -866,6 +907,7 @@ mod tests {
             format: "html".into(),
             confirm: true,
             prompt: None,
+            interactive: false,
             default: true,
             timeout: Duration::from_secs(90),
         };
