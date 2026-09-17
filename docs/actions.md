@@ -82,11 +82,31 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 | `command` | — | required; run through `sh -c`, so pipes, `&&` and redirection all work |
 | `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`. An unknown name falls back to `md` |
 | `confirm` | `false` | ask before running. Worth setting on anything that publishes or deletes |
+| `prompt` | — | ask for one line of text first and pass it as `$BJORN_ACTION_INPUT`. The value is the prompt's title (`prompt = "Which bucket"`). A blank one is no prompt at all |
 | `timeout` | `60` | seconds; a command that overruns is killed and reported |
 | `default` | `false` | the action `!` runs. With exactly one action configured, that one is the default whether or not it says so |
 
 An entry without a `command` is skipped rather than raised, so a half-written
 action never stops the app.
+
+## Asking for something first
+
+An action with a `prompt` asks for one line of text before it runs, and hands
+it to the command as `$BJORN_ACTION_INPUT`. It is one action instead of five
+when the only difference between them is an argument:
+
+```toml
+[[actions]]
+name = "Sync my notes"
+command = 'notes-sync "$BJORN_ACTION_INPUT"'
+prompt = "Range: today, week, last-week, 2w, or a date"
+```
+
+`enter` runs it, `esc` cancels. An empty answer still runs: a command that has
+a sensible default ("today", here) can treat "nothing typed" as asking for it,
+so the quick path stays two keys. With `confirm = true` as well the prompt comes
+first and the dialog quotes the answer — *Run "Sync my notes" on "last-week"?* —
+so a fat-fingered range is caught before the command sees it.
 
 ## What the command gets
 
@@ -98,6 +118,8 @@ ends.
 - **stdin** — the note's text in the chosen format. A TextBundle is a folder, so
   stdin gets its `text.md`.
 - `BJORN_NOTE_FILE` — the full path to that file. Quote it; titles have spaces.
+- `BJORN_ACTION_INPUT` — what `prompt` collected; empty when the action has no
+  prompt, and empty when the prompt was answered with nothing.
 - `BJORN_NOTE_TITLE`, `BJORN_NOTE_ID`, `BJORN_NOTE_TAGS` (comma-separated),
   `BJORN_NOTE_CREATED`, `BJORN_NOTE_MODIFIED` (RFC 3339), `BJORN_NOTE_PINNED`
   (`0`/`1`), `BJORN_NOTE_FORMAT`, `BJORN_ACTION`.

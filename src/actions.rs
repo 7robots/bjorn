@@ -39,6 +39,9 @@ pub struct Action {
     pub format: String,
     /// Ask before running. For anything that publishes or deletes.
     pub confirm: bool,
+    /// Ask for one line of text first, shown as the prompt's title, and pass it
+    /// to the command as `$BJORN_ACTION_INPUT`. `None` runs straight away.
+    pub prompt: Option<String>,
     pub timeout: Duration,
     /// Run by `!` without opening the palette.
     pub default: bool,
@@ -51,6 +54,7 @@ impl Default for Action {
             command: String::new(),
             format: crate::export::DEFAULT_FORMAT.to_string(),
             confirm: false,
+            prompt: None,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
             default: false,
         }
@@ -104,12 +108,19 @@ pub fn default_action(actions: &[Action]) -> Option<&Action> {
         })
 }
 
-/// The environment an action's command sees, on top of Bjorn's own.
-pub fn environment(action: &Action, note: &Note, file: &std::path::Path) -> Vec<(String, String)> {
+/// The environment an action's command sees, on top of Bjorn's own. `input` is
+/// what the action's `prompt` collected, and is empty when it has none.
+pub fn environment(
+    action: &Action,
+    note: &Note,
+    file: &std::path::Path,
+    input: &str,
+) -> Vec<(String, String)> {
     let stamp =
         |t: Option<chrono::DateTime<chrono::Utc>>| t.map(|t| t.to_rfc3339()).unwrap_or_default();
     vec![
         ("BJORN_ACTION".to_string(), action.name.clone()),
+        ("BJORN_ACTION_INPUT".to_string(), input.to_string()),
         ("BJORN_NOTE_ID".to_string(), note.id.clone()),
         ("BJORN_NOTE_TITLE".to_string(), note.title.clone()),
         ("BJORN_NOTE_FILE".to_string(), file.display().to_string()),
@@ -152,6 +163,7 @@ pub async fn run(
     note: &Note,
     content: &str,
     images: &HashMap<String, Vec<u8>>,
+    input: &str,
 ) -> Result<String, ActionError> {
     let fmt = format_by_id(&action.format);
     let dir = tempfile::Builder::new()
@@ -183,7 +195,7 @@ pub async fn run(
     cmd.arg("-c")
         .arg(&action.command)
         .current_dir(dir.path())
-        .envs(environment(action, note, &file))
+        .envs(environment(action, note, &file, input))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -711,6 +723,7 @@ mod tests {
             &note(),
             "# Sprint Planning\n\nbody",
             &HashMap::new(),
+            "",
         )
         .await
         .unwrap();
@@ -727,6 +740,7 @@ mod tests {
             &note(),
             "# Sprint Planning\n\nbody",
             &HashMap::new(),
+            "",
         )
         .await
         .unwrap();
@@ -740,6 +754,7 @@ mod tests {
             &note(),
             "body",
             &HashMap::new(),
+            "",
         )
         .await
         .unwrap_err();
@@ -756,6 +771,7 @@ mod tests {
             &note(),
             "body",
             &HashMap::new(),
+            "",
         )
         .await
         .unwrap_err();
@@ -769,6 +785,7 @@ mod tests {
             &note(),
             "body",
             &HashMap::new(),
+            "",
         )
         .await
         .unwrap();
@@ -794,6 +811,7 @@ mod tests {
             command: "printf '%s\\n' \"$BJORN_NOTE_TITLE\" C:\\path".into(),
             format: "html".into(),
             confirm: true,
+            prompt: None,
             default: true,
             timeout: Duration::from_secs(90),
         };

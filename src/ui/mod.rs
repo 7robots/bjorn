@@ -850,6 +850,9 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                         ),
                         format!("stops after {} s", action.timeout.as_secs()),
                     ];
+                    if let Some(title) = &action.prompt {
+                        facts.push(format!("asks: {title}"));
+                    }
                     if action.confirm {
                         facts.push("asks before running".into());
                     }
