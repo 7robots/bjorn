@@ -161,8 +161,6 @@ pub fn summarize(stdout: &str, stderr: &str) -> String {
     }
 }
 
-/// Render the note and run the command. Returns whatever the command said, or
-/// the failure. `images` is only read by the formats that want attachments.
 /// The rendered note on disk, plus everything its command needs. Both the
 /// captured path (`run`) and the interactive one start here, so an action sees
 /// the same file, the same environment and the same working directory either way.
@@ -177,6 +175,7 @@ pub struct Payload {
 }
 
 /// Render `note` the way export renders it and describe the command's world.
+/// `images` is only read by the formats that want attachments.
 pub async fn prepare(
     action: &Action,
     note: &Note,
@@ -218,6 +217,8 @@ pub async fn prepare(
     })
 }
 
+/// Render the note and run the command. Returns whatever the command said, or
+/// the failure. `images` is only read by the formats that want attachments.
 pub async fn run(
     action: &Action,
     note: &Note,

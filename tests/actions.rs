@@ -17,8 +17,11 @@ fn recording(dir: &std::path::Path, name: &str) -> Action {
     Action {
         name: name.to_string(),
         command: format!(
-            "{{ printf '%s\\n%s\\n%s\\n' \"$BJORN_ACTION\" \"$BJORN_NOTE_TITLE\" \"$BJORN_NOTE_FILE\"; cat; }} > {}; echo sent",
-            shell_quote(&receipt.to_string_lossy())
+            // Written aside and moved into place, so a test that waits for the
+            // receipt to exist never reads it half-written.
+            "{{ printf '%s\\n%s\\n%s\\n' \"$BJORN_ACTION\" \"$BJORN_NOTE_TITLE\" \"$BJORN_NOTE_FILE\"; cat; }} > {tmp} && mv {tmp} {receipt}; echo sent",
+            tmp = shell_quote(&format!("{}.tmp", receipt.to_string_lossy())),
+            receipt = shell_quote(&receipt.to_string_lossy())
         ),
         ..Action::default()
     }
@@ -805,8 +808,8 @@ async fn an_interactive_action_takes_the_window_and_the_keyboard() {
         vec![Action {
             name: "Session".into(),
             command: format!(
-                "printf 'SESSION UP %s' \"$BJORN_ACTION_INPUT\"; read -r line; printf '%s' \"$line\" > {}",
-                shell_quote(&receipt.to_string_lossy())
+                "printf 'SESSION UP %s' \"$BJORN_ACTION_INPUT\"; read -r line; printf '%s' \"$line\" > {receipt}.tmp && mv {receipt}.tmp {receipt}",
+                receipt = shell_quote(&receipt.to_string_lossy())
             ),
             interactive: true,
             prompt: Some("Range".into()),
@@ -849,4 +852,133 @@ async fn an_interactive_action_takes_the_window_and_the_keyboard() {
     h.until(|app| app.session.is_none()).await;
     h.draw();
     assert!(h.text().contains("Garden Plan"), "{}", h.text());
+}
+
+/// An interactive default action running `command`.
+fn interactive(fake: &Fake, command: &str) -> Config {
+    config_with(
+        fake,
+        vec![Action {
+            name: "Session".into(),
+            command: command.to_string(),
+            interactive: true,
+            default: true,
+            ..Action::default()
+        }],
+    )
+}
+
+#[tokio::test]
+async fn keys_wait_while_an_interactive_action_starts() {
+    let fake = Fake::new();
+    let mut h = fake.harness_with(
+        interactive(&fake, "printf 'SESSION UP'; read -r line"),
+        None,
+    );
+    h.load().await;
+
+    // Before the note is rendered: a second `!` must not start a second
+    // session, and `q` must not open a quit dialog behind the first.
+    h.press("!");
+    assert!(h.app.session.is_none(), "still preparing");
+    h.press("!");
+    h.press("q");
+    assert!(
+        h.app.overlay.is_none(),
+        "{:?}",
+        h.app.overlay.as_ref().map(|o| o.name())
+    );
+
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("SESSION UP"))
+    })
+    .await;
+    h.settle().await;
+    assert!(h.app.overlay.is_none());
+    assert!(
+        !h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.contains("did not start")),
+        "{:?}",
+        h.app.toast_messages()
+    );
+
+    // The pty is the size of the pane it is drawn in.
+    let pane = bjorn::ui::session_pane(h.app.rects.window);
+    let session = h.app.session.as_ref().unwrap();
+    assert_eq!(session.pty.size(), (pane.height, pane.width));
+
+    h.press("enter");
+    h.until(|app| app.session.is_none()).await;
+}
+
+#[tokio::test]
+async fn esc_calls_off_an_interactive_action_that_has_not_started() {
+    let fake = Fake::new();
+    let ran = fake.dir.path().join("ran");
+    let command = format!("touch {}", shell_quote(&ran.to_string_lossy()));
+    let mut h = fake.harness_with(interactive(&fake, &command), None);
+    h.load().await;
+
+    h.press("!");
+    h.press("escape");
+    h.until(|app| app.toast_messages().iter().any(|m| m.contains("cancelled")))
+        .await;
+    h.settle().await;
+    assert!(h.app.session.is_none());
+    assert!(!ran.exists(), "the command never ran");
+
+    // Nothing is left holding the keyboard.
+    h.press("q");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
+}
+
+#[tokio::test]
+async fn an_interactive_action_gets_the_mouse() {
+    let fake = Fake::new();
+    let receipt = fake.dir.path().join("mouse");
+    // Turns on mouse reporting, then records the first report it is sent.
+    let command = format!(
+        "stty -icanon -echo min 1; printf '\\033[?1000hREADY'; dd bs=1 count=6 2>/dev/null | od -An -tx1 > {r}.tmp && mv {r}.tmp {r}",
+        r = shell_quote(&receipt.to_string_lossy())
+    );
+    let mut h = fake.harness_with(interactive(&fake, &command), None);
+    h.load().await;
+    h.press("!");
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("READY"))
+    })
+    .await;
+
+    let pane = h.app.rects.editor;
+    h.click(pane.x + 2, pane.y + 1);
+    h.until(|_| receipt.exists()).await;
+    // ESC [ M, then button 0 (+32), then column 3 and row 2 (1-based, +32).
+    let bytes = std::fs::read_to_string(&receipt).unwrap();
+    assert_eq!(
+        bytes.split_whitespace().collect::<Vec<_>>(),
+        ["1b", "5b", "4d", "20", "23", "22"]
+    );
+    h.until(|app| app.session.is_none()).await;
+}
+
+#[tokio::test]
+async fn shutdown_kills_an_interactive_action() {
+    let fake = Fake::new();
+    let mut h = fake.harness_with(interactive(&fake, "printf 'SESSION UP'; sleep 30"), None);
+    h.load().await;
+    h.press("!");
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("SESSION UP"))
+    })
+    .await;
+    h.app.shutdown();
+    h.until(|app| app.session.is_none()).await;
 }

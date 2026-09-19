@@ -221,6 +221,9 @@ pub struct App {
     /// The editor running in the reader pane, if any. Every key goes to it.
     pub editing: Option<Editing>,
     pub session: Option<Session>,
+    /// An interactive action whose note is still being rendered: its name.
+    /// Keys wait (`esc` cancels) so nothing opens underneath the session.
+    session_starting: Option<String>,
     /// A note just created, to open in the editor once the reload shows it.
     pending_edit: Option<String>,
     /// The triage screen while it is up; it covers the three columns.
@@ -300,6 +303,7 @@ impl App {
             written_titles: Vec::new(),
             editing: None,
             session: None,
+            session_starting: None,
             pending_edit: None,
             triage: None,
             remctl,
@@ -1345,6 +1349,18 @@ impl App {
     }
 
     fn open_editor(&mut self, note: Note, before: NoteContent) {
+        if let Some(running) = self
+            .session
+            .as_ref()
+            .map(|s| s.name.clone())
+            .or(self.session_starting.clone())
+        {
+            self.notify(
+                &format!("“{running}” is running; the editor did not open."),
+                Duration::from_secs(5),
+            );
+            return;
+        }
         let editor = resolve_editor(&self.config, &|name| self.env(name));
         let job = match editor::prepare(&note, &before, &editor) {
             Ok(job) => job,
@@ -1422,6 +1438,21 @@ impl App {
         action: Action,
         payload: Result<Box<crate::actions::Payload>, String>,
     ) {
+        // Cancelled with `esc` while the note was being rendered: dropping the
+        // payload removes its temp directory.
+        if self.session_starting.take().is_none() {
+            return;
+        }
+        if let Some(running) = self.running_session() {
+            self.notify(
+                &format!(
+                    "“{running}” is still running; “{}” did not start.",
+                    action.name
+                ),
+                Duration::from_secs(5),
+            );
+            return;
+        }
         let payload = match payload {
             Ok(payload) => *payload,
             Err(err) => {
@@ -1501,14 +1532,22 @@ impl App {
     /// An interactive action gets the whole window: its program owns the screen,
     /// unlike the editor, which sits beside the note it is editing.
     fn session_viewport(&self) -> (u16, u16) {
-        let window = self.rects.window;
-        // A first guess only: the draw that follows resizes the pty to the
-        // pane it actually gets, the way the editor does.
-        (
-            window.width.max(1),
-            // The footer keeps its line, so the keys stay visible.
-            window.height.saturating_sub(1).max(1),
-        )
+        // The pane `draw` will give it, so a command that reads its size once
+        // at startup lays out to the size it really gets.
+        let pane = crate::ui::session_pane(self.rects.window);
+        (pane.width.max(1), pane.height.max(1))
+    }
+
+    /// What is holding the terminal, if anything: an interactive action,
+    /// running or being prepared, or the editor.
+    fn running_session(&self) -> Option<String> {
+        if let Some(session) = &self.session {
+            return Some(session.name.clone());
+        }
+        if let Some(name) = &self.session_starting {
+            return Some(name.clone());
+        }
+        self.editing.as_ref().map(|_| "the editor".to_string())
     }
 
     fn editor_viewport(&self) -> (u16, u16) {
@@ -1566,6 +1605,9 @@ impl App {
     pub fn shutdown(&mut self) {
         if let Some(editing) = self.editing.as_mut() {
             editing.pty.kill();
+        }
+        if let Some(session) = self.session.as_mut() {
+            session.pty.kill();
         }
     }
 
@@ -1918,7 +1960,18 @@ impl App {
         let tx = self.tx.clone();
         let name = action.name.clone();
         if action.interactive {
-            self.notify(&format!("Starting “{name}”…"), Duration::from_secs(3));
+            if let Some(running) = self.running_session() {
+                self.notify(
+                    &format!("“{running}” is already running."),
+                    Duration::from_secs(3),
+                );
+                return;
+            }
+            self.session_starting = Some(name.clone());
+            self.notify(
+                &format!("Starting “{name}”… (esc cancels)"),
+                Duration::from_secs(3),
+            );
             tokio::spawn(async move {
                 let payload = Self::action_payload(&client, &action, &note, &input).await;
                 let _ = tx.send(Msg::SessionReady {
@@ -1961,6 +2014,17 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         if let Some(session) = self.session.as_mut() {
             session.pty.send_key(key);
+            return;
+        }
+        // The session is about to take the keyboard; a key now would act on
+        // Bjorn behind it (a quit dialog nobody can see), so only `esc`, to
+        // call it off, counts.
+        if let Some(name) = &self.session_starting {
+            if key.code == KeyCode::Esc {
+                let name = name.clone();
+                self.session_starting = None;
+                self.notify(&format!("“{name}” cancelled."), Duration::from_secs(3));
+            }
             return;
         }
         if let Some(editing) = self.editing.as_mut() {
@@ -2391,6 +2455,22 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(session) = self.session.as_mut() {
+            let pane = self.rects.editor;
+            if mouse.column >= pane.x
+                && mouse.column < pane.right()
+                && mouse.row >= pane.y
+                && mouse.row < pane.bottom()
+            {
+                session
+                    .pty
+                    .send_mouse(mouse, mouse.column - pane.x, mouse.row - pane.y);
+            }
+            return;
+        }
+        if self.session_starting.is_some() {
+            return;
+        }
         if let Some(editing) = self.editing.as_mut() {
             let pane = self.rects.editor;
             if mouse.column >= pane.x

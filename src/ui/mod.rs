@@ -52,7 +52,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Every pane paints its own surface over this; it covers the gaps and
     // gives the reader and the modals their background.
     frame.buffer_mut().set_style(area, theme::screen());
-    let [body, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(area);
+    let [body, footer] = split_footer(area);
     let mut rects = Rects::default();
 
     if app.triage.is_some() {
@@ -428,15 +428,31 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
     );
 }
 
+/// The window less the two-line footer.
+fn split_footer(area: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(area)
+}
+
+/// The border around an interactive action's screen.
+fn session_block(name: &str) -> Block<'static> {
+    Block::bordered()
+        .border_style(theme::border())
+        .title(Line::from(format!(" {name} ")).style(theme::header()))
+}
+
+/// Where an interactive action's screen goes in a window of `area`: inside the
+/// border, above the footer. `App` sizes the pty from this before the first draw.
+pub fn session_pane(area: Rect) -> Rect {
+    session_block("").inner(split_footer(area)[0])
+}
+
 /// The interactive action's screen, filling the body, with a title line naming
 /// it so the window never looks like it has been taken over by nothing.
 fn draw_session(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) {
     let Some(session) = app.session.as_mut() else {
         return;
     };
-    let block = Block::bordered()
-        .border_style(theme::border())
-        .title(Line::from(format!(" {} ", session.name)).style(theme::header()));
+    let block = session_block(&session.name);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     rects.editor = inner;

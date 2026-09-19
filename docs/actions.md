@@ -84,7 +84,7 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 | `confirm` | `false` | ask before running. Worth setting on anything that publishes or deletes |
 | `prompt` | — | ask for one line of text first and pass it as `$BJORN_ACTION_INPUT`. The value is the prompt's title (`prompt = "Which bucket"`). A blank one is no prompt at all |
 | `interactive` | `false` | give the command the window and the keyboard in a pty, instead of capturing its output. For anything that talks back |
-| `timeout` | `60` | seconds; a command that overruns is killed and reported |
+| `timeout` | `60` | seconds; a command that overruns is killed and reported. Not applied to an `interactive` action, which runs until you quit it |
 | `default` | `false` | the action `!` runs. With exactly one action configured, that one is the default whether or not it says so |
 
 An entry without a `command` is skipped rather than raised, so a half-written
@@ -135,11 +135,19 @@ editor uses, which is why `$EDITOR` works the way it does. Then Bjorn comes
 back, and a non-zero exit is reported as a toast, since there is no captured
 output to report instead.
 
-It gets everything a captured action gets: the rendered note as
-`$BJORN_NOTE_FILE`, the temp directory as its working directory, and the whole
-`BJORN_*` environment including `$BJORN_ACTION_INPUT`. The one difference is
-stdin, which belongs to the terminal rather than to the note — a command that
-wants the text reads `"$BJORN_NOTE_FILE"`.
+It gets the same note and environment a captured action gets: the rendered
+note as `$BJORN_NOTE_FILE`, the temp directory as its working directory, and
+the whole `BJORN_*` environment including `$BJORN_ACTION_INPUT`. Two things
+differ:
+
+- **stdin** belongs to the terminal rather than to the note, so a command that
+  wants the text reads `"$BJORN_NOTE_FILE"`.
+- **`timeout` does not apply.** The command is waiting on you, not stuck, so it
+  runs until it exits or you quit it. If Bjorn itself exits first, the command
+  is killed.
+
+One interactive action runs at a time. Between pressing the key and the
+command starting, while the note is rendered, keys wait and `esc` calls it off.
 
 The editor fills the reader pane so the note list stays beside it; an
 interactive action fills the window, because its program owns its own screen and
