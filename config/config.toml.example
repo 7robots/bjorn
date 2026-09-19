@@ -32,5 +32,5 @@ remctl = ""                     # path to remctl; default searches PATH
 # command = "pbcopy"
 # format = "txt"                # md | html | txt | rtf | textbundle
 # confirm = false               # ask before running
-# timeout = 60                  # seconds
+# timeout = 300                 # seconds; a captured command that overruns is killed
 # default = true                # what `!` runs

@@ -187,8 +187,9 @@ Bjorn also reads Bear's `.theme` format from `~/.config/bjorn/themes/` (or
 directory to inherit from. Only `base.background color`, `base.text color` and
 `base.accent color` are required.
 
-[`config/themes/`](config/themes) holds every theme Bear ships, as a starting
-point: copy one in, rename it (a built-in name always wins over a file) and
+[`config/themes/`](config/themes) holds every theme Bear ships (Shiny Frog's
+files, listed with their hashes in [its README](config/themes/README.md)), as a
+starting point: copy one in, rename it (a built-in name always wins over a file) and
 edit. They are the same files `palettes.rs` is generated from, and a test
 checks that each one draws exactly like its built-in.
 [`config/config.toml.example`](config/config.toml.example) is a commented
