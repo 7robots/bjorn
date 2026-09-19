@@ -59,7 +59,7 @@ name = "Publish to S3"
 command = 'aws s3 cp "$BJORN_NOTE_FILE" "s3://notes/$BJORN_NOTE_TITLE.html"'
 format = "html"
 confirm = true
-timeout = 300
+timeout = 900
 default = true
 
 [[actions]]
@@ -84,7 +84,7 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 | `confirm` | `false` | ask before running. Worth setting on anything that publishes or deletes |
 | `prompt` | — | ask for one line of text first and pass it as `$BJORN_ACTION_INPUT`. The value is the prompt's title (`prompt = "Which bucket"`). A blank one is no prompt at all |
 | `interactive` | `false` | give the command the window and the keyboard in a pty, instead of capturing its output. For anything that talks back |
-| `timeout` | `60` | seconds; a command that overruns is killed and reported. Not applied to an `interactive` action, which runs until you quit it |
+| `timeout` | `300` | seconds (five minutes); a command that overruns is killed and reported. Not applied to an `interactive` action, which runs until you quit it |
 | `default` | `false` | the action `!` runs. With exactly one action configured, that one is the default whether or not it says so |
 
 An entry without a `command` is skipped rather than raised, so a half-written

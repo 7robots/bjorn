@@ -21,7 +21,7 @@ use crate::export::{export_note, extension_for, format_by_id, safe_filename};
 
 /// A command that does not finish in this long is killed. Uploads are slower
 /// than bearcli calls, so this is longer than `bear::COMMAND_TIMEOUT`.
-pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+pub const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 /// Characters of a command's output kept for the toast.
 pub const OUTPUT_LIMIT: usize = 300;
 

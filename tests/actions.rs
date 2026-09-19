@@ -352,7 +352,7 @@ async fn the_menu_marks_the_default_and_shows_the_highlighted_command() {
                 prompt: None,
                 interactive: false,
                 default: true,
-                timeout: Duration::from_secs(300),
+                timeout: Duration::from_secs(900),
             },
         ],
     );
@@ -379,7 +379,7 @@ async fn the_menu_marks_the_default_and_shows_the_highlighted_command() {
     let screen = h.text();
     assert!(screen.contains("$ aws s3 cp"), "{screen}");
     assert!(
-        screen.contains("renders as HTML · stops after 300 s · asks before running · runs on !"),
+        screen.contains("renders as HTML · stops after 900 s · asks before running · runs on !"),
         "{screen}"
     );
 }
@@ -527,7 +527,7 @@ async fn ctrl_e_edits_the_highlighted_action_in_place() {
     let (config, path) = file_config(
         &fake,
         "# my notes config\n[[actions]]\nname = \"Copy\"  # clipboard\ncommand = \"true\"\n\n\
-         [[actions]]\nname = \"Upload\"\ncommand = \"false\"\ntimeout = 300\nprompt = \"Range\"\n",
+         [[actions]]\nname = \"Upload\"\ncommand = \"false\"\ntimeout = 900\nprompt = \"Range\"\n",
     );
     let mut h = fake.harness_with(config, None);
     h.load().await;
@@ -570,7 +570,7 @@ async fn ctrl_e_edits_the_highlighted_action_in_place() {
     );
     assert!(body.contains("name = \"Upload v2\"\n"), "{body}");
     assert!(
-        body.contains("timeout = 300\n") && body.contains("prompt = \"Range\"\n"),
+        body.contains("timeout = 900\n") && body.contains("prompt = \"Range\"\n"),
         "keys the form does not show survive: {body}"
     );
     let actions = Config::load(Some(&path)).unwrap().actions;
