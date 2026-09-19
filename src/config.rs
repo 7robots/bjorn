@@ -80,7 +80,7 @@ pub struct Config {
     pub bearcli: String,
     pub icon_style: String,
     pub icons: BTreeMap<String, String>,
-    /// Palette name; see `ui::theme::THEMES`. An unknown name falls back to
+    /// Palette name; see `ui::theme::names`. An unknown name falls back to
     /// the default, so a typo never stops the app.
     pub theme: String,
     /// Accepted for compatibility with the Python Bjorn's config file. The
@@ -316,6 +316,15 @@ mod tests {
         assert_eq!(cfg.workspace, "");
         assert_eq!(cfg.export_dir, home_dir().join("Downloads"));
         assert_eq!(cfg.theme, crate::ui::theme::DEFAULT_THEME);
+    }
+
+    /// `config/config.toml.example` shows the defaults; loading it must give
+    /// exactly what no config file gives.
+    #[test]
+    fn the_example_config_is_the_defaults() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example");
+        let cfg = Config::load(Some(&path)).unwrap();
+        assert_eq!(Config { path: None, ..cfg }, Config::default());
     }
 
     #[test]

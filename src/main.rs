@@ -88,9 +88,10 @@ async fn main() -> anyhow::Result<()> {
     if let Some(theme) = cli.theme.as_deref() {
         if bjorn::ui::theme::lookup(theme).is_none() {
             anyhow::bail!(
-                "unknown theme {:?}; try one of: {}",
+                "unknown theme {:?}; try one of: {} (or add a .theme file to {})",
                 theme,
-                bjorn::ui::theme::names().collect::<Vec<_>>().join(", ")
+                bjorn::ui::theme::names().collect::<Vec<_>>().join(", "),
+                bjorn::ui::theme::themes_dir().display()
             );
         }
         config.theme = theme.trim().to_lowercase();

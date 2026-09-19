@@ -177,6 +177,23 @@ picks it up. `?` inside the app lists the names and marks the one in use.
 An unknown name in the config falls back to the default with a warning rather
 than stopping the app. An unknown `--theme` on the command line is an error.
 
+#### Your own themes
+
+Bjorn also reads Bear's `.theme` format from `~/.config/bjorn/themes/` (or
+`$XDG_CONFIG_HOME/bjorn/themes/`). Drop a file there and name it with
+`--theme` or `theme =`: `My Nord.theme` is `my-nord`. The file is JSON with
+`base`, `sidebar`, `notes` and `editor` sections; a value may be a
+`$section.key` reference, and `meta."base theme"` names a theme in the same
+directory to inherit from. Only `base.background color`, `base.text color` and
+`base.accent color` are required.
+
+[`config/themes/`](config/themes) holds every theme Bear ships, as a starting
+point: copy one in, rename it (a built-in name always wins over a file) and
+edit. They are the same files `palettes.rs` is generated from, and a test
+checks that each one draws exactly like its built-in.
+[`config/config.toml.example`](config/config.toml.example) is a commented
+config file with every key at its default.
+
 ### Icons
 
 Top-level tags and the smart views carry icons: Nerd Font (Material Design)

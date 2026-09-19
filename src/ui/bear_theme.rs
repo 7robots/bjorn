@@ -1,4 +1,5 @@
-//! Bear's own themes, read from the `.theme` files inside Bear.app.
+//! Themes in Bear's `.theme` format, read from a directory the user owns:
+//! `~/.config/bjorn/themes/` (see `theme::themes_dir`).
 //!
 //! A theme file is JSON: sections (`base`, `sidebar`, `notes`, `editor`)
 //! holding `"… color": "#RRGGBB"` values or `"$section.key"` references to
@@ -7,15 +8,14 @@
 //! base theme's `$base.accent color` picks up the child's accent.
 //!
 //! Each file becomes one `Theme`, named after the file (`Rosé Pine.theme` is
-//! `rose-pine`). Bear ships no dark Red Graphite, so `red-graphite-dark` is
-//! derived: Dark Graphite with Red Graphite's accent.
+//! `rose-pine`). The mapping onto Bjorn's palette is the one
+//! `tools/bear_theme.py` uses to generate `palettes.rs`, so a theme file
+//! dropped in the directory draws exactly as it would built in; the test
+//! `repo_theme_files_match_the_built_in_palettes` holds the two together.
 //!
-//! Bear.app is strictly read-only to Bjorn. Nothing here writes, creates,
-//! renames or deletes: files are opened with `read(true)` alone, only regular
+//! Loading only reads: files are opened with `read(true)` alone, only regular
 //! `*.theme` files at the top of the directory are touched (no symlinks, no
-//! recursion), and each is capped at `MAX_BYTES`. `theme::lookup` only calls
-//! in here for a name that is not built in, so a default install never opens
-//! the bundle at all.
+//! recursion), and each is capped at `MAX_BYTES`. A broken file is skipped.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -27,10 +27,6 @@ use serde_json::{Map, Value};
 
 use crate::ui::theme::Theme;
 
-/// Where Bear keeps its theme files.
-pub const BEAR_THEMES_DIR: &str =
-    "/Applications/Bear.app/Contents/Frameworks/BearCore.framework/Versions/A/Resources";
-
 /// References and `base theme` chains deeper than this are treated as broken.
 const MAX_DEPTH: usize = 16;
 
@@ -38,33 +34,39 @@ const MAX_DEPTH: usize = 16;
 const MAX_BYTES: u64 = 256 * 1024;
 
 /// The name a theme file goes by: lowercase, words joined by `-`, accents
-/// folded away (`Rosé Pine` is `rose-pine`). macOS stores file names
-/// decomposed (`e` + U+0301) while a typed `é` is one character, so folding
-/// both to `e` is what lets the two meet.
+/// folded away (`Rosé Pine` is `rose-pine`, `D.Boring` is `d-boring`). macOS
+/// stores file names decomposed (`e` + U+0301) while a typed `é` is one
+/// character, so folding both to `e` is what lets the two meet.
 pub fn slug(name: &str) -> String {
-    name.split_whitespace()
-        .collect::<Vec<_>>()
-        .join("-")
+    let folded: String = name
         .to_lowercase()
         .chars()
         .filter(|c| !('\u{300}'..='\u{36F}').contains(c))
-        .map(|c| match c {
-            'à'..='å' => 'a',
-            'ç' => 'c',
-            'è'..='ë' => 'e',
-            'ì'..='ï' => 'i',
-            'ñ' => 'n',
-            'ò'..='ö' | 'ø' => 'o',
-            'ù'..='ü' => 'u',
-            'ý' | 'ÿ' => 'y',
-            c => c,
+        .filter_map(|c| {
+            let c = match c {
+                'à'..='å' => 'a',
+                'ç' => 'c',
+                'è'..='ë' => 'e',
+                'ì'..='ï' => 'i',
+                'ñ' => 'n',
+                'ò'..='ö' | 'ø' => 'o',
+                'ù'..='ü' => 'u',
+                'ý' | 'ÿ' => 'y',
+                c => c,
+            };
+            match c {
+                c if c.is_ascii_alphanumeric() => Some(c),
+                c if c.is_ascii() => Some(' '),
+                _ => None,
+            }
         })
-        .collect()
+        .collect();
+    folded.split_whitespace().collect::<Vec<_>>().join("-")
 }
 
-/// Every theme in `dir` that parses, plus the derived `red-graphite-dark`,
-/// sorted by name. A missing directory or a broken file is skipped rather than
-/// reported: Bear's themes are extras on top of the built-in ones.
+/// Every theme in `dir` that parses, sorted by name. A missing directory or a
+/// broken file is skipped rather than reported: these are extras on top of
+/// the built-in themes.
 pub fn load_dir(dir: &Path) -> Vec<Theme> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -85,15 +87,10 @@ pub fn load_dir(dir: &Path) -> Vec<Theme> {
 
     let mut themes: Vec<Theme> = raw
         .keys()
-        .filter_map(|name| {
-            let merged = merged(&raw, name, 0)?;
-            to_theme(&slug(name), &merged)
-        })
+        .filter_map(|name| to_theme(&slug(name), &merged(&raw, name, 0)?))
         .collect();
-    if let Some(theme) = red_graphite_dark(&raw) {
-        themes.push(theme);
-    }
     themes.sort_by(|a, b| a.name.cmp(b.name));
+    themes.dedup_by(|a, b| a.name == b.name);
     themes
 }
 
@@ -115,22 +112,16 @@ fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-/// Dark Graphite wearing Red Graphite's accent.
-fn red_graphite_dark(raw: &HashMap<String, Value>) -> Option<Theme> {
-    let red = merged(raw, "Red Graphite", 0)?;
-    let accent = lookup(&red, "base.accent color", 0)?;
-    let mut dark = merged(raw, "Dark Graphite", 0)?;
-    let base = dark.get_mut("base")?.as_object_mut()?;
-    base.insert("accent color".into(), Value::String(hex(accent)));
-    to_theme("red-graphite-dark", &dark)
-}
-
-/// `name`'s values laid over its `base theme`'s, recursively.
+/// `name`'s values laid over its `base theme`'s, recursively. The base is
+/// looked up in the same directory, by file name or by slug.
 fn merged(raw: &HashMap<String, Value>, name: &str, depth: usize) -> Option<Value> {
     if depth > MAX_DEPTH {
         return None;
     }
-    let own = raw.get(name)?;
+    let own = raw.get(name).or_else(|| {
+        let wanted = slug(name);
+        raw.iter().find(|(k, _)| slug(k) == wanted).map(|(_, v)| v)
+    })?;
     match own.pointer("/meta/base theme").and_then(Value::as_str) {
         Some(parent) if parent != name => Some(overlay(&merged(raw, parent, depth + 1)?, own)),
         _ => Some(own.clone()),
@@ -155,8 +146,10 @@ fn overlay(base: &Value, over: &Value) -> Value {
     }
 }
 
+type Rgb = (u8, u8, u8);
+
 /// The colour at a dotted `section.key` path, following `$` references.
-fn lookup(root: &Value, path: &str, depth: usize) -> Option<Color> {
+fn lookup(root: &Value, path: &str, depth: usize) -> Option<Rgb> {
     if depth > MAX_DEPTH {
         return None;
     }
@@ -171,131 +164,232 @@ fn lookup(root: &Value, path: &str, depth: usize) -> Option<Color> {
     }
 }
 
-/// `#RRGGBB`, or `#RRGGBBAA` with the alpha dropped.
-fn parse_hex(text: &str) -> Option<Color> {
-    let digits = text.strip_prefix('#')?;
-    if !matches!(digits.len(), 6 | 8) || !digits.is_ascii() {
+/// `#RGB`, `#RRGGBB`, or `#RRGGBBAA` with the alpha dropped.
+fn parse_hex(text: &str) -> Option<Rgb> {
+    let digits = text.strip_prefix('#').unwrap_or(text);
+    if !digits.is_ascii() {
         return None;
     }
+    let digits = match digits.len() {
+        3 => digits.chars().flat_map(|c| [c, c]).collect(),
+        6 | 8 => digits[..6].to_string(),
+        _ => return None,
+    };
     let byte = |i: usize| u8::from_str_radix(&digits[i..i + 2], 16).ok();
-    Some(Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
+    Some((byte(0)?, byte(2)?, byte(4)?))
 }
 
-fn hex(color: Color) -> String {
-    match color {
-        Color::Rgb(r, g, b) => format!("#{r:02X}{g:02X}{b:02X}"),
-        _ => String::new(),
-    }
+fn color((r, g, b): Rgb) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+// The colour arithmetic below mirrors `tools/bear_theme.py` step for step,
+// down to Python's round-half-to-even, so both produce the same bytes.
+
+/// `a` moved a fraction `t` of the way to `b`.
+fn blend(a: Rgb, b: Rgb, t: f64) -> Rgb {
+    let mix = |x: u8, y: u8| {
+        let (x, y) = (f64::from(x), f64::from(y));
+        (x + (y - x) * t).round_ties_even() as u8
+    };
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
 }
 
 /// WCAG relative luminance, 0 (black) to 1 (white).
-fn luminance(color: Color) -> f64 {
-    let Color::Rgb(r, g, b) = color else {
-        return 0.0;
-    };
-    let channel = |c: u8| {
-        let c = f64::from(c) / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
+fn luminance((r, g, b): Rgb) -> f64 {
+    let lin = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
         } else {
-            ((c + 0.055) / 1.055).powf(2.4)
+            ((v + 0.055) / 1.055).powf(2.4)
         }
     };
-    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let (x, y) = (luminance(a) + 0.05, luminance(b) + 0.05);
+    if x > y { x / y } else { y / x }
+}
+
+/// The candidate that reads best over `bg` (the first, on a tie).
+fn best(bg: Rgb, candidates: &[Rgb]) -> Rgb {
+    candidates.iter().copied().fold(candidates[0], |kept, c| {
+        if contrast(c, bg) > contrast(kept, bg) {
+            c
+        } else {
+            kept
+        }
+    })
+}
+
+/// Text over `bg`: the theme's own colour that reads best, when one reads at
+/// 3:1; plain white or near-black otherwise.
+fn on(bg: Rgb, candidates: &[Rgb]) -> Rgb {
+    let pick = best(bg, candidates);
+    if contrast(pick, bg) >= 3.0 {
+        pick
+    } else {
+        best(bg, &[(0xFF, 0xFF, 0xFF), (0x11, 0x11, 0x11)])
+    }
+}
+
+/// `fg` pushed toward `toward` until it reads at 3:1 on `bg`.
+fn legible(fg: Rgb, bg: Rgb, toward: Rgb) -> Rgb {
+    let mut t = 0.0;
+    while contrast(blend(fg, toward, t), bg) < 3.0 && t < 1.0 {
+        t += 0.05;
+    }
+    blend(fg, toward, t)
+}
+
+/// A highlighter background's hue as a foreground: same hue, full enough
+/// saturation, and a lightness that sits on the page. Python's `colorsys`.
+fn recolor((r, g, b): Rgb, dark: bool) -> Rgb {
+    let (r, g, b) = (
+        f64::from(r) / 255.0,
+        f64::from(g) / 255.0,
+        f64::from(b) / 255.0,
+    );
+    let (maxc, minc) = (r.max(g).max(b), r.min(g).min(b));
+    let (sumc, rangec) = (maxc + minc, maxc - minc);
+    let (h, s) = if minc == maxc {
+        (0.0, 0.0)
+    } else {
+        let s = if sumc / 2.0 <= 0.5 {
+            rangec / sumc
+        } else {
+            rangec / (2.0 - maxc - minc)
+        };
+        let (rc, gc, bc) = (
+            (maxc - r) / rangec,
+            (maxc - g) / rangec,
+            (maxc - b) / rangec,
+        );
+        let h = if r == maxc {
+            bc - gc
+        } else if g == maxc {
+            2.0 + rc - bc
+        } else {
+            4.0 + gc - rc
+        };
+        ((h / 6.0).rem_euclid(1.0), s)
+    };
+    let l: f64 = if dark { 0.68 } else { 0.36 };
+    let s = s.max(0.45);
+    let m2 = if l <= 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let m1 = 2.0 * l - m2;
+    let v = |hue: f64| {
+        let hue = hue.rem_euclid(1.0);
+        if hue < 1.0 / 6.0 {
+            m1 + (m2 - m1) * hue * 6.0
+        } else if hue < 0.5 {
+            m2
+        } else if hue < 2.0 / 3.0 {
+            m1 + (m2 - m1) * (2.0 / 3.0 - hue) * 6.0
+        } else {
+            m1
+        }
+    };
+    let byte = |x: f64| (x * 255.0).round_ties_even() as u8;
+    (byte(v(h + 1.0 / 3.0)), byte(v(h)), byte(v(h - 1.0 / 3.0)))
 }
 
 /// Map a merged theme file onto Bjorn's palette. Only the page background,
-/// the text and the accent are required; everything else falls back to the
-/// nearest key Bear would use.
+/// the text and the accent are required; a hand-written file that leaves the
+/// rest out gets the nearest colour it does have.
 fn to_theme(name: &str, root: &Value) -> Option<Theme> {
-    let first = |paths: &[&str]| paths.iter().find_map(|p| lookup(root, p, 0));
-    let background = first(&["base.background color"])?;
-    let foreground = first(&["base.text color"])?;
-    let accent = first(&["base.accent color"])?;
+    let get = |path: &str| lookup(root, path, 0);
+    let bg = get("base.background color")?;
+    let text = get("base.text color")?;
+    let accent = get("base.accent color")?;
+    let or = |path: &str, fallback: Rgb| get(path).unwrap_or(fallback);
 
-    let dark = luminance(background) < 0.5;
-    let or = |paths: &[&str], fallback: Color| first(paths).unwrap_or(fallback);
-    let background_2 = or(&["base.background secondary color"], background);
-    let muted = or(&["base.text secondary color"], foreground);
-    let sidebar_bg = or(&["sidebar.background color"], background_2);
-    let sidebar_fg = or(&["sidebar.text color"], foreground);
-    let sidebar_bg_2 = or(&["sidebar.background secondary color"], background_2);
-    let sidebar_fg_2 = or(&["sidebar.text secondary color"], sidebar_fg);
-    let on_accent = if luminance(accent) > 0.4 {
-        Color::Rgb(0x1A, 0x1A, 0x1A)
-    } else {
-        Color::Rgb(0xFF, 0xFF, 0xFF)
+    let dark = luminance(bg) < 0.5;
+    let muted = or("base.text secondary color", text);
+    let bg2 = or("base.background secondary color", bg);
+    let sb_bg = or("sidebar.background color", bg2);
+    let sb_text = or("sidebar.text color", text);
+    let headers = or("editor.headers.text color", text);
+    let blur_bg = or("notes.selection background color", bg2);
+    let sb_blur_bg = or("sidebar.background secondary color", sb_bg);
+    let sb_text_2 = or("sidebar.text secondary color", sb_text);
+    let over_accent = on(accent, &[bg, text, sb_bg]);
+
+    let highlighter = |hue: &str| {
+        get(&format!("editor.highlighter.{hue}.background color")).map(|c| recolor(c, dark))
     };
-    let (success, warning, error) = if dark {
-        (0x6FB98F, 0xE0A458, 0xE05C5C)
+    let fixed = if dark {
+        [(0x6F, 0xB9, 0x8F), (0xE0, 0xA4, 0x58), (0xE0, 0x5C, 0x5C)]
     } else {
-        (0x3F9D63, 0xB7791F, 0xC0392B)
+        [(0x3F, 0x9D, 0x63), (0xB7, 0x79, 0x1F), (0xC0, 0x39, 0x2B)]
     };
-    let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+    let [success, warning, error] = [
+        highlighter("green").unwrap_or(fixed[0]),
+        highlighter("yellow").unwrap_or(fixed[1]),
+        highlighter("red").unwrap_or(fixed[2]),
+    ]
+    .map(|c| legible(c, bg, text));
 
     Some(Theme {
         name: Box::leak(name.to_string().into_boxed_str()),
         dark,
 
-        background,
-        surface: background,
-        surface_focus: background,
-        sidebar_bg,
-        sidebar_focus: sidebar_bg,
+        background: color(bg),
+        surface: color(bg),
+        surface_focus: color(blend(bg, text, 0.04)),
+        sidebar_bg: color(sb_bg),
+        sidebar_focus: color(blend(sb_bg, sb_text, 0.04)),
 
-        foreground,
-        muted,
-        sidebar_fg,
-        sidebar_muted: or(&["sidebar.icon color"], muted),
+        foreground: color(text),
+        muted: color(muted),
+        sidebar_fg: color(sb_text),
+        sidebar_muted: color(blend(sb_text, sb_bg, 0.35)),
 
-        border: or(
-            &["editor.separator.border color", "base.stroke color"],
-            muted,
-        ),
-        sidebar_border: or(&["sidebar.stroke color"], sidebar_bg),
-        header_bg: background_2,
-        header_fg: foreground,
-        sidebar_header_bg: sidebar_bg_2,
-        sidebar_header_fg: sidebar_fg_2,
-        header_focus_bg: accent,
-        header_focus_fg: on_accent,
-        cursor_bg: accent,
-        cursor_fg: on_accent,
-        cursor_blur_bg: or(&["notes.selection background color"], background_2),
-        sidebar_cursor_blur_bg: sidebar_bg_2,
-        cursor_blur_fg: foreground,
-        sidebar_cursor_blur_fg: sidebar_fg_2,
-        footer_bg: background_2,
-        footer_fg: foreground,
-        footer_key: accent,
+        border: color(or("base.stroke color", muted)),
+        sidebar_border: color(or("sidebar.stroke color", sb_bg)),
+        header_bg: color(bg2),
+        header_fg: color(headers),
+        sidebar_header_bg: color(blend(sb_bg, sb_text, 0.06)),
+        sidebar_header_fg: color(sb_text),
+        header_focus_bg: color(accent),
+        header_focus_fg: color(over_accent),
+        cursor_bg: color(accent),
+        cursor_fg: color(over_accent),
+        cursor_blur_bg: color(blur_bg),
+        cursor_blur_fg: color(on(blur_bg, &[text, headers])),
+        sidebar_cursor_blur_bg: color(sb_blur_bg),
+        sidebar_cursor_blur_fg: color(on(sb_blur_bg, &[sb_text_2, sb_text, text])),
+        footer_bg: color(bg2),
+        footer_fg: color(muted),
+        footer_key: color(legible(accent, bg2, text)),
 
-        accent,
-        primary: accent,
-        success: rgb(success),
-        warning: rgb(warning),
-        error: rgb(error),
+        accent: color(accent),
+        primary: color(accent),
+        success: color(success),
+        warning: color(warning),
+        error: color(error),
 
-        heading: or(&["editor.headers.text color"], foreground),
-        heading_alt: foreground,
-        link: or(&["editor.link color"], accent),
-        bullet: or(&["editor.list marker color"], accent),
-        code_fg: or(&["editor.code.text color"], foreground),
-        code_bg: or(&["editor.code.background color"], background_2),
-        tag_fg: or(&["editor.tag.text color"], foreground),
-        tag_bg: or(
-            &[
-                "editor.tag.background color",
-                "base.background tertiary color",
-            ],
-            background_2,
-        ),
+        heading: color(headers),
+        heading_alt: color(text),
+        link: color(or("editor.link color", accent)),
+        bullet: color(or("editor.list marker color", accent)),
+        code_fg: color(or("editor.code.text color", text)),
+        code_bg: color(or("editor.code.background color", bg2)),
+        tag_fg: color(or("editor.tag.text color", text)),
+        tag_bg: color(or("editor.tag.background color", bg2)),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::{RED_GRAPHITE, RED_GRAPHITE_DARK};
+    use crate::ui::theme::THEMES;
 
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::write(dir.join(name), body).unwrap();
@@ -369,6 +463,8 @@ mod tests {
         assert_eq!(slug("Rose\u{301} Pine"), "rose-pine");
         assert_eq!(slug("Rose\u{301} Pine"), slug("Rosé Pine"));
         assert_eq!(slug("  Red   Graphite "), "red-graphite");
+        assert_eq!(slug("D.Boring"), "d-boring");
+        assert_eq!(slug("Shibuya Lo-fi"), "shibuya-lo-fi");
     }
 
     #[test]
@@ -399,7 +495,7 @@ mod tests {
         assert_eq!(child.link, Color::Rgb(0xFF, 0, 0));
         assert_eq!(child.foreground, Color::Rgb(0x11, 0x11, 0x11));
         assert!(!child.dark);
-        // Keys the file leaves out fall back to what Bear would use.
+        // Keys the file leaves out fall back to the nearest colour it has.
         assert_eq!(child.bullet, child.accent);
         assert_eq!(child.code_bg, child.background);
         assert_eq!(find(&themes, "parent").link, Color::Rgb(0, 0, 0xFF));
@@ -428,49 +524,60 @@ mod tests {
         assert!(load_dir(&dir.path().join("absent")).is_empty());
     }
 
-    #[test]
-    fn red_graphite_dark_is_dark_graphite_with_red_graphites_accent() {
-        let dir = tempfile::tempdir().unwrap();
-        write(
-            dir.path(),
-            "Red Graphite.theme",
-            r##"{"base": {"text color": "#444444", "background color": "#FFFFFF",
-                 "accent color": "#DD4C4F"}}"##,
-        );
-        write(
-            dir.path(),
-            "Dark Graphite.theme",
-            r##"{"base": {"text color": "#DFE0E0", "background color": "#1D1E1F",
-                 "accent color": "#44A2E5"},
-                 "editor": {"link color": "$base.accent color"}}"##,
-        );
-        let themes = load_dir(dir.path());
-        let theme = find(&themes, "red-graphite-dark");
-        assert!(theme.dark);
-        assert_eq!(theme.background, Color::Rgb(0x1D, 0x1E, 0x1F));
-        assert_eq!(theme.link, Color::Rgb(0xDD, 0x4C, 0x4F));
-        assert_eq!(theme.cursor_fg, Color::Rgb(0xFF, 0xFF, 0xFF));
-    }
+    /// The generator names these themes' toast colours from the palette they
+    /// are named after (`SEMANTICS` in `tools/bear_theme.py`); a theme file
+    /// has no such table, so the parser derives them and only those differ.
+    const NAMED_SEMANTICS: &[&str] = &[
+        "atom",
+        "ayu",
+        "ayu-mirage",
+        "catppuccin-latte",
+        "catppuccin-macchiato",
+        "cobalt",
+        "dracula",
+        "everforest-dark",
+        "everforest-light",
+        "gruvbox",
+        "nord",
+        "rose-pine",
+        "rose-pine-dawn",
+        "shibuya-jazz",
+        "shibuya-lo-fi",
+        "solarized-dark",
+        "solarized-light",
+        "tokyo-night",
+        "tokyo-night-light",
+    ];
 
-    /// Against the real Bear.app, when it is installed: every shipped theme
-    /// parses, and the built-in fallbacks match what the files say.
+    /// The theme files kept in the repo (`config/themes/`, copied from Bear)
+    /// parse, and each draws exactly as the palette generated from it. Needs
+    /// nothing installed, so it runs everywhere.
     #[test]
-    fn bear_app_themes_parse_and_match_the_built_ins() {
-        let dir = Path::new(BEAR_THEMES_DIR);
-        let files = match std::fs::read_dir(dir) {
-            Ok(entries) => entries
-                .flatten()
-                .filter(|e| e.path().extension().is_some_and(|x| x == "theme"))
-                .count(),
-            Err(_) => return,
-        };
-        let themes = load_dir(dir);
-        assert_eq!(
-            themes.len(),
-            files + 1,
-            "one per file, plus the derived one"
-        );
-        assert_eq!(*find(&themes, "red-graphite"), RED_GRAPHITE);
-        assert_eq!(*find(&themes, "red-graphite-dark"), RED_GRAPHITE_DARK);
+    fn repo_theme_files_match_the_built_in_palettes() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/themes");
+        let files = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "theme"))
+            .count();
+        let parsed = load_dir(&dir);
+        assert_eq!(parsed.len(), files, "every file parses");
+
+        let mut compared = 0;
+        for built_in in THEMES {
+            // Hand-tuned in theme.rs rather than generated.
+            if ["red-graphite", "red-graphite-dark", "textual-dark"].contains(&built_in.name) {
+                continue;
+            }
+            let mut theme = *find(&parsed, built_in.name);
+            if NAMED_SEMANTICS.contains(&built_in.name) {
+                theme.success = built_in.success;
+                theme.warning = built_in.warning;
+                theme.error = built_in.error;
+            }
+            assert_eq!(theme, *built_in, "{}", built_in.name);
+            compared += 1;
+        }
+        assert_eq!(compared, files - 1, "every generated palette has its file");
     }
 }
