@@ -60,7 +60,10 @@ async fn the_palette_filters_and_runs_the_highlighted_action() {
         "{screen}"
     );
 
-    h.type_text("pub");
+    // A whole word, not "pub": both commands quote a path under a temp
+    // directory whose name is random, and a short query can turn up inside
+    // one by luck.
+    h.type_text("publish");
     let screen = h.text();
     assert!(screen.contains("Publish"), "{screen}");
     assert!(!screen.contains("▸ Copy"), "{screen}");

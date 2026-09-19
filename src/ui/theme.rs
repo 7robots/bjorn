@@ -1,25 +1,23 @@
 //! The palette.
 //!
-//! One `Theme` is a flat table of true colours. `textual-dark` reproduces what
-//! the Python Bjorn draws through Textual's default theme, down to the blended
-//! values Textual computes for its `auto`/alpha colours, so the two
-//! implementations look the same side by side. `red-graphite` is Bear's Red
-//! Graphite theme file; `red-graphite-dark` (the default) is Bear's Dark
-//! Graphite with Red Graphite's brick red (`#DD4C4F`) as the accent.
+//! One `Theme` is a flat table of true colours. `red-graphite-dark`, the
+//! default, and `red-graphite` are Bear's Red Graphite: graphite chrome, one
+//! coral red (`#CD5654`, sampled from Bear) for every accent. `textual-dark`
+//! is the original palette, a dark grey page with blue and amber accents. The
+//! rest, in `palettes`, are generated from Bear's own theme files by
+//! `tools/bear_theme.py`.
 //!
 //! The active theme is a process-wide index into `THEMES`, set once from the
 //! config at startup, so drawing code can read it without threading a
 //! reference through every function.
 
-use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::ui::bear_theme;
+use super::palettes;
 
-const fn rgb(hex: u32) -> Color {
+pub const fn rgb(hex: u32) -> Color {
     Color::Rgb(
         ((hex >> 16) & 0xff) as u8,
         ((hex >> 8) & 0xff) as u8,
@@ -30,7 +28,7 @@ const fn rgb(hex: u32) -> Color {
 /// Every colour the app draws with. Panes carry their own surface and text
 /// colours because Bear's Red Graphite puts a graphite sidebar next to a white
 /// notes list; in `textual-dark` the two are simply equal.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub name: &'static str,
     /// True when the terminal behind this theme is expected to be dark. Only
@@ -98,9 +96,8 @@ pub struct Theme {
     pub tag_bg: Color,
 }
 
-/// Textual's default theme, the one the Python Bjorn runs under. The blended
-/// values are what Textual resolves `auto 60%`, `$warning 10%` and the rest to
-/// over the surface underneath them.
+/// The original palette: a dark grey page, blue for the cursor and headings,
+/// amber for the focused header and the key hints.
 pub const TEXTUAL_DARK: Theme = Theme {
     name: "textual-dark",
     dark: true,
@@ -151,166 +148,170 @@ pub const TEXTUAL_DARK: Theme = Theme {
 };
 
 /// Bear's Red Graphite, light: a graphite sidebar beside a white notes list
-/// and a white page, with `#DD4C4F` on every accent. Colours are taken from
-/// Bear's own `Red Graphite.theme`; only the status colours are Bjorn's.
+/// and a white page, with `#CD5654` on every accent. The greys are sampled
+/// from Bear itself.
 pub const RED_GRAPHITE: Theme = Theme {
     name: "red-graphite",
     dark: false,
 
-    background: rgb(0xFFFFFF),    // base.background
-    surface: rgb(0xFFFFFF),       // base.background
-    surface_focus: rgb(0xFFFFFF), // base.background
-    sidebar_bg: rgb(0x2E3235),    // sidebar.background
-    sidebar_focus: rgb(0x2E3235), // sidebar.background
+    background: rgb(0xFFFFFF),
+    surface: rgb(0xFDFDFD),
+    surface_focus: rgb(0xFFFFFF),
+    sidebar_bg: rgb(0x2F3235),
+    sidebar_focus: rgb(0x35383B),
 
-    foreground: rgb(0x444444),    // base.text
-    muted: rgb(0x888888),         // base.text secondary
-    sidebar_fg: rgb(0xD1D1D1),    // sidebar.text
-    sidebar_muted: rgb(0x9FA09F), // sidebar.icon
+    foreground: rgb(0x2B2B2D),
+    muted: rgb(0x6B6B6D),
+    sidebar_fg: rgb(0xD8DADC),
+    sidebar_muted: rgb(0x9A9DA0),
 
-    border: rgb(0xD9D9D9),         // base.stroke
-    sidebar_border: rgb(0x2E3235), // sidebar.stroke
-    header_bg: rgb(0xF3F5F7),      // base.background secondary
-    header_fg: rgb(0x444444),
-    sidebar_header_bg: rgb(0x474747), // sidebar.background secondary
-    sidebar_header_fg: rgb(0xFFFFFF), // sidebar.text secondary
-    header_focus_bg: rgb(0xDD4C4F),
+    border: rgb(0xE3E4E6),
+    sidebar_border: rgb(0x2F3235),
+    header_bg: rgb(0xF3F5F7),
+    header_fg: rgb(0x2B2B2D),
+    sidebar_header_bg: rgb(0x3A3D40),
+    sidebar_header_fg: rgb(0xD8DADC),
+    header_focus_bg: rgb(0xCD5654),
     header_focus_fg: rgb(0xFFFFFF),
-    cursor_bg: rgb(0xDD4C4F),
+    cursor_bg: rgb(0xCD5654),
     cursor_fg: rgb(0xFFFFFF),
-    cursor_blur_bg: rgb(0xF3F5F7),         // notes.selection background
-    sidebar_cursor_blur_bg: rgb(0x474747), // sidebar.background secondary
-    cursor_blur_fg: rgb(0x444444),
-    sidebar_cursor_blur_fg: rgb(0xFFFFFF),
+    cursor_blur_bg: rgb(0xF3F5F7),
+    sidebar_cursor_blur_bg: rgb(0x3F403F),
+    cursor_blur_fg: rgb(0x2B2B2D),
+    sidebar_cursor_blur_fg: rgb(0xEDEEEF),
     footer_bg: rgb(0xF3F5F7),
-    footer_fg: rgb(0x444444),
-    footer_key: rgb(0xDD4C4F),
+    footer_fg: rgb(0x4A4A4C),
+    footer_key: rgb(0xCD5654),
 
-    accent: rgb(0xDD4C4F), // base.accent
-    primary: rgb(0xDD4C4F),
+    accent: rgb(0xCD5654),
+    primary: rgb(0xCD5654),
     success: rgb(0x3F9D63),
     warning: rgb(0xB7791F),
     error: rgb(0xC0392B),
 
-    heading: rgb(0x444444), // editor.headers.text
-    heading_alt: rgb(0x444444),
-    link: rgb(0xDD4C4F),    // editor.link
-    bullet: rgb(0xDD4C4F),  // editor.list marker
-    code_fg: rgb(0x444444), // editor.code.text
-    code_bg: rgb(0xF3F5F7), // editor.code.background
-    tag_fg: rgb(0x444444),  // editor.tag.text
-    tag_bg: rgb(0xE4E5E6),  // editor.tag.background
+    heading: rgb(0x2B2B2D),
+    heading_alt: rgb(0x2B2B2D),
+    link: rgb(0xCD5654),
+    bullet: rgb(0xCD5654),
+    code_fg: rgb(0x4A4A4C),
+    code_bg: rgb(0xE4E5E6),
+    tag_fg: rgb(0x6B6B6D),
+    tag_bg: rgb(0xE4E5E6),
 };
 
-/// Red Graphite in the dark. Bear ships no dark Red Graphite, so this is
-/// Bear's `Dark Graphite.theme` with its blue accent swapped for Red
-/// Graphite's `#DD4C4F`. The sidebar sits a shade above the page, as in Bear.
+/// Red Graphite in the dark: the same coral red over Bear's graphite, for a
+/// dark terminal. The sidebar is a shade below the page, as it is in Bear.
 pub const RED_GRAPHITE_DARK: Theme = Theme {
     name: "red-graphite-dark",
     dark: true,
 
-    background: rgb(0x1D1E1F),    // base.background
-    surface: rgb(0x1D1E1F),       // base.background
-    surface_focus: rgb(0x1D1E1F), // base.background
-    sidebar_bg: rgb(0x2C2D2F),    // sidebar.background
-    sidebar_focus: rgb(0x2C2D2F), // sidebar.background
+    background: rgb(0x1B1C1E),
+    surface: rgb(0x232528),
+    surface_focus: rgb(0x2A2C30),
+    sidebar_bg: rgb(0x1F2123),
+    sidebar_focus: rgb(0x26282B),
 
-    foreground: rgb(0xDFE0E0),    // base.text
-    muted: rgb(0xA2A3A4),         // base.text secondary
-    sidebar_fg: rgb(0xA5A6A6),    // sidebar.text
-    sidebar_muted: rgb(0xABACAB), // sidebar.icon
+    foreground: rgb(0xD7D9DC),
+    muted: rgb(0x8A8D92),
+    sidebar_fg: rgb(0xD7D9DC),
+    sidebar_muted: rgb(0x8A8D92),
 
-    border: rgb(0x525354),         // editor.separator
-    sidebar_border: rgb(0x2C2D2F), // sidebar.stroke
-    header_bg: rgb(0x2E2F30),      // base.background secondary
-    header_fg: rgb(0xDFE0E0),
-    sidebar_header_bg: rgb(0x535354), // sidebar.background secondary
-    sidebar_header_fg: rgb(0xD9D8DA), // sidebar.text secondary
-    header_focus_bg: rgb(0xDD4C4F),
-    header_focus_fg: rgb(0xFFFFFF),
-    cursor_bg: rgb(0xDD4C4F),
-    cursor_fg: rgb(0xFFFFFF),
-    cursor_blur_bg: rgb(0x2E2F30),         // notes.selection background
-    sidebar_cursor_blur_bg: rgb(0x535354), // sidebar.background secondary
-    cursor_blur_fg: rgb(0xDFE0E0),
-    sidebar_cursor_blur_fg: rgb(0xD9D8DA),
-    footer_bg: rgb(0x2E2F30),
-    footer_fg: rgb(0xDFE0E0),
-    footer_key: rgb(0xDD4C4F),
+    border: rgb(0x3A3D42),
+    sidebar_border: rgb(0x3A3D42),
+    header_bg: rgb(0x2E3135),
+    header_fg: rgb(0xE0736A),
+    sidebar_header_bg: rgb(0x2E3135),
+    sidebar_header_fg: rgb(0xE0736A),
+    header_focus_bg: rgb(0xCD5654),
+    header_focus_fg: rgb(0xFFF3F2),
+    cursor_bg: rgb(0xCD5654),
+    cursor_fg: rgb(0xFFF3F2),
+    cursor_blur_bg: rgb(0x4A2F30),
+    sidebar_cursor_blur_bg: rgb(0x462C2D),
+    cursor_blur_fg: rgb(0xD7D9DC),
+    sidebar_cursor_blur_fg: rgb(0xD7D9DC),
+    footer_bg: rgb(0x2E3135),
+    footer_fg: rgb(0xD7D9DC),
+    footer_key: rgb(0xE0736A),
 
-    accent: rgb(0xDD4C4F),
-    primary: rgb(0xDD4C4F),
+    accent: rgb(0xCD5654),
+    primary: rgb(0xCD5654),
     success: rgb(0x6FB98F),
     warning: rgb(0xE0A458),
     error: rgb(0xE05C5C),
 
-    heading: rgb(0xCCDBE5), // editor.headers.text
-    heading_alt: rgb(0xDFE0E0),
-    link: rgb(0xDD4C4F),
-    bullet: rgb(0xDD4C4F),
-    code_fg: rgb(0xDFE0E0), // editor.code.text
-    code_bg: rgb(0x2E2F30), // editor.code.background
-    tag_fg: rgb(0xDFE0E0),  // editor.tag.text
-    tag_bg: rgb(0x454647),  // editor.tag.background
+    heading: rgb(0xEDEFF2),
+    heading_alt: rgb(0xD7D9DC),
+    link: rgb(0xE0736A),
+    bullet: rgb(0xCD5654),
+    code_fg: rgb(0xE0A98F),
+    code_bg: rgb(0x2E3135),
+    tag_fg: rgb(0xB9BCC0),
+    tag_bg: rgb(0x2E3135),
 };
 
-/// The themes compiled in, so Bjorn has a palette without Bear.app.
-pub const BUILT_IN: &[Theme] = &[TEXTUAL_DARK, RED_GRAPHITE, RED_GRAPHITE_DARK];
+pub const THEMES: &[Theme] = &[
+    RED_GRAPHITE_DARK,
+    RED_GRAPHITE,
+    TEXTUAL_DARK,
+    palettes::ACADEMIA,
+    palettes::ATOM,
+    palettes::AYU,
+    palettes::AYU_MIRAGE,
+    palettes::CATPPUCCIN_LATTE,
+    palettes::CATPPUCCIN_MACCHIATO,
+    palettes::CHARCOAL,
+    palettes::COBALT,
+    palettes::D_BORING,
+    palettes::DARK_GRAPHITE,
+    palettes::DARK_NOTES,
+    palettes::DIECI,
+    palettes::DRACULA,
+    palettes::DUOTONE_HEAT,
+    palettes::DUOTONE_LIGHT,
+    palettes::DUOTONE_SNOW,
+    palettes::EVERFOREST_DARK,
+    palettes::EVERFOREST_LIGHT,
+    palettes::GANDALF,
+    palettes::GOTHAM,
+    palettes::GRUVBOX,
+    palettes::HIGH_CONTRAST,
+    palettes::LIGHTHAUS,
+    palettes::NORD,
+    palettes::NORD_LIGHT,
+    palettes::NOTES,
+    palettes::OLIVE_DUNK,
+    palettes::PANIC_MODE,
+    palettes::PRINT,
+    palettes::ROSE_PINE,
+    palettes::ROSE_PINE_DAWN,
+    palettes::SHIBUYA_JAZZ,
+    palettes::SHIBUYA_LO_FI,
+    palettes::SOLARIZED_DARK,
+    palettes::SOLARIZED_LIGHT,
+    palettes::TOKYO_NIGHT,
+    palettes::TOKYO_NIGHT_LIGHT,
+    palettes::TOOTHPASTE,
+];
 
-/// The default is Bear's Red Graphite, dark.
+/// Must be `THEMES[0]`: `ACTIVE` starts at zero, so anything that draws
+/// before the config is read gets this one.
 pub const DEFAULT_THEME: &str = "red-graphite-dark";
 
-/// `DEFAULT_THEME`'s index in `themes()`, so drawing before `set` still uses it.
-const DEFAULT_INDEX: usize = 2;
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
-static ACTIVE: AtomicUsize = AtomicUsize::new(DEFAULT_INDEX);
-
-static BEAR: OnceLock<Vec<Theme>> = OnceLock::new();
-
-/// The themes read (read-only) from Bear.app, minus any a built-in already
-/// names: the built-ins always win, and match Bear's files (a test checks).
-/// Loaded once, and only when something asks past the built-ins.
-fn bear() -> &'static [Theme] {
-    BEAR.get_or_init(|| {
-        bear_theme::load_dir(Path::new(bear_theme::BEAR_THEMES_DIR))
-            .into_iter()
-            .filter(|t| BUILT_IN.iter().all(|b| b.name != t.name))
-            .collect()
-    })
-}
-
-/// Every theme: the built-ins in their fixed order, then Bear's. Opens
-/// Bear.app, so it is for listing, not for drawing.
-pub fn themes() -> Vec<&'static Theme> {
-    BUILT_IN.iter().chain(bear()).collect()
-}
-
-/// The theme every drawing function reads. A built-in never touches Bear.app.
+/// The theme every drawing function reads.
 #[inline]
 pub fn current() -> &'static Theme {
     // The index only ever comes from `set`, which bounds it.
-    let index = ACTIVE.load(Ordering::Relaxed);
-    BUILT_IN
-        .get(index)
-        .unwrap_or_else(|| &bear()[index - BUILT_IN.len()])
+    &THEMES[ACTIVE.load(Ordering::Relaxed)]
 }
 
-/// The theme called `name`, ignoring case, spacing and accents (`Rosé Pine`,
-/// `rose-pine`); `None` when there is no such theme.
+/// The theme called `name`, spelling-insensitively; `None` when there is no
+/// such theme.
 pub fn lookup(name: &str) -> Option<usize> {
-    find(name, bear)
-}
-
-/// `lookup` over the built-ins, then over `extra` — called only when no
-/// built-in matches, so naming a built-in never reads Bear.app.
-fn find(name: &str, extra: impl FnOnce() -> &'static [Theme]) -> Option<usize> {
-    let wanted = bear_theme::slug(name);
-    BUILT_IN.iter().position(|t| t.name == wanted).or_else(|| {
-        extra()
-            .iter()
-            .position(|t| t.name == wanted)
-            .map(|i| BUILT_IN.len() + i)
-    })
+    let wanted = name.trim().to_ascii_lowercase();
+    THEMES.iter().position(|t| t.name == wanted)
 }
 
 /// Make `name` the active theme; false (and no change) when there is no such
@@ -327,7 +328,7 @@ pub fn set(name: &str) -> bool {
 
 /// Every theme name, in the order they are offered.
 pub fn names() -> impl Iterator<Item = &'static str> {
-    BUILT_IN.iter().chain(bear()).map(|t| t.name)
+    THEMES.iter().map(|t| t.name)
 }
 
 // -- the styles the drawing code asks for ------------------------------------
@@ -524,30 +525,81 @@ mod tests {
     // with logic in it.
     #[test]
     fn themes_are_found_by_name() {
-        assert_eq!(themes()[lookup(DEFAULT_THEME).unwrap()].name, DEFAULT_THEME);
-        assert_eq!(themes()[DEFAULT_INDEX].name, DEFAULT_THEME);
-        assert_eq!(BUILT_IN[DEFAULT_INDEX].name, DEFAULT_THEME);
+        assert_eq!(THEMES[lookup(DEFAULT_THEME).unwrap()].name, DEFAULT_THEME);
         assert_eq!(
-            themes()[lookup("  Red Graphite ").unwrap()].name,
+            THEMES[lookup("  Red-Graphite ").unwrap()].name,
             "red-graphite"
         );
         assert!(lookup("mauve").is_none());
-        assert_eq!(names().count(), themes().len());
+        assert_eq!(names().count(), THEMES.len());
     }
 
     #[test]
-    fn built_in_names_never_read_bear_app() {
-        let untouched = || -> &'static [Theme] { panic!("Bear.app was read") };
-        for theme in BUILT_IN {
-            assert!(find(&theme.name.to_uppercase(), untouched).is_some());
+    fn the_default_is_the_theme_drawn_before_the_config_is_read() {
+        assert_eq!(THEMES[0].name, DEFAULT_THEME);
+        assert_eq!(current().name, DEFAULT_THEME);
+    }
+
+    #[test]
+    fn theme_names_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for theme in THEMES {
+            assert!(seen.insert(theme.name), "duplicate theme {}", theme.name);
         }
-        assert_eq!(find("mauve", || &[]), None);
-        assert_eq!(find("Nord", || &BUILT_IN[..1]), None);
+    }
+
+    /// Relative luminance per WCAG, for the contrast check below.
+    fn luminance(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            unreachable!()
+        };
+        let lin = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (x, y) = (luminance(a) + 0.05, luminance(b) + 0.05);
+        if x > y { x / y } else { y / x }
+    }
+
+    /// The generated palettes pick text over the accent by luminance; make
+    /// sure that and the body text stay readable on every theme.
+    #[test]
+    fn text_is_legible_on_every_theme() {
+        for theme in THEMES {
+            for (what, fg, bg) in [
+                ("body", theme.foreground, theme.surface),
+                ("sidebar", theme.sidebar_fg, theme.sidebar_bg),
+                ("cursor", theme.cursor_fg, theme.cursor_bg),
+                ("blurred cursor", theme.cursor_blur_fg, theme.cursor_blur_bg),
+                (
+                    "sidebar blurred cursor",
+                    theme.sidebar_cursor_blur_fg,
+                    theme.sidebar_cursor_blur_bg,
+                ),
+                (
+                    "focused header",
+                    theme.header_focus_fg,
+                    theme.header_focus_bg,
+                ),
+                ("footer key", theme.footer_key, theme.footer_bg),
+            ] {
+                let ratio = contrast(fg, bg);
+                assert!(ratio >= 3.0, "{}: {what} contrast {ratio:.2}", theme.name);
+            }
+        }
     }
 
     #[test]
     fn every_theme_is_complete() {
-        for theme in themes() {
+        for theme in THEMES {
             assert_eq!(theme.name, theme.name.to_ascii_lowercase());
             // A true colour everywhere: an ANSI name would let the terminal's
             // own palette decide and the two implementations would diverge.

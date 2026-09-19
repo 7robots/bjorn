@@ -36,9 +36,9 @@ plan lives in `docs/plans/bjorn-rust.md`.
   (918 notes: 1197 ms to the first frame, 440 ms once the cache is there). The
   Python Bjorn writes the same file in the same shape, so either warms the
   other.
-- Themes: `theme` in the config, or `--theme`. `textual-dark` matches the
-  Python build's default colour for colour; `red-graphite` and
-  `red-graphite-dark` are Bear's Red Graphite.
+- Themes: `theme` in the config, or `--theme`. `red-graphite-dark` is the
+  default; every theme Bear ships is converted from its own theme files by
+  `tools/bear_theme.py`.
 
 ## Closed by design in the Rust port
 

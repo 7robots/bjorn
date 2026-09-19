@@ -7,7 +7,9 @@ gist create`, `pbcopy`, a script of your own.
 
 - `!` runs the default action.
 - `a` opens the action menu: a search box over your actions, filtered as you
-  type. `↑`/`↓` (or `ctrl+p`/`ctrl+n`, or `tab`) picks, `enter` runs, `esc`
+  type. A query matches a name by its letters in order, so `pts3` finds
+  "Publish to S3", and a command by plain substring, so `curl` finds an action
+  by what it runs. `↑`/`↓` (or `ctrl+p`/`ctrl+n`, or `tab`) picks, `enter` runs, `esc`
   closes. The default is marked ★, and under the list the highlighted action
   is shown in full: its command, format, timeout and whether it asks first. `ctrl+e`
   edits it and `ctrl+d` deletes it, after asking.

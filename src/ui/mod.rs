@@ -1,11 +1,13 @@
 //! Drawing: the three columns, their headers, the footer, overlays and toasts.
 
 pub mod bear_theme;
+pub mod help;
 pub mod highlight;
 pub mod markdown;
 pub mod modals;
 pub mod note_list;
 pub mod note_view;
+pub mod palettes;
 pub mod sidebar;
 pub mod theme;
 pub mod triage;
@@ -1022,10 +1024,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 Some("Help (esc closes)"),
             );
             let width = inner.width.saturating_sub(4) as usize;
-            let rows: Vec<Line<'static>> = markdown::render(modals::HELP_TEXT)
-                .iter()
-                .flat_map(|l| markdown::wrap(l, width))
-                .collect();
+            let rows: Vec<Line<'static>> = help::lines(width);
             let max = rows.len().saturating_sub(inner.height as usize);
             let wanted = *scroll;
             let scroll = wanted.min(max);

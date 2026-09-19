@@ -31,8 +31,7 @@ struct Cli {
     /// run against a built-in fake bearcli with sample notes
     #[arg(long)]
     demo: bool,
-    /// palette to draw with (overrides config); any of Bear's themes, e.g. red-graphite-dark, nord
-    /// (`--list-themes` prints them)
+    /// palette to draw with (overrides config); `--list-themes` prints the names
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
     /// list the palettes `--theme` accepts and exit
