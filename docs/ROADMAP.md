@@ -20,9 +20,9 @@ plan lives in `docs/plans/bjorn-rust.md`.
 - Notes list snippet line (first body line, as Bear shows).
 - Permanent delete from Trash (no bearcli command yet).
 - Attachments listing and save; tag rename/delete; archive from the TUI;
-  section navigation from `bearcli outline`; locked-note explanation;
-  change detection smarter than polling; triage follow-ons (edit todo text,
-  snooze, un-tick `@done`, "Todo in workspace" view).
+  locked-note explanation; change detection smarter than polling; triage
+  follow-ons (edit todo text, snooze, un-tick `@done`, "Todo in workspace"
+  view).
 
 ## Closed since
 
@@ -39,6 +39,14 @@ plan lives in `docs/plans/bjorn-rust.md`.
 - Themes: `theme` in the config, or `--theme`. `red-graphite-dark` is the
   default; every theme Bear ships is converted from its own theme files by
   `tools/bear_theme.py`.
+
+- Section navigation: `o` opens an outline of the note's headings, indented
+  by level and searchable, and `enter` scrolls the reader to one; `}` / `{`
+  step between headings, and the reader's footer names the current section.
+  The headings come from the reader's own markdown parse rather than
+  `bearcli outline`: the reader has the body already and has to map a heading
+  to a wrapped row anyway, so this is instant, offline and exact about where
+  each heading is drawn. Fenced code is excluded the same way Bear excludes it.
 
 ## Closed by design in the Rust port
 

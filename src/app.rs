@@ -35,7 +35,7 @@ use crate::search::{query_pattern, rewrite_subtags};
 use crate::todos::{TodoScan, scan_rows};
 use crate::ui::modals::{Field, Overlay, Pending, Severity, TextPurpose, Toast};
 use crate::ui::note_list::{NoteList, ROW_HEIGHT};
-use crate::ui::note_view::Reader;
+use crate::ui::note_view::{Reader, outline_filter};
 use crate::ui::sidebar::{Row, Sidebar};
 use crate::ui::triage::{Triage, TriageRow};
 
@@ -1073,6 +1073,40 @@ impl App {
         self.focus = Pane::Reader;
     }
 
+    /// `o`: the outline of the note in the reader, the current section
+    /// highlighted.
+    fn open_outline(&mut self) {
+        if self.reader.headings.is_empty() {
+            let message = if self.reader.note.is_none() {
+                "No note in the reader."
+            } else if self.reader.full_text.is_some() {
+                "This note has no headings."
+            } else {
+                "This note cannot be read, so it has no outline."
+            };
+            self.notify(message, Duration::from_secs(3));
+            return;
+        }
+        let index = self
+            .reader
+            .current_heading(self.reader_width, self.reader_height)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::Outline {
+            field: Field::default(),
+            index,
+        });
+    }
+
+    /// `}` / `{`: the next or previous heading in the reader.
+    fn jump_heading(&mut self, delta: i64) {
+        if self.reader.headings.is_empty() {
+            return;
+        }
+        self.reader
+            .jump_heading(delta, self.reader_width, self.reader_height);
+        self.focus = Pane::Reader;
+    }
+
     // -- columns and focus ----------------------------------------------------------
 
     pub fn set_columns(&mut self, count: u8) {
@@ -1826,6 +1860,9 @@ impl App {
             KeyCode::Char('F') => self.fold_all(),
             KeyCode::Char(']') => self.jump_match(1),
             KeyCode::Char('[') => self.jump_match(-1),
+            KeyCode::Char('}') => self.jump_heading(1),
+            KeyCode::Char('{') => self.jump_heading(-1),
+            KeyCode::Char('o') => self.open_outline(),
             KeyCode::Char('j') | KeyCode::Down => self.cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.cursor(-1),
             KeyCode::PageDown => {
@@ -2077,6 +2114,50 @@ impl App {
                             index
                         };
                         self.overlay = Some(Overlay::Actions { field, index, note });
+                    }
+                }
+            }
+            Overlay::Outline { mut field, index } => {
+                let shown = outline_filter(&self.reader.headings, &field.value);
+                // A refresh can shorten the note under the open outline.
+                let index = index.min(shown.len().saturating_sub(1));
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let delta = match key.code {
+                    KeyCode::Down | KeyCode::Tab => Some(1),
+                    KeyCode::Up | KeyCode::BackTab => Some(-1),
+                    KeyCode::Char('n') if ctrl => Some(1),
+                    KeyCode::Char('p') if ctrl => Some(-1),
+                    _ => None,
+                };
+                if let Some(delta) = delta {
+                    let index = if shown.is_empty() {
+                        0
+                    } else {
+                        (index as i32 + delta).rem_euclid(shown.len() as i32) as usize
+                    };
+                    self.overlay = Some(Overlay::Outline { field, index });
+                    return;
+                }
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Enter => {
+                        if let Some(&heading) = shown.get(index) {
+                            self.overlay = None;
+                            self.reader.scroll_to_heading(
+                                heading,
+                                self.reader_width,
+                                self.reader_height,
+                            );
+                            self.focus = Pane::Reader;
+                        }
+                    }
+                    _ => {
+                        // A changed filter sends the highlight back to the top;
+                        // moving the text cursor does not.
+                        let before = field.value.clone();
+                        Self::field_key(&mut field, &key);
+                        let index = if field.value != before { 0 } else { index };
+                        self.overlay = Some(Overlay::Outline { field, index });
                     }
                 }
             }

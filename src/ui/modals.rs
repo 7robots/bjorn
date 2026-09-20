@@ -116,6 +116,12 @@ pub enum Overlay {
         index: usize,
         note: Note,
     },
+    /// The reader's headings under a search box. `index` is the highlighted
+    /// row among the ones the search leaves.
+    Outline {
+        field: Field,
+        index: usize,
+    },
     /// The form for a new action (the menu's last row) or for editing one
     /// (`ctrl+e`); saving writes the config.
     /// `focus` is the row: 0 name, 1 command, 2 format, 3 confirm, 4 default.
@@ -147,6 +153,7 @@ impl Overlay {
             Overlay::Format { .. } => "Format",
             Overlay::Text { .. } => "Text",
             Overlay::Actions { .. } => "Actions",
+            Overlay::Outline { .. } => "Outline",
             Overlay::NewAction { .. } => "NewAction",
             Overlay::NewNote { .. } => "NewNote",
         }

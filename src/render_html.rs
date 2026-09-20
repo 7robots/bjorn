@@ -106,6 +106,11 @@ pub fn prepare(content: &str) -> String {
             out.push(format!("<p class=\"tags\">{spans}</p>"));
             continue;
         }
+        // A setext underline (`=====`) is a heading marker, not a highlight.
+        if line.trim().chars().all(|c| c == '=') && !line.trim().is_empty() {
+            out.push(line.to_string());
+            continue;
+        }
         let line = task_inputs(line);
         let line = HIGHLIGHT_RE.replace_all(&line, "<mark>$1</mark>");
         let line = UNDERLINE_RE.replace_all(&line, "<u>$1</u>");
