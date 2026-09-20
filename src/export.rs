@@ -95,10 +95,20 @@ pub fn extension_for(fmt: Format, has_attachments: bool) -> &'static str {
 
 /// A filename from a note title: path separators and control characters
 /// become spaces, whitespace collapses, leading dots go.
+/// The most bytes `safe_filename` gives a name, leaving room for an extension
+/// and a `(2)` under APFS's 255.
+const NAME_BYTES: usize = 200;
+
 pub fn safe_filename(title: &str) -> String {
     let name = UNSAFE_RE.replace_all(title, " ");
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-    let name: String = name.trim_matches([' ', '.']).chars().take(120).collect();
+    let mut name: String = name.trim_matches([' ', '.']).chars().take(120).collect();
+    // File systems count bytes (APFS allows 255 per name), and 120 accented
+    // or CJK characters can run past that once an extension is added.
+    while name.len() > NAME_BYTES {
+        name.pop();
+    }
+    let name = name.trim_end_matches([' ', '.']).to_string();
     if name.is_empty() {
         "note".to_string()
     } else {

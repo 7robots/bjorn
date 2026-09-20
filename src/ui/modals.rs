@@ -95,8 +95,9 @@ impl Field {
     }
 }
 
-/// Rows in the new-action form: name, command, format, confirm, default.
-pub const NEW_ACTION_FIELDS: usize = 5;
+/// Rows in the new-action form: name, command, format, confirm, default,
+/// output, section.
+pub const NEW_ACTION_FIELDS: usize = 7;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Overlay {
@@ -128,7 +129,8 @@ pub enum Overlay {
     },
     /// The form for a new action (the menu's last row) or for editing one
     /// (`ctrl+e`); saving writes the config.
-    /// `focus` is the row: 0 name, 1 command, 2 format, 3 confirm, 4 default.
+    /// `focus` is the row: 0 name, 1 command, 2 format, 3 confirm, 4 default,
+    /// 5 output, 6 section.
     NewAction {
         name: Field,
         command: Field,
@@ -136,6 +138,10 @@ pub enum Overlay {
         format: usize,
         confirm: bool,
         default: bool,
+        /// An index into `actions::ActionOutput::ALL`.
+        output: usize,
+        /// The heading an `append` goes under; blank for the end of the note.
+        section: Field,
         focus: usize,
         note: Note,
         /// The action being edited, as it was read; `None` for a new one.
@@ -150,6 +156,41 @@ pub enum Overlay {
 }
 
 impl Overlay {
+    /// The action the new-action form would save, as it stands.
+    ///
+    /// An edit keeps what the form does not show: the timeout, the prompt and
+    /// `interactive`, which `update_in_config`'s read-back then finds as they
+    /// were. A bad `output` value is the exception: choosing an output in the
+    /// form is what fixes it, so it must not ride along.
+    pub fn form_action(&self) -> Option<Action> {
+        let Overlay::NewAction {
+            name,
+            command,
+            format,
+            confirm,
+            default,
+            output,
+            section,
+            editing,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let heading = section.value.trim();
+        Some(Action {
+            name: name.value.trim().to_string(),
+            command: command.value.trim().to_string(),
+            format: crate::export::FORMATS[*format].id.to_string(),
+            confirm: *confirm,
+            default: *default,
+            output: crate::actions::ActionOutput::ALL[*output],
+            section: (!heading.is_empty()).then(|| heading.to_string()),
+            output_error: None,
+            ..editing.clone().unwrap_or_default()
+        })
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Overlay::Confirm { .. } => "Confirm",

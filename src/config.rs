@@ -212,7 +212,8 @@ impl Config {
 }
 
 /// `[[actions]]`: a name and a shell command, plus the optional `format`,
-/// `confirm`, `timeout` and `default`. An entry without a name or a command is
+/// `confirm`, `prompt`, `interactive`, `timeout`, `default`, `output` and
+/// `section`. An entry without a name or a command is
 /// dropped rather than raised, so a half-written action never stops the app.
 fn parse_actions(value: Option<&Value>) -> Vec<Action> {
     let Some(Value::Array(entries)) = value else {
@@ -255,6 +256,26 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
         Some(Value::String(title)) if !title.trim().is_empty() => Some(title.trim().to_string()),
         _ => None,
     };
+    // An unknown `output` is kept as written and stops the action from running
+    // (`Action::misconfigured`): a typo must never send a command's output
+    // somewhere it was not meant to go, nor spend a paid call on nothing.
+    let (output, output_error) = match entry.get("output") {
+        None => (crate::actions::ActionOutput::Toast, None),
+        Some(Value::String(value)) => match crate::actions::ActionOutput::parse(value) {
+            Some(output) => (output, None),
+            None => (
+                crate::actions::ActionOutput::Toast,
+                Some(format!("{value:?}")),
+            ),
+        },
+        Some(other) => (crate::actions::ActionOutput::Toast, Some(other.to_string())),
+    };
+    let section = match entry.get("section") {
+        Some(Value::String(heading)) if !heading.trim().is_empty() => {
+            Some(heading.trim().to_string())
+        }
+        _ => None,
+    };
     Some(Action {
         name: if name.is_empty() {
             command.clone()
@@ -267,6 +288,9 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
         confirm: truthy(entry.get("confirm"), false),
         prompt,
         interactive: truthy(entry.get("interactive"), false),
+        output,
+        section,
+        output_error,
         timeout: std::time::Duration::from_secs(timeout),
         default: truthy(entry.get("default"), false),
     })
@@ -433,6 +457,40 @@ mod tests {
                 .actions
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn output_and_section_are_read_and_a_typo_is_kept_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[[actions]]\nname = \"Sum\"\ncommand = \"llm\"\noutput = \"append\"\nsection = \" ## Summary \"\n\n\
+             [[actions]]\nname = \"Typo\"\ncommand = \"llm\"\noutput = \"apend\"\nsection = \"\"\n\n\
+             [[actions]]\nname = \"Odd\"\ncommand = \"llm\"\noutput = 3\n\n\
+             [[actions]]\nname = \"Plain\"\ncommand = \"llm\"\n",
+        );
+        let actions = Config::load(Some(&path)).unwrap().actions;
+        use crate::actions::ActionOutput;
+        assert_eq!(actions[0].output, ActionOutput::Append);
+        assert_eq!(actions[0].section.as_deref(), Some("## Summary"));
+        assert_eq!(actions[0].output_error, None);
+        assert_eq!(actions[1].output, ActionOutput::Toast, "an unknown output");
+        assert_eq!(actions[1].output_error.as_deref(), Some("\"apend\""));
+        assert!(
+            actions[1]
+                .misconfigured()
+                .unwrap()
+                .contains("toast, append, new-note, replace"),
+            "the error lists what is valid"
+        );
+        assert_eq!(actions[1].section, None, "a blank section is none");
+        assert_eq!(
+            actions[2].output_error.as_deref(),
+            Some("3"),
+            "a non-string output"
+        );
+        assert_eq!(actions[3].output, ActionOutput::Toast);
+        assert_eq!(actions[3].output_error, None);
     }
 
     #[test]

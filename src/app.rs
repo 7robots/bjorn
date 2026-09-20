@@ -134,6 +134,13 @@ pub enum Msg {
         name: String,
         result: Result<String, String>,
     },
+    /// An action whose `output` goes to Bear finished: what became of the
+    /// output, or why the command failed (in which case nothing was written).
+    ActionWrote {
+        action: Box<Action>,
+        note: Note,
+        result: Result<ActionWrite, String>,
+    },
     TriageLoaded {
         scan: TodoScan,
         statuses: HashMap<String, (Status, i64)>,
@@ -147,6 +154,35 @@ pub enum Msg {
         added: usize,
         failures: Vec<String>,
         keys: Vec<String>,
+    },
+}
+
+/// What became of the output of an action that writes to Bear.
+#[derive(Debug)]
+pub enum ActionWrite {
+    Appended,
+    Created {
+        id: String,
+        title: String,
+    },
+    /// The note was replaced; `title` is what Bear calls it now, and `backup`
+    /// holds its text from before.
+    Replaced {
+        title: String,
+        backup: PathBuf,
+    },
+    /// Nothing was written, and why: the command printed nothing, too much or
+    /// not text, or the note went to the trash. The output is at `kept` when
+    /// there was any worth keeping.
+    Skipped {
+        why: String,
+        kept: Option<PathBuf>,
+    },
+    /// The write failed. The output is kept at `kept` when it could be saved.
+    Failed {
+        message: String,
+        conflict: bool,
+        kept: Option<PathBuf>,
     },
 }
 
@@ -683,6 +719,11 @@ impl App {
                     Duration::from_secs(10),
                 ),
             },
+            Msg::ActionWrote {
+                action,
+                note,
+                result,
+            } => self.on_action_wrote(*action, note, result),
             Msg::Exported(result) => match result {
                 Ok(path) => self.notify(
                     &format!("Exported to {}", path.display()),
@@ -1923,6 +1964,15 @@ impl App {
     /// text first; `confirm = true` then asks to go ahead, in that order, so
     /// the dialog can quote what was typed.
     fn start_action(&mut self, action: Action, note: Note) {
+        if let Some(problem) = action.misconfigured() {
+            self.notify_titled(
+                &format!("{} did not run", action.name),
+                &format!("{problem}."),
+                Severity::Error,
+                Duration::from_secs(10),
+            );
+            return;
+        }
         if let Some(title) = action.prompt.clone() {
             self.overlay = Some(Overlay::Text {
                 title,
@@ -1937,7 +1987,7 @@ impl App {
 
     /// The confirm dialog when the action asks for one, else straight to it.
     fn confirm_action(&mut self, action: Action, note: Note, input: String) {
-        if action.confirm {
+        if action.asks_first() {
             let target = match (input.is_empty(), action.prompt.is_some()) {
                 // A prompt action acts on the answer, not on the note, so an
                 // empty answer must not name the note the cursor happens to be on.
@@ -1945,9 +1995,29 @@ impl App {
                 (true, false) => format!("“{}”", note.title),
                 _ => format!("“{input}”"),
             };
+            // Replacing the note always asks, and says so: the dialog is the
+            // last chance to keep what is there.
+            let replacing = action.output == actions::ActionOutput::Replace;
+            let (message, label) = match (replacing, action.prompt.is_some()) {
+                (true, true) => (
+                    format!(
+                        "Run “{}” on {target} and replace “{}” with what it prints?",
+                        action.name, note.title
+                    ),
+                    "Replace",
+                ),
+                (true, false) => (
+                    format!(
+                        "Run “{}” and replace “{}” with what it prints?",
+                        action.name, note.title
+                    ),
+                    "Replace",
+                ),
+                (false, _) => (format!("Run “{}” on {target}?", action.name), "Run"),
+            };
             self.overlay = Some(Overlay::Confirm {
-                message: format!("Run “{}” on {target}?", action.name),
-                confirm_label: "Run".into(),
+                message,
+                confirm_label: label.into(),
                 action: Pending::RunAction(action, note, input),
             });
         } else {
@@ -1982,31 +2052,277 @@ impl App {
             return;
         }
         self.notify(&format!("Running “{name}”…"), Duration::from_secs(3));
-        tokio::spawn(async move {
-            let result: Result<String, String> = async {
-                let fmt = crate::export::format_by_id(&action.format);
-                let content = client.cat(&note.id).await.map_err(|e| e.to_string())?;
-                let mut images: HashMap<String, Vec<u8>> = HashMap::new();
-                if fmt.needs_attachments && note.attachments > 0 {
-                    for name in client
-                        .attachments(&note.id)
-                        .await
-                        .map_err(|e| e.to_string())?
-                    {
-                        let bytes = client
-                            .attachment(&note.id, &name)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        images.insert(name, bytes);
-                    }
+        if let Some(write) = action.output.write() {
+            // A new note lands where `n` would put one.
+            let tags = if self.selection.tag.is_empty() {
+                self.selection.workspace.clone()
+            } else {
+                self.selection.tag.clone()
+            };
+            tokio::spawn(async move {
+                let result = async {
+                    let (before, captured) =
+                        Self::run_captured(&client, &action, &note, &input).await?;
+                    Ok(Self::write_output(
+                        &client, write, &action, &note, &before, &captured, &tags,
+                    )
+                    .await)
                 }
-                actions::run(&action, &note, &content.content, &images, &input)
-                    .await
-                    .map_err(|e| e.0)
-            }
-            .await;
+                .await;
+                let _ = tx.send(Msg::ActionWrote {
+                    action: Box::new(action),
+                    note,
+                    result,
+                });
+            });
+            return;
+        }
+        tokio::spawn(async move {
+            let result = Self::run_captured(&client, &action, &note, &input)
+                .await
+                .map(|(_, captured)| captured.summary());
             let _ = tx.send(Msg::ActionDone { name, result });
         });
+    }
+
+    /// Read the note, render it and run the command, capturing its output.
+    /// Returns the note as it was read, whose hash guards a `replace`.
+    async fn run_captured(
+        client: &BearClient,
+        action: &Action,
+        note: &Note,
+        input: &str,
+    ) -> Result<(NoteContent, actions::Captured), String> {
+        let fmt = crate::export::format_by_id(&action.format);
+        let content = client.cat(&note.id).await.map_err(|e| e.to_string())?;
+        let mut images: HashMap<String, Vec<u8>> = HashMap::new();
+        if fmt.needs_attachments && note.attachments > 0 {
+            for name in client
+                .attachments(&note.id)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                let bytes = client
+                    .attachment(&note.id, &name)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                images.insert(name, bytes);
+            }
+        }
+        let captured = actions::execute(action, note, &content.content, &images, input)
+            .await
+            .map_err(|e| e.0)?;
+        Ok((content, captured))
+    }
+
+    /// Hand a successful command's output to Bear the way its `output` says.
+    /// Nothing is written for empty, oversized or non-UTF-8 output, nor into a
+    /// note that went to the trash while the command ran; a refused or failed
+    /// write keeps the output in a temp file.
+    async fn write_output(
+        client: &BearClient,
+        write: actions::BearWrite,
+        action: &Action,
+        note: &Note,
+        before: &NoteContent,
+        captured: &actions::Captured,
+        tags: &str,
+    ) -> ActionWrite {
+        use actions::BearWrite;
+        let keep = |bytes: &[u8]| actions::keep_output(&action.name, bytes).ok();
+        let skipped = |why: String, kept: Option<PathBuf>| ActionWrite::Skipped { why, kept };
+        let text = match actions::text_for_bear(captured) {
+            Ok(text) => text,
+            Err(refusal) => {
+                let kept = if refusal.keep {
+                    keep(&captured.stdout)
+                } else {
+                    None
+                };
+                return skipped(refusal.reason, kept);
+            }
+        };
+        // Without a hash the overwrite would be unconditional. Checked before
+        // anything is asked of Bear.
+        if write == BearWrite::Replace && before.hash.is_empty() {
+            return skipped(
+                format!(
+                    "Bear gave no hash for “{}” to guard the replace",
+                    note.title
+                ),
+                keep(text.as_bytes()),
+            );
+        }
+        if write != BearWrite::NewNote {
+            // The hash guards the text, not where the note is: a note trashed
+            // while the command ran reads back unchanged.
+            match client.title_and_location(&note.id).await {
+                Ok((_, location)) if location == "trash" => {
+                    return skipped(
+                        format!("“{}” went to the trash while it ran", note.title),
+                        keep(text.as_bytes()),
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    return ActionWrite::Failed {
+                        message: err.to_string(),
+                        conflict: false,
+                        kept: keep(text.as_bytes()),
+                    };
+                }
+            }
+        }
+        let written = match write {
+            BearWrite::Append => client
+                .append(&note.id, &text, action.section.as_deref())
+                .await
+                .map(|()| ActionWrite::Appended),
+            BearWrite::NewNote => {
+                let tags: Vec<String> = [tags.to_string()]
+                    .into_iter()
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                client
+                    .create_from_content(&tags, &text)
+                    .await
+                    .map(|(id, title)| ActionWrite::Created { id, title })
+            }
+            BearWrite::Replace => {
+                // Replacing cannot be undone in Bear, so the text it replaces
+                // is kept first: no copy, no replace.
+                let Ok(backup) = actions::keep_output(
+                    &format!("{} (before {})", note.title, action.name),
+                    before.content.as_bytes(),
+                ) else {
+                    return skipped(
+                        "the note's text could not be saved first".into(),
+                        keep(text.as_bytes()),
+                    );
+                };
+                match client.overwrite(&note.id, &text, &before.hash).await {
+                    Ok(()) => {
+                        // Bear takes the title from the new text.
+                        let title = client
+                            .title_and_location(&note.id)
+                            .await
+                            .map(|(title, _)| title)
+                            .ok()
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or_else(|| note.title.clone());
+                        Ok(ActionWrite::Replaced { title, backup })
+                    }
+                    Err(err) => {
+                        // Nothing changed, so the copy is not needed.
+                        let _ = std::fs::remove_file(&backup);
+                        if let Some(dir) = backup.parent() {
+                            let _ = std::fs::remove_dir(dir);
+                        }
+                        Err(err)
+                    }
+                }
+            }
+        };
+        written.unwrap_or_else(|err| ActionWrite::Failed {
+            message: err.to_string(),
+            conflict: err.is_conflict(),
+            kept: keep(text.as_bytes()),
+        })
+    }
+
+    fn on_action_wrote(&mut self, action: Action, note: Note, result: Result<ActionWrite, String>) {
+        let name = action.name.clone();
+        let written = match result {
+            Ok(written) => written,
+            Err(message) => {
+                self.notify_titled(
+                    &format!("{name} failed"),
+                    &format!("{message} Nothing was written to Bear."),
+                    Severity::Error,
+                    Duration::from_secs(10),
+                );
+                return;
+            }
+        };
+        let done = |app: &mut App, message: String| {
+            app.notify_titled(
+                &name,
+                &message,
+                Severity::Information,
+                Duration::from_secs(6),
+            )
+        };
+        match written {
+            // The reloads keep the cursor wherever it is now: the command
+            // may have run for a minute, and you may have moved on.
+            ActionWrite::Appended => {
+                self.forget_content(Some(&note.id));
+                self.start_reload(None, None, true);
+                done(
+                    self,
+                    match &action.section {
+                        Some(section) => format!("Added under “{section}” in “{}”.", note.title),
+                        None => format!("Added to the end of “{}”.", note.title),
+                    },
+                );
+            }
+            ActionWrite::Created { id, title } => {
+                self.start_reload(None, Some(id), false);
+                done(self, format!("Created “{title}”."));
+            }
+            ActionWrite::Replaced { title, backup } => {
+                self.forget_content(Some(&note.id));
+                self.note_written(&title);
+                self.start_reload(None, None, true);
+                self.notify_titled(
+                    &name,
+                    &format!(
+                        "Replaced “{}”. The text it had is at {}",
+                        note.title,
+                        backup.display()
+                    ),
+                    Severity::Information,
+                    Duration::from_secs(15),
+                );
+            }
+            ActionWrite::Skipped { why, kept } => self.notify_titled(
+                &name,
+                &match &kept {
+                    Some(path) => format!(
+                        "It ran, but {why}, so nothing was written to Bear; the output is at {}",
+                        path.display()
+                    ),
+                    None => format!("It ran, but {why}, so nothing was written to Bear."),
+                },
+                Severity::Warning,
+                Duration::from_secs(if kept.is_some() { 30 } else { 8 }),
+            ),
+            ActionWrite::Failed {
+                message,
+                conflict,
+                kept,
+            } => {
+                let kept = match kept {
+                    Some(path) => format!("the output is at {}", path.display()),
+                    None => "the output could not be saved either".to_string(),
+                };
+                let (title, message) = if conflict {
+                    (
+                        "Edit conflict".to_string(),
+                        format!(
+                            "“{}” changed in Bear while “{name}” ran. Nothing was written; {kept}",
+                            note.title
+                        ),
+                    )
+                } else {
+                    (
+                        format!("{name}: write failed"),
+                        format!("{message} — {kept}"),
+                    )
+                };
+                self.notify_titled(&title, &message, Severity::Error, Duration::from_secs(30));
+            }
+        }
     }
 
     // -- input ---------------------------------------------------------------------
@@ -2276,6 +2592,8 @@ impl App {
                                 .unwrap_or(0),
                             confirm: action.confirm,
                             default: action.default,
+                            output: output_index(action.output),
+                            section: Field::new(action.section.as_deref().unwrap_or("")),
                             focus: 0,
                             note,
                             editing: Some(action),
@@ -2311,6 +2629,8 @@ impl App {
                             format: 0,
                             confirm: false,
                             default: false,
+                            output: 0,
+                            section: Field::default(),
                             note,
                             editing: None,
                         });
@@ -2341,10 +2661,13 @@ impl App {
                 mut format,
                 mut confirm,
                 mut default,
+                mut output,
+                mut section,
                 mut focus,
                 note,
                 editing,
             } => {
+                let outputs = actions::ActionOutput::ALL.len();
                 let fields = crate::ui::modals::NEW_ACTION_FIELDS;
                 match key.code {
                     KeyCode::Esc => {
@@ -2365,26 +2688,33 @@ impl App {
                     KeyCode::Enter if name.value.trim().is_empty() => focus = 0,
                     KeyCode::Enter if command.value.trim().is_empty() => focus = 1,
                     KeyCode::Enter => {
-                        // An edit keeps what the form does not show: the timeout
-                        // and the prompt. A test pins the prompt half of that.
-                        let action = Action {
-                            name: name.value.trim().to_string(),
-                            command: command.value.trim().to_string(),
-                            format: FORMATS[format].id.to_string(),
-                            confirm,
-                            default,
-                            ..editing.clone().unwrap_or_default()
-                        };
                         let form = Overlay::NewAction {
                             name,
                             command,
                             format,
                             confirm,
                             default,
+                            output,
+                            section,
                             focus,
                             note: note.clone(),
                             editing: editing.clone(),
                         };
+                        let Some(action) = form.form_action() else {
+                            return;
+                        };
+                        // Saving an action that would refuse to run is a trap:
+                        // the form says why and stays up.
+                        if let Some(problem) = action.misconfigured() {
+                            self.notify_titled(
+                                "Not saved",
+                                &format!("{problem}."),
+                                Severity::Warning,
+                                Duration::from_secs(8),
+                            );
+                            self.overlay = Some(form);
+                            return;
+                        }
                         self.save_action(action, editing, form, note);
                         return;
                     }
@@ -2396,11 +2726,18 @@ impl App {
                     }
                     KeyCode::Char(' ') if focus == 3 => confirm = !confirm,
                     KeyCode::Char(' ') if focus == 4 => default = !default,
+                    KeyCode::Left if focus == 5 => output = (output + outputs - 1) % outputs,
+                    KeyCode::Right | KeyCode::Char(' ') if focus == 5 => {
+                        output = (output + 1) % outputs
+                    }
                     _ if focus == 0 => {
                         Self::field_key(&mut name, &key);
                     }
                     _ if focus == 1 => {
                         Self::field_key(&mut command, &key);
+                    }
+                    _ if focus == 6 => {
+                        Self::field_key(&mut section, &key);
                     }
                     _ => {}
                 }
@@ -2410,6 +2747,8 @@ impl App {
                     format,
                     confirm,
                     default,
+                    output,
+                    section,
                     focus,
                     note,
                     editing,
@@ -2841,5 +3180,70 @@ impl App {
             triage.unmark(&keys);
             self.triage_load();
         }
+    }
+}
+
+/// Where `output` sits in `ActionOutput::ALL`, for the form's picker.
+fn output_index(output: actions::ActionOutput) -> usize {
+    actions::ActionOutput::ALL
+        .iter()
+        .position(|o| *o == output)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Without a hash from the read, `overwrite` would run unguarded, so the
+    /// replace is refused and the output kept. The client points at nothing:
+    /// the refusal must come before any bearcli call.
+    #[tokio::test]
+    async fn replace_refuses_a_note_read_without_a_hash() {
+        let client = BearClient::with_env(vec!["/nonexistent/bearcli".into()], Vec::new());
+        let action = Action {
+            name: "Tidy".into(),
+            command: "true".into(),
+            output: actions::ActionOutput::Replace,
+            ..Action::default()
+        };
+        let note = Note {
+            id: "NOTE-1".into(),
+            title: "Sprint Planning".into(),
+            ..Note::default()
+        };
+        let before = NoteContent {
+            id: "NOTE-1".into(),
+            content: "# Sprint Planning\n".into(),
+            hash: String::new(),
+        };
+        let captured = actions::Captured {
+            stdout: b"# Sprint Planning\n\ntidied\n".to_vec(),
+            ..actions::Captured::default()
+        };
+        let written = App::write_output(
+            &client,
+            actions::BearWrite::Replace,
+            &action,
+            &note,
+            &before,
+            &captured,
+            "",
+        )
+        .await;
+        let ActionWrite::Skipped {
+            why,
+            kept: Some(kept),
+        } = written
+        else {
+            panic!("{written:?}");
+        };
+        assert!(why.contains("no hash"), "{why}");
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            "# Sprint Planning\n\ntidied\n"
+        );
+        std::fs::remove_file(&kept).unwrap();
+        std::fs::remove_dir(kept.parent().unwrap()).unwrap();
     }
 }

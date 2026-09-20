@@ -875,7 +875,11 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     ),
                     Span::styled(format!("  {label:<10}"), theme::muted()),
                     Span::styled(
-                        if action.confirm { "  asks first" } else { "" },
+                        if action.asks_first() {
+                            "  asks first"
+                        } else {
+                            ""
+                        },
                         Style::default().fg(theme::warning_color()),
                     ),
                 ]));
@@ -915,7 +919,14 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     if let Some(title) = &action.prompt {
                         facts.push(format!("asks: {title}"));
                     }
-                    if action.confirm {
+                    match (action.output, &action.section) {
+                        (crate::actions::ActionOutput::Toast, _) => {}
+                        (crate::actions::ActionOutput::Append, Some(section)) => {
+                            facts.push(format!("appends under {section}"))
+                        }
+                        (other, _) => facts.push(output_hint(other).into()),
+                    }
+                    if action.asks_first() {
                         facts.push("asks before running".into());
                     }
                     if is_default(action) {
@@ -957,6 +968,8 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             format,
             confirm,
             default,
+            output,
+            section,
             focus,
             editing,
             ..
@@ -966,7 +979,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 "{verb} action · saved to {}",
                 tilde_path(&app.config_path())
             );
-            let inner = dialog(frame, area, 84, 13, Some(&title));
+            let inner = dialog(frame, area, 84, 15, Some(&title));
             let width = inner.width.saturating_sub(4) as usize;
             let heading = |row: usize| {
                 if *focus == row {
@@ -991,6 +1004,24 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 }
             };
             let (name_shown, command_shown) = (scrolled(name), scrolled(command));
+            let chosen = crate::actions::ActionOutput::ALL[*output];
+            // The section box is narrower: it shares its row with its label.
+            let section_width = width.saturating_sub(13).min(30);
+            let section_shown = {
+                let start = section
+                    .cursor
+                    .saturating_sub(section_width.saturating_sub(1));
+                Field {
+                    value: section
+                        .value
+                        .chars()
+                        .skip(start)
+                        .take(section_width)
+                        .collect(),
+                    cursor: section.cursor - start,
+                }
+            };
+            let appending = chosen == crate::actions::ActionOutput::Append;
             let check = |on: bool| if on { "[x]" } else { "[ ]" };
             let mut lines = vec![
                 Line::from(Span::styled("  Name", heading(0))),
@@ -1009,11 +1040,23 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     Span::styled(format!("‹ {} ›", FORMATS[*format].label), control(2)),
                     Span::styled("   ←/→ changes it", theme::muted()),
                 ]),
-                Line::from(vec![
-                    Span::styled("  Ask first  ", heading(3)),
-                    Span::styled(check(*confirm), control(3)),
-                    Span::styled("   space ticks · asks before it runs", theme::muted()),
-                ]),
+                if chosen == crate::actions::ActionOutput::Replace {
+                    // Replace always asks, whatever the box says.
+                    Line::from(vec![
+                        Span::styled("  Ask first  ", heading(3)),
+                        Span::styled("[x]", control(3)),
+                        Span::styled(
+                            "   always, for an action that replaces the note",
+                            theme::muted(),
+                        ),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled("  Ask first  ", heading(3)),
+                        Span::styled(check(*confirm), control(3)),
+                        Span::styled("   space ticks · asks before it runs", theme::muted()),
+                    ])
+                },
                 Line::from(vec![
                     Span::styled("  Default    ", heading(4)),
                     Span::styled(check(*default), control(4)),
@@ -1022,6 +1065,29 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                         theme::muted(),
                     ),
                 ]),
+                Line::from(vec![
+                    Span::styled("  Output     ", heading(5)),
+                    Span::styled(format!("‹ {} ›", output_label(chosen)), control(5)),
+                    Span::styled(format!("   {}", output_hint(chosen)), theme::muted()),
+                ]),
+                {
+                    let mut spans = vec![Span::styled("  Section    ", heading(6))];
+                    spans.extend(
+                        field_line(&section_shown, *focus == 6, section_width)
+                            .spans
+                            .into_iter()
+                            .skip(1),
+                    );
+                    spans.push(Span::styled(
+                        if appending {
+                            "  blank for the end of the note"
+                        } else {
+                            "  only used by append"
+                        },
+                        theme::muted(),
+                    ));
+                    Line::from(spans)
+                },
                 Line::from(""),
             ];
             // Only one action is the default; say which one this replaces.
@@ -1031,12 +1097,18 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 .iter()
                 .find(|a| a.default && Some(*a) != editing.as_ref())
                 .filter(|_| *default);
-            lines.push(match replaced {
-                Some(old) => Line::from(Span::styled(
+            // What would stop it from saving comes first; enter says it again.
+            let problem = overlay.form_action().and_then(|a| a.misconfigured());
+            lines.push(match (problem, replaced) {
+                (Some(problem), _) => Line::from(Span::styled(
+                    format!("  ! {problem}"),
+                    Style::default().fg(theme::warning_color()),
+                )),
+                (None, Some(old)) => Line::from(Span::styled(
                     format!("  ★ “{}” stops being the default", old.name),
                     Style::default().fg(theme::warning_color()),
                 )),
-                None => Line::from(""),
+                (None, None) => Line::from(""),
             });
             lines.push(Line::from(Span::styled(
                 "  tab or ↑/↓ moves · enter saves · esc goes back to the menu",
@@ -1051,6 +1123,13 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     inner.x + 2,
                     inner.y + 3,
                     width as u16,
+                ),
+                6 => field_cursor(
+                    frame,
+                    &section_shown,
+                    inner.x + 13,
+                    inner.y + 9,
+                    section_width as u16,
                 ),
                 _ => {}
             }
@@ -1108,5 +1187,25 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             };
             frame.render_widget(Paragraph::new(shown), text_area);
         }
+    }
+}
+
+/// The form's name for an action's `output`.
+fn output_label(output: crate::actions::ActionOutput) -> &'static str {
+    match output {
+        crate::actions::ActionOutput::Toast => "Toast",
+        crate::actions::ActionOutput::Append => "Append",
+        crate::actions::ActionOutput::NewNote => "New note",
+        crate::actions::ActionOutput::Replace => "Replace",
+    }
+}
+
+/// What an `output` does with what the command prints.
+fn output_hint(output: crate::actions::ActionOutput) -> &'static str {
+    match output {
+        crate::actions::ActionOutput::Toast => "shows the first line it prints",
+        crate::actions::ActionOutput::Append => "appends what it prints to the note",
+        crate::actions::ActionOutput::NewNote => "makes a new note of what it prints",
+        crate::actions::ActionOutput::Replace => "replaces the note with what it prints",
     }
 }

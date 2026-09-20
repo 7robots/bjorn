@@ -361,3 +361,66 @@ fn fake_remctl_round_trip() {
     let out = run(&["add", "--list", "Nope", "--", "x"]);
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[tokio::test]
+async fn append_and_create_from_content_send_the_text_verbatim() {
+    let fake = Fake::new();
+    let client = fake.client();
+    // A literal backslash-n must reach Bear as typed: the text goes on stdin,
+    // not through --content, which bearcli reads escapes in.
+    client
+        .append("NOTE-READING", "a \\n stays\n", None)
+        .await
+        .unwrap();
+    let body = client.cat("NOTE-READING").await.unwrap().content;
+    assert!(body.ends_with("- Book 120\na \\n stays\n"), "{body}");
+
+    client
+        .append("NOTE-PLANNING", "- [ ] under tasks\n", Some("## Tasks"))
+        .await
+        .unwrap();
+    let body = client.cat("NOTE-PLANNING").await.unwrap().content;
+    assert!(
+        body.contains("sunset date\n- [ ] under tasks\n\n## Notes"),
+        "{body}"
+    );
+    assert!(
+        client
+            .append("NOTE-PLANNING", "x\n", Some("## Nowhere"))
+            .await
+            .is_err()
+    );
+
+    let (id, title) = client
+        .create_from_content(&["work".to_string()], "# From stdout\n\nbody\n")
+        .await
+        .unwrap();
+    assert_eq!(title, "From stdout");
+    assert_eq!(
+        client.cat(&id).await.unwrap().content,
+        "# From stdout\n#work\n\nbody\n"
+    );
+}
+
+#[tokio::test]
+async fn append_at_the_end_goes_before_bottom_tags_and_footnotes() {
+    let fake = Fake::new();
+    let client = fake.client();
+    let before = client.cat("NOTE-READING").await.unwrap();
+    client
+        .overwrite(
+            "NOTE-READING",
+            "# Reading Queue\n\nA claim.[^1]\n\n#home #books\n\n[^1]: The source.\n",
+            &before.hash,
+        )
+        .await
+        .unwrap();
+    client
+        .append("NOTE-READING", "Added.\n", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.cat("NOTE-READING").await.unwrap().content,
+        "# Reading Queue\n\nA claim.[^1]\nAdded.\n\n#home #books\n\n[^1]: The source.\n"
+    );
+}

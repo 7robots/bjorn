@@ -3,7 +3,9 @@
 An action is a shell command Bjorn runs against the note under the cursor.
 Export writes the note to a file you chose; an action hands that same file to a
 command of yours and reports what it said — `aws s3 cp`, `scp`, `curl`, `gh
-gist create`, `pbcopy`, a script of your own.
+gist create`, `pbcopy`, a script of your own. What the command prints can also
+go back into Bear: appended to the note, as a new note, or in place of the note
+(see [Sending the output to Bear](#sending-the-output-to-bear)).
 
 - `!` runs the default action.
 - `a` opens the action menu: a search box over your actions, filtered as you
@@ -11,7 +13,8 @@ gist create`, `pbcopy`, a script of your own.
   "Publish to S3", and a command by plain substring, so `curl` finds an action
   by what it runs. `↑`/`↓` (or `ctrl+p`/`ctrl+n`, or `tab`) picks, `enter` runs, `esc`
   closes. The default is marked ★, and under the list the highlighted action
-  is shown in full: its command, format, timeout and whether it asks first. `ctrl+e`
+  is shown in full: its command, format, timeout, where its output goes and
+  whether it asks first. `ctrl+e`
   edits it and `ctrl+d` deletes it, after asking.
 
 `!` opens the menu instead when there is no default to run; with no actions at
@@ -21,10 +24,11 @@ are for export.
 ## Adding, editing and deleting from the menu
 
 The last row of the menu, **+ New action**, opens a form: the name, the
-command, the format to render, whether it asks first, and whether it is the
-default. Type in the search box first and the name is filled in from it. `tab`
-or `↑`/`↓` moves between fields, `←`/`→` changes the format, `space` ticks a
-box, `enter` saves and `esc` goes back to the menu.
+command, the format to render, whether it asks first, whether it is the
+default, where its output goes and, for an append, the section heading. Type in
+the search box first and the name is filled in from it. `tab` or `↑`/`↓` moves
+between fields, `←`/`→` changes the format or the output, `space` ticks a box,
+`enter` saves and `esc` goes back to the menu.
 
 Saving adds an `[[actions]]` entry to the end of the config file Bjorn read at
 start-up (or the one `--config` named). The file is edited as text, not
@@ -85,6 +89,8 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 | `prompt` | — | ask for one line of text first and pass it as `$BJORN_ACTION_INPUT`. The value is the prompt's title (`prompt = "Which bucket"`). A blank one is no prompt at all |
 | `interactive` | `false` | give the command the window and the keyboard in a pty, instead of capturing its output. For anything that talks back |
 | `timeout` | `300` | seconds (five minutes); a command that overruns is killed and reported. Not applied to an `interactive` action, which runs until you quit it |
+| `output` | `toast` | where stdout goes: `toast` (its first line, as today), `append` (to the end of the note), `new-note`, or `replace` (the note's whole text; always asks first, and needs `format = "md"`). Any other value stops the action before it runs, so a typo neither writes nor runs. See [Sending the output to Bear](#sending-the-output-to-bear) |
+| `section` | — | with `output = "append"`: the heading to add under, written as it is in the note (`"## Summary"`). Blank or absent appends to the end of the note. Set on any other `output`, it stops the action from running |
 | `default` | `false` | the action `!` runs. With exactly one action configured, that one is the default whether or not it says so |
 
 An entry without a `command` is skipped rather than raised, so a half-written
@@ -153,6 +159,100 @@ The editor fills the reader pane so the note list stays beside it; an
 interactive action fills the window, because its program owns its own screen and
 there is nothing useful to keep next to it.
 
+A captured action — anything not `interactive` — runs in a process group of its
+own, away from the terminal, so a command that tries to prompt there (an ssh
+passphrase, a login prompt) gets no answer and waits until the timeout stops
+it. Give those `interactive = true`.
+
+## Sending the output to Bear
+
+By default the command's output is a toast: its first line, and the rest is
+dropped. `output` sends all of it back into Bear instead, through the same
+`bearcli` every other write uses:
+
+```toml
+# Summarize the note and add the summary under its own heading.
+[[actions]]
+name = "Summarize"
+command = 'claude -p "Summarize this note in five bullet points."'
+output = "append"
+section = "## Summary"
+
+# A GitHub issue as a note: the prompt asks which one.
+[[actions]]
+name = "Issue to note"
+command = '''gh issue view "$BJORN_ACTION_INPUT" --json title,body --jq '"# \(.title)\n\n\(.body)"' '''
+prompt = "Issue number"
+output = "new-note"
+
+# The pull request on this branch, as a note.
+[[actions]]
+name = "PR to note"
+command = '''cd ~/src/app && gh pr view --json title,url,body --jq '"# \(.title)\n\n\(.url)\n\n\(.body)"' '''
+output = "new-note"
+
+# Tidy the note in place.
+[[actions]]
+name = "Tidy"
+command = 'llm -s "Fix spelling and grammar. Keep the Markdown and every link as it is."'
+output = "replace"
+```
+
+- **`append`** adds the output to the end of the note, or with `section` to
+  the end of that section: after anything nested under it, ahead of the blank
+  lines before the next heading. Without a section, Bear puts it ahead of tags
+  placed at the bottom of the note and of footnote definitions. A section the
+  note does not have is an error, and nothing is written.
+- **`new-note`** makes a note of the output. Bear takes the title from its
+  first line, after any YAML front matter, so a command that prints `# Title`
+  first gets that title. The note is tagged the way `n` tags one — the tag
+  you are in, else the workspace — and selected once it is in the list.
+- **`replace`** writes the output over the note's whole text. It always asks
+  first, whether or not the action says `confirm = true`, and it is
+  hash-guarded the way the editor is: if the note changed in Bear while the
+  command ran, nothing is written. Bear derives the title and tags from the
+  new text, so a command that rewrites a note should keep its `# Title` line
+  and its tags. Bear also refuses a replacement that would drop an attachment
+  the note has. It needs `format = "md"`, since the command's output is what
+  the note becomes: an HTML or RTF rendering would come back as the note's
+  text. Bear cannot undo it, so the text the note had is saved to a temp file
+  first, and the toast says where.
+
+The output goes to Bear as it was printed, without the blank lines around it,
+with `\r\n` turned into `\n` and control characters other than tab and
+newline (terminal color codes, bells) taken out. Some things never write:
+
+- **A non-zero exit, a timeout or a failure to start.** The toast reports it,
+  as for any action, and says nothing was written.
+- **Empty output.** A command that printed nothing (or only blank lines) never
+  makes an empty note or wipes one; a toast says it ran and wrote nothing.
+- **More than 1 MB.** The output is refused rather than cut short; the first
+  megabyte is kept in a temp file.
+- **Output that is not UTF-8 text.** It is kept in a temp file as it came.
+- **A note that went to the trash** while the command ran. Bjorn checks just
+  before it writes, and keeps the output.
+
+When Bear refuses a write — the section is missing, the note changed, an
+attachment would go — the output is kept in a temp file and the toast says
+where (`…/bjorn-output-XXXX/Summarize.md`), so an answer that took a minute
+and cost money does not have to be asked for again. The folder is readable
+only by you. Bjorn does not delete it, but it lives under `$TMPDIR`, which
+macOS clears of files left untouched for a few days, so move anything you
+want to keep.
+
+An action that could not do what its entry asks does not run, and a toast
+says why: an `interactive` action with an `output` (it has no captured output
+to send), `replace` with a format other than `md`, a `section` on anything but
+`append`, or an `output` value Bjorn does not know. The add and edit form shows
+the same warning and will not save such an action.
+
+An LLM command reads the note, and a note can hold text written to steer it
+(pasted from a web page, say). Run such commands with their tools turned off,
+using whatever option your CLI has for allowing no tools or shell access, so
+the worst a steered answer can do is be wrong, which the backup and the
+confirm dialog of `replace` let you catch. A tool-enabled agent that reads an
+injected note can act on it, with your credentials.
+
 ## What the command gets
 
 The note is rendered exactly as export renders it and written to a temp
@@ -178,14 +278,15 @@ shell function or an alias, put it in a script and call the script.
 ## What comes back
 
 Exit status 0 is success: a toast titled with the action's name, carrying the
-first line the command printed (`Done.` when it printed nothing). Anything else
+first line the command printed (`Done.` when it printed nothing). With an
+`output` that writes to Bear, the toast says what was written instead. Anything else
 is an error toast with the exit code and the first line of stderr —
 `exit 3: no credentials`.
 
 Nothing blocks: the action runs on the tokio runtime like every bearcli call,
-and the three columns stay live while it does. Bjorn never inspects a note
-after an action; if the command changed the note in Bear, the next poll picks
-it up.
+and the three columns stay live while it does. Unless its `output` wrote to
+Bear, Bjorn never inspects a note after an action; if the command changed the
+note in Bear itself, the next poll picks it up.
 
 ## Safety
 

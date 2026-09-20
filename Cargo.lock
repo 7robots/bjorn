@@ -177,6 +177,7 @@ dependencies = [
  "crossterm",
  "fancy-regex 0.19.1",
  "futures",
+ "libc",
  "percent-encoding",
  "portable-pty",
  "pretty_assertions",

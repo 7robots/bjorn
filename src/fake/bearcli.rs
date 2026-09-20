@@ -546,6 +546,18 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    Append {
+        #[command(flatten)]
+        target: Target,
+        #[arg(short = 'c', long, allow_hyphen_values = true)]
+        content: Option<String>,
+        #[arg(long, default_value = "end", value_parser = ["beginning", "end"])]
+        position: String,
+        #[arg(long, allow_hyphen_values = true)]
+        section: Option<String>,
+        #[arg(long)]
+        no_update_modified: bool,
+    },
     Edit {
         #[command(flatten)]
         target: Target,
@@ -891,9 +903,13 @@ fn cmd_create(
         Some(c) => unescape(c),
         None => read_stdin(),
     };
+    // Without a title Bear takes it from the first line after any front
+    // matter, and keeps the content as it is.
+    let derived = title.is_none();
+    let body_start = front_matter_end(&content);
     let title = match title {
         Some(t) => t.to_string(),
-        None => content
+        None => content[body_start..]
             .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("Untitled")
@@ -931,13 +947,35 @@ fn cmd_create(
         .map(|t| display_tag(t))
         .collect::<Vec<_>>()
         .join(" ");
-    let mut full = format!("{heading}\n");
-    if tag_line.is_empty() {
+    let mut full = if derived {
+        // The tags go on the line after the title line.
+        let rest = &content[body_start..];
+        let skipped = rest.len() - rest.trim_start_matches(['\n', '\r', ' ', '\t']).len();
+        let title_end = rest[skipped..]
+            .find('\n')
+            .map_or(rest.len(), |n| skipped + n);
+        let mut full = content[..body_start + title_end].to_string();
         full.push('\n');
+        if !tag_line.is_empty() {
+            full.push_str(&format!("{tag_line}\n"));
+        }
+        let body = rest[title_end..].trim_start_matches('\n');
+        if !body.is_empty() {
+            full.push('\n');
+            full.push_str(body);
+        }
+        full
     } else {
-        full.push_str(&format!("{tag_line}\n\n"));
+        format!("{heading}\n")
+    };
+    if !derived {
+        if tag_line.is_empty() {
+            full.push('\n');
+        } else {
+            full.push_str(&format!("{tag_line}\n\n"));
+        }
+        full.push_str(&body);
     }
-    full.push_str(&body);
     if !full.ends_with('\n') {
         full.push('\n');
     }
@@ -973,6 +1011,22 @@ fn cmd_create(
         println!("{}", tsv_row(values.iter()));
     }
     Ok(())
+}
+
+/// Where a YAML front matter block (a `---` fence opening on the first line)
+/// ends, or 0 when there is none.
+fn front_matter_end(content: &str) -> usize {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return 0;
+    };
+    let mut at = 4;
+    for line in rest.split_inclusive('\n') {
+        at += line.len();
+        if line.trim_end() == "---" {
+            return at;
+        }
+    }
+    0
 }
 
 fn cmd_overwrite(
@@ -1035,40 +1089,10 @@ fn cmd_edit(
     };
     let find = unescape(find);
     let content = state.notes[i].content.clone();
-    let (mut start, mut end) = (0usize, content.len());
-    if let Some(section) = section {
-        let heading = unescape(section).trim().to_string();
-        let lines: Vec<&str> = content.split('\n').collect();
-        let level = heading.len() - heading.trim_start_matches('#').len();
-        let starts: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.trim() == heading)
-            .map(|(i, _)| i)
-            .collect();
-        if starts.len() != 1 {
-            return Err(fail_text(
-                if starts.is_empty() {
-                    "Section not found"
-                } else {
-                    "Section address is ambiguous"
-                },
-                1,
-            ));
-        }
-        let first = starts[0];
-        let mut last = lines.len();
-        for (j, line) in lines.iter().enumerate().skip(first + 1) {
-            if let Some(m) = HEADING_RE.captures(line)
-                && m[1].len() <= level
-            {
-                last = j;
-                break;
-            }
-        }
-        start = lines[..first].join("\n").len() + usize::from(first > 0);
-        end = lines[..last].join("\n").len();
-    }
+    let (start, end) = match section {
+        Some(section) => section_range(&content, section)?,
+        None => (0usize, content.len()),
+    };
     let region = &content[start..end];
     let hits = region.matches(find.as_str()).count();
     if hits == 0 {
@@ -1090,6 +1114,115 @@ fn cmd_edit(
     let note = &mut state.notes[i];
     note.content = format!("{}{}{}", &content[..start], region, &content[end..]);
     note.modified = now_iso();
+    save_state(state);
+    Ok(())
+}
+
+/// The byte range of the section a heading line (`## Tasks`) addresses: from
+/// its heading to the next heading of the same or a higher level.
+fn section_range(content: &str, section: &str) -> Result<(usize, usize), i32> {
+    let heading = unescape(section).trim().to_string();
+    let lines: Vec<&str> = content.split('\n').collect();
+    let level = heading.len() - heading.trim_start_matches('#').len();
+    let starts: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim() == heading)
+        .map(|(i, _)| i)
+        .collect();
+    if starts.len() != 1 {
+        return Err(fail_text(
+            if starts.is_empty() {
+                "Section not found"
+            } else {
+                "Section address is ambiguous"
+            },
+            1,
+        ));
+    }
+    let first = starts[0];
+    let mut last = lines.len();
+    for (j, line) in lines.iter().enumerate().skip(first + 1) {
+        if let Some(m) = HEADING_RE.captures(line)
+            && m[1].len() <= level
+        {
+            last = j;
+            break;
+        }
+    }
+    let start = lines[..first].join("\n").len() + usize::from(first > 0);
+    Ok((start, lines[..last].join("\n").len()))
+}
+
+/// Where the lines that close a note start: tag lines (`#tag`, not a
+/// `# heading`) and footnote definitions (`[^1]: …`), with the blank lines
+/// among them. The end of the note when it has none.
+fn bottom_block_start(content: &str) -> usize {
+    let closing = |line: &str| {
+        let line = line.trim();
+        let tag = line.starts_with('#')
+            && line[1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c != ' ' && c != '#');
+        tag || (line.starts_with("[^") && line.contains("]:"))
+    };
+    let mut start = content.len();
+    let mut offset = content.len();
+    for line in content.split_inclusive('\n').rev() {
+        offset -= line.len();
+        if closing(line) {
+            start = offset;
+        } else if !line.trim().is_empty() {
+            break;
+        }
+    }
+    start
+}
+
+/// `append`: add content at the end (or the beginning) of the note, or of one
+/// section. The content always ends on its own line, and blank lines between
+/// the section and the next heading stay where they were.
+fn cmd_append(
+    state: &mut State,
+    target: &Target,
+    content: Option<&str>,
+    position: &str,
+    section: Option<&str>,
+    no_update_modified: bool,
+) -> CmdResult {
+    let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
+        return Err(fail_text("Note not found", 1));
+    };
+    let added = match content {
+        Some(c) => unescape(c),
+        None => read_stdin(),
+    };
+    let added = added.trim_end_matches('\n');
+    let current = state.notes[i].content.clone();
+    let (start, end) = match section {
+        Some(section) => section_range(&current, section)?,
+        None => (0, current.len()),
+    };
+    let at = if position == "beginning" {
+        // After the heading line of the section, or the title line of the note.
+        current[start..end].find('\n').map_or(end, |n| start + n)
+    } else if section.is_none() {
+        // Before tags placed at the bottom and footnote definitions.
+        current[..bottom_block_start(&current)].trim_end().len()
+    } else {
+        start + current[start..end].trim_end().len()
+    };
+    let lead = if at == 0 { "" } else { "\n" };
+    let mut updated = format!("{}{lead}{added}{}", &current[..at], &current[at..]);
+    if at == current.len() {
+        updated.push('\n');
+    }
+    let note = &mut state.notes[i];
+    note.content = updated;
+    if !no_update_modified {
+        note.modified = now_iso();
+    }
     save_state(state);
     Ok(())
 }
@@ -1292,6 +1425,20 @@ pub fn run(argv: Vec<String>) -> i32 {
             &target,
             content.as_deref(),
             base.as_deref(),
+            no_update_modified,
+        ),
+        Cmd::Append {
+            target,
+            content,
+            position,
+            section,
+            no_update_modified,
+        } => cmd_append(
+            &mut state,
+            &target,
+            content.as_deref(),
+            &position,
+            section.as_deref(),
             no_update_modified,
         ),
         Cmd::Edit {
