@@ -128,7 +128,7 @@ timeout = 120
 ```toml
 [[actions]]
 name = "Save as PDF to Desktop (Chrome)"
-command = 'out="$HOME/Desktop/$(basename "$BJORN_NOTE_FILE" .html).pdf"; cp "$BJORN_NOTE_FILE" note.html && "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --user-data-dir="$(mktemp -d)" --host-resolver-rules="MAP * ~NOTFOUND" --disable-remote-fonts --no-pdf-header-footer --print-to-pdf="$out" "file://$PWD/note.html" >/dev/null 2>&1 && echo "saved $out"'
+command = 'out="$HOME/Desktop/$(basename "$BJORN_NOTE_FILE" .html).pdf"; profile="$(mktemp -d)"; cp "$BJORN_NOTE_FILE" note.html && "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --user-data-dir="$profile" --host-resolver-rules="MAP * ~NOTFOUND" --proxy-server="127.0.0.1:1" --proxy-bypass-list="<-loopback>" --disable-remote-fonts --no-pdf-header-footer --print-to-pdf="$out" "file://$PWD/note.html" >/dev/null 2>&1; rm -rf "$profile"; [ -s "$out" ] && echo "saved $out"'
 format = "html"
 timeout = 120
 ```
@@ -159,13 +159,19 @@ Three details in those commands are load-bearing:
   can quietly print the wrong page — and Chrome still exits 0. The temp
   directory is the command's working directory; copying to `note.html` first
   sidesteps it.
-- **Chrome gets its own throwaway profile and no network.** A note can contain
-  inline HTML, and a converter renders it: `--user-data-dir` keeps the render
-  away from your logged-in profile (and stops the action failing when Chrome is
-  already open), and `--host-resolver-rules="MAP * ~NOTFOUND"` means a note that
-  carries a tracking pixel or a script cannot reach anything. WeasyPrint runs no
-  scripts but does fetch remote URLs; there is no flag to stop it, so print
-  notes you did not write with Chrome.
+- **Chrome gets its own throwaway profile, and nowhere to go.** A note can
+  contain inline HTML, and a converter renders it. `--user-data-dir` keeps the
+  render away from your logged-in profile and its cookies (and stops the action
+  failing when Chrome is already open), and it is deleted afterwards.
+  `--host-resolver-rules` stops any hostname resolving; `--proxy-server` points
+  what is left at a dead port, because a URL written as a bare IP address never
+  goes near the resolver. Between them a note that carries a tracking pixel or
+  a script has nowhere to send anything.
+
+WeasyPrint runs no scripts, but it fetches what the page points at, and there
+is no flag to stop it: a remote URL is fetched, and so is a local file — a note
+saying `<img src="/Users/you/…">` bakes that file into the PDF you then send
+on. Print a note you did not write yourself with Chrome.
 
 ## What comes back
 

@@ -91,7 +91,6 @@ pub fn stylesheet(theme: &Theme) -> String {
     format!(
         r#":root {{ color-scheme: light dark; --accent: {on_light}; --bullet: {bullet_light}; }}
 body {{ max-width: 44em; margin: 2em auto; padding: 0 1.5em; font: 16px/1.55 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; color: #222; background: #fff; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --accent: {on_dark}; --bullet: {bullet_dark}; }} body {{ color: #ddd; background: #1e1e1e; }} mark {{ background: #6b5b00; color: inherit; }} pre, code {{ background: #2a2a2a; }} th, td {{ border-color: #444; }} th {{ background: #2a2a2a; }} .tag {{ background: #3a3a3a; color: #ccc; }} }}
 h1, h2, h3, h4, h5, h6 {{ line-height: 1.25; margin: 1.4em 0 0.5em; }}
 h1 {{ font-size: 1.8em; margin-top: 0; }}
 h2 {{ font-size: 1.4em; }}
@@ -135,8 +134,8 @@ img {{ max-width: 100%; height: auto; }}
 ul, ol {{ padding-left: 1.5em; }}
 /* Bear alternates filled and hollow markers by depth; browsers reach a square. */
 ul {{ list-style: disc; }}
-ul ul, ul ul ul ul, ul ul ul ul ul ul, ul ul ul ul ul ul ul ul {{ list-style: circle; }}
-ul ul ul, ul ul ul ul ul, ul ul ul ul ul ul ul {{ list-style: disc; }}
+ul ul, ul ul ul ul, ul ul ul ul ul ul, ul ul ul ul ul ul ul ul, ul ul ul ul ul ul ul ul ul ul {{ list-style: circle; }}
+ul ul ul, ul ul ul ul ul, ul ul ul ul ul ul ul, ul ul ul ul ul ul ul ul ul {{ list-style: disc; }}
 li {{ margin: 0.15em 0; }}
 li::marker {{ color: var(--bullet); }}
 li.task::marker {{ color: transparent; }}
@@ -148,19 +147,33 @@ input[type=checkbox]:checked {{ background: #ececec url("data:image/svg+xml;char
 .tags {{ margin: -0.5em 0 1.5em; }}
 .tag {{ display: inline-block; background: #eee; color: #555; border-radius: 1em; padding: 0.05em 0.7em; margin-right: 0.3em; font-size: 0.85em; }}
 hr {{ border: 0; border-top: 1px solid #ddd; margin: 2em 0; }}
+/* A browser set to dark mode. This block sits below the rules it overrides:
+   a media query adds no specificity, so only its place in the sheet decides,
+   and the print block below it has the last word on paper. */
+@media (prefers-color-scheme: dark) {{
+  :root {{ --accent: {on_dark}; --bullet: {bullet_dark}; }}
+  body {{ color: #ddd; background: #1e1e1e; }}
+  del {{ color: #999; }}
+  pre, code {{ background: #2a2a2a; }}
+  th, td {{ border-color: #444; }}
+  th {{ background: #2a2a2a; }}
+  .tag {{ background: #3a3a3a; color: #ccc; }}
+  /* A callout keeps its light tint, so everything on it keeps dark ink. */
+  .callout pre, .callout code {{ background: #00000010; color: #1a1a1a; }}
+  .callout a, .callout .note-link, .callout li::marker {{ color: #1a3d5c; }}
+}}
 @page {{ size: A4; margin: 18mm 16mm; }}
 @media print {{
   :root {{ --accent: {on_light}; --bullet: {bullet_light}; }}
   body {{ max-width: none; margin: 0; padding: 0; font-size: 11pt; color: #1a1a1a; background: #fff; }}
   h1 {{ font-size: 2em; }}
   h1, h2, h3, h4, h5, h6 {{ color: #111; break-after: avoid; }}
-  mark {{ background: #fde68a; color: #1a1a1a; }}
   pre, code {{ background: #f5f5f5; color: #1a1a1a; }}
   pre {{ white-space: pre-wrap; }}
   th, td {{ border-color: #e0e0e0; }}
   .tag {{ background: #ececec; color: #6b6b6b; }}
   /* A quote or a code block longer than the page has to be allowed to split. */
-  li, tr, img, .callout {{ break-inside: avoid; }}
+  li, tr, img {{ break-inside: avoid; }}
   /* The pills, the highlights and the code ground are the note, not decoration. */
   mark, .tag, pre, code, th, .callout, input[type=checkbox] {{ print-color-adjust: exact; -webkit-print-color-adjust: exact; }}
 }}"#
@@ -214,7 +227,8 @@ fn task_inputs(line: &str) -> String {
 /// Bear writes a highlight's color as a colored circle at the front of the
 /// run: `==🟢green==`. The emoji is the color, not text, so it comes out of
 /// the words and goes into a class. An unknown leading emoji is left alone and
-/// the highlight takes Bear's default.
+/// the highlight takes Bear's default, as does a run that is nothing but a
+/// circle: the character stays rather than the highlight emptying out.
 fn highlight_color(text: &str) -> (&'static str, &str) {
     for (emoji, name) in [
         ("🔴", "red"),
@@ -224,7 +238,12 @@ fn highlight_color(text: &str) -> (&'static str, &str) {
         ("🟣", "purple"),
     ] {
         if let Some(rest) = text.strip_prefix(emoji) {
-            return (name, rest.trim_start());
+            // An emoji presentation selector rides along behind the circle.
+            let rest = rest.strip_prefix('\u{fe0f}').unwrap_or(rest).trim_start();
+            if rest.is_empty() {
+                break;
+            }
+            return (name, rest);
         }
     }
     ("default", text)
@@ -236,7 +255,9 @@ const CALLOUTS: [&str; 5] = ["note", "tip", "important", "warning", "caution"];
 /// `> [!NOTE] …` and the quote lines under it. `None` when the line opens no
 /// callout.
 fn callout_kind(line: &str) -> Option<&'static str> {
-    let rest = line.trim_start().strip_prefix('>')?.trim_start();
+    // Only at column 0: an indented one belongs to whatever holds it — a list
+    // item, say — where a panel of raw HTML would break the list in two.
+    let rest = line.strip_prefix('>')?.trim_start();
     let marker = rest.strip_prefix("[!")?;
     let end = marker.find(']')?;
     let name = marker[..end].to_ascii_lowercase();
@@ -254,8 +275,17 @@ pub fn prepare(content: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut in_fence = false;
     let mut in_callout = false;
-    let lines: Vec<&str> = content.lines().collect();
-    for line in lines {
+    for line in content.lines() {
+        // A callout runs to the first line that is not a quote line; a plain
+        // quote under one is part of it, the way Bear keeps the panel open.
+        // A fence closes it too, and before it opens: otherwise the code block
+        // is drawn inside a panel it was never in, and its `</div>` is left
+        // to come out as text somewhere in the middle of the code.
+        if in_callout && !in_fence && !line.trim_start().starts_with('>') {
+            out.push("</div>".to_string());
+            out.push(String::new());
+            in_callout = false;
+        }
         if is_fence(line) {
             in_fence = !in_fence;
             out.push(line.to_string());
@@ -265,18 +295,7 @@ pub fn prepare(content: &str) -> String {
             out.push(line.to_string());
             continue;
         }
-        // A callout runs to the first line that is not a quote line; a plain
-        // quote under one is part of it, the way Bear keeps the panel open.
-        if in_callout && !line.trim_start().starts_with('>') {
-            out.push("</div>".to_string());
-            out.push(String::new());
-            in_callout = false;
-        }
         if let Some(kind) = callout_kind(line) {
-            if in_callout {
-                out.push("</div>".to_string());
-                out.push(String::new());
-            }
             // The blank line ends the HTML block, so what follows is still
             // markdown; the closing div is a block of its own.
             out.push(format!("<div class=\"callout {kind}\">"));
@@ -284,28 +303,19 @@ pub fn prepare(content: &str) -> String {
             in_callout = true;
             let rest = unquote(line);
             let text = rest[rest.find(']').map(|at| at + 1).unwrap_or(0)..].trim_start();
-            if text.is_empty() {
-                continue;
+            if !text.is_empty() {
+                out.push(quoted_line(text));
+                // The title is a paragraph of its own; without the break the
+                // body would run into it and be bolded with it.
+                out.push(String::new());
             }
-            out.push(inline(text));
             continue;
         }
         if in_callout {
-            out.push(inline(unquote(line)));
+            out.push(quoted_line(unquote(line)));
             continue;
         }
-        if is_tag_line(line) {
-            let spans: String = tags_in_line(line)
-                .iter()
-                .map(|t| format!("<span class=\"tag\">{}</span>", escape(t)))
-                .collect();
-            out.push(format!("<p class=\"tags\">{spans}</p>"));
-            // An HTML block runs to the next blank line: without one, a
-            // heading or list right under the tag line is swallowed into it.
-            out.push(String::new());
-            continue;
-        }
-        out.push(inline(line));
+        out.push(quoted_line(line));
     }
     if in_callout {
         out.push("</div>".to_string());
@@ -313,17 +323,77 @@ pub fn prepare(content: &str) -> String {
     format!("{}\n", out.join("\n"))
 }
 
-/// One line's Bear marks: task boxes, highlights, underline and the note
-/// links Bear writes as `[[Another note]]`.
+/// A line of body text: the tag line becomes pills, anything else its marks.
+fn quoted_line(line: &str) -> String {
+    if is_tag_line(line) {
+        let spans: String = tags_in_line(line)
+            .iter()
+            .map(|t| format!("<span class=\"tag\">{}</span>", escape(t)))
+            .collect();
+        // An HTML block runs to the next blank line: without one, a heading or
+        // list right under the tag line is swallowed into it.
+        return format!("<p class=\"tags\">{spans}</p>\n");
+    }
+    inline(line)
+}
+
+/// One line's Bear marks: task boxes, highlights, underline and the note links
+/// Bear writes as `[[Another note]]`. Inline code is left alone — a mark
+/// between backticks is a character the note is showing, not one it is using.
 fn inline(line: &str) -> String {
-    let line = task_inputs(line);
-    let line = HIGHLIGHT_RE.replace_all(&line, |caps: &fancy_regex::Captures<'_, str>| {
-        let (color, text) = highlight_color(&caps[1]);
-        format!("<mark class=\"{color}\">{text}</mark>")
+    let mut out = String::with_capacity(line.len());
+    for (at, segment) in code_spans(line).into_iter().enumerate() {
+        if at % 2 == 1 {
+            out.push('`');
+            out.push_str(segment);
+            out.push('`');
+        } else {
+            // Only the first segment is the start of the line, which is where
+            // a task box has to be.
+            out.push_str(&marks(segment, at == 0));
+        }
+    }
+    out
+}
+
+/// A line cut on the backticks that pair up into inline code: even segments
+/// are outside code, odd ones inside. A backtick with no partner opens
+/// nothing, so it comes back as part of the text.
+fn code_spans(line: &str) -> Vec<&str> {
+    let ticks: Vec<usize> = line.match_indices('`').map(|(at, _)| at).collect();
+    let mut parts = Vec::new();
+    let mut from = 0;
+    for pair in ticks.chunks_exact(2) {
+        let (open, close) = (pair[0], pair[1]);
+        parts.push(&line[from..open]);
+        parts.push(&line[open + 1..close]);
+        from = close + 1;
+    }
+    parts.push(&line[from..]);
+    parts
+}
+
+/// Bear's marks in one stretch of ordinary text.
+fn marks(text: &str, line_start: bool) -> String {
+    let text = if line_start {
+        task_inputs(text)
+    } else {
+        text.to_string()
+    };
+    let text = HIGHLIGHT_RE.replace_all(&text, |caps: &fancy_regex::Captures<'_, str>| {
+        let (color, inner) = highlight_color(&caps[1]);
+        format!("<mark class=\"{color}\">{inner}</mark>")
     });
-    let line = UNDERLINE_RE.replace_all(&line, "<u>$1</u>");
+    let text = UNDERLINE_RE.replace_all(&text, "<u>$1</u>");
+    let owned = text.into_owned();
     NOTE_LINK_RE
-        .replace_all(&line, |caps: &regex::Captures| {
+        .replace_all(&owned, |caps: &regex::Captures| {
+            // `[[x]](y)` is an ordinary link whose text happens to be
+            // bracketed; Bear's note link stands on its own.
+            let after = caps.get(0).map(|m| m.end()).unwrap_or(0);
+            if owned[after..].starts_with('(') {
+                return caps[0].to_string();
+            }
             format!("<span class=\"note-link\">{}</span>", escape(&caps[1]))
         })
         .into_owned()
@@ -634,6 +704,132 @@ See [REV](https://www.revrobotics.com) and ![the frame](Front%20bed.png).\n";
             );
             assert!(!body.contains("<li>\n<p><input"), "{shape}\n{body}");
         }
+    }
+
+    #[test]
+    fn a_fence_closes_a_callout_instead_of_falling_into_it() {
+        let body = render_body(
+            "> [!NOTE] hi\n```\ncode\n```\nafter\n",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let panel = body.find("<div class=\"callout note\">").expect("a panel");
+        let close = body.find("</div>").expect("a close");
+        let code = body.find("<pre>").expect("a code block");
+        assert!(close < code, "the code block is not in the panel\n{body}");
+        assert!(panel < close, "{body}");
+        assert_eq!(body.matches("</div>").count(), 1, "{body}");
+        // An unterminated fence leaves nothing of the panel inside the code.
+        let unterminated = render_body(
+            "> [!NOTE] hi\n```\ncode\n",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            !unterminated.contains("&lt;/div&gt;"),
+            "the close is markup, not text\n{unterminated}"
+        );
+        assert_eq!(unterminated.matches("</div>").count(), 1, "{unterminated}");
+    }
+
+    #[test]
+    fn a_callout_title_is_its_own_paragraph() {
+        let body = render_body(
+            "> [!NOTE] Title\n> body line\n",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        // `.callout > p:first-child` is bold: the body must not join the title.
+        assert!(body.contains("<p>Title</p>"), "{body}");
+        assert!(body.contains("<p>body line</p>"), "{body}");
+    }
+
+    #[test]
+    fn an_indented_callout_stays_a_quote_inside_its_list() {
+        let body = render_body(
+            "- item\n  > [!NOTE] inner\n- next\n",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            !body.contains("callout"),
+            "a panel would split the list\n{body}"
+        );
+        assert_eq!(body.matches("<ul>").count(), 1, "{body}");
+        assert_eq!(body.matches("<li>").count(), 2, "{body}");
+    }
+
+    #[test]
+    fn a_tag_line_inside_a_callout_still_becomes_pills() {
+        let body = render_body(
+            "> [!TIP] hi\n> #garden/beds\n",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            body.contains("<span class=\"tag\">#garden/beds</span>"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn inline_code_keeps_bears_marks_as_characters() {
+        let body = render_body(
+            "`[[x]]` and `==🟢y==` and `~z~` and [[real]]\n",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(body.contains("<code>[[x]]</code>"), "{body}");
+        assert!(body.contains("<code>==🟢y==</code>"), "{body}");
+        assert!(body.contains("<code>~z~</code>"), "{body}");
+        assert!(
+            body.contains("<span class=\"note-link\">real</span>"),
+            "outside the backticks it is still a note link\n{body}"
+        );
+        // A backtick with no partner opens no code span.
+        let lone = render_body("a ` [[x]]\n", &HashMap::new(), &HashMap::new());
+        assert!(lone.contains("note-link"), "{lone}");
+    }
+
+    #[test]
+    fn a_bracketed_link_text_is_left_to_markdown() {
+        let body = render_body("[[x]](https://y.test)\n", &HashMap::new(), &HashMap::new());
+        assert!(
+            body.contains("<a href=\"https://y.test\">"),
+            "`[[x]](y)` is a link, not a note link\n{body}"
+        );
+        assert!(!body.contains("note-link"), "{body}");
+    }
+
+    #[test]
+    fn a_highlight_of_nothing_but_a_circle_keeps_the_circle() {
+        let body = render_body("==🔴== ==🔴️red==\n", &HashMap::new(), &HashMap::new());
+        assert!(
+            body.contains("<mark class=\"default\">🔴</mark>"),
+            "an empty highlight would lose the character\n{body}"
+        );
+        assert!(
+            body.contains("<mark class=\"red\">red</mark>"),
+            "the emoji presentation selector is part of the circle\n{body}"
+        );
+    }
+
+    #[test]
+    fn the_dark_rules_come_after_what_they_override() {
+        let css = stylesheet(&theme::RED_GRAPHITE_DARK);
+        // A media query adds no specificity, so a dark rule above the base
+        // rule it means to override simply never applies.
+        let dark = css.find("prefers-color-scheme").expect("a dark block");
+        for base in ["body {", "pre, code {", "th {", ".tag {"] {
+            assert!(
+                css.find(base).expect(base) < dark,
+                "{base} must come before the dark block\n{css}"
+            );
+        }
+        assert!(css.find("@media print").expect("print") > dark, "{css}");
+        // The highlight palette is Bear's on screen and on paper alike.
+        let print = css.split("@media print").nth(1).expect("a print block");
+        assert!(!print.contains("mark {"), "{print}");
     }
 
     #[test]
