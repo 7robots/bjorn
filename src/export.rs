@@ -68,7 +68,9 @@ pub const FORMATS: [Format; 5] = [
 ];
 /// The export picker's last choice, after `FORMATS`: publish to Hugo. Not a
 /// format, so actions cannot pick it.
-pub const HUGO_KEY: char = 'p';
+// `g` for Hugo, not `p`: `p` is PDF's letter wherever a format picker has
+// one, and a note exported as a PDF is the more common reach of the two.
+pub const HUGO_KEY: char = 'g';
 pub const HUGO_LABEL: &str = "Hugo";
 /// What a TextBundle's info.json says about us.
 pub const CREATOR_IDENTIFIER: &str = "org.7robots.bjorn";

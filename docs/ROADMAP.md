@@ -26,7 +26,7 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
-- Hugo publishing: `P` (and `p` in the `x` picker) writes the note as a post
+- Hugo publishing: `P` (and `g` in the `x` picker) writes the note as a post
   into a Hugo site from `[hugo]` in the config: front matter from the title
   and tags, dated at publish time, an allow-list of the note's own front
   matter keys; front matter read with a YAML parser and written as text, a

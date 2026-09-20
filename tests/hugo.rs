@@ -960,7 +960,7 @@ async fn p_publishes_through_the_confirm_dialog() {
 }
 
 #[tokio::test]
-async fn the_export_picker_offers_hugo_and_p_refuses_without_a_site() {
+async fn the_export_picker_offers_hugo_and_g_refuses_without_a_site() {
     let fake = Fake::new();
     let mut h = fake.harness();
     h.load().await;
@@ -972,7 +972,7 @@ async fn the_export_picker_offers_hugo_and_p_refuses_without_a_site() {
     let mut h = fake.harness_with(app_config(&fake, &site), None);
     h.load().await;
     h.press("x");
-    assert!(h.text().contains("p Hugo"), "{}", h.text());
+    assert!(h.text().contains("g Hugo"), "{}", h.text());
     h.press("left");
     h.press("enter");
     h.until(|app| app.overlay.as_ref().is_some_and(|o| o.name() == "Confirm"))
@@ -980,7 +980,7 @@ async fn the_export_picker_offers_hugo_and_p_refuses_without_a_site() {
     assert!(h.text().contains("sprint-planning.md"));
     h.press("escape");
     h.press("x");
-    h.press("p");
+    h.press("g");
     h.until(|app| app.overlay.as_ref().is_some_and(|o| o.name() == "Confirm"))
         .await;
     h.press("y");

@@ -215,7 +215,7 @@ unaffected.
 
 ## Publishing to Hugo
 
-`P` (or `x` then `p`) turns the note into a post in a [Hugo](https://gohugo.io)
+`P` (or `x` then `g`) turns the note into a post in a [Hugo](https://gohugo.io)
 site: one Markdown file with YAML front matter, written under
 `content/<section>/` in the site you name. Bjorn only writes files; uploading
 images, building and committing stay with you (see the
