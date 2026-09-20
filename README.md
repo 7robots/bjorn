@@ -241,6 +241,11 @@ environment; the file goes away when the command ends. The first line the
 command prints comes back as a toast, and a non-zero exit is reported with its
 stderr. Full reference: [docs/actions.md](docs/actions.md).
 
+A PDF is one of those commands. The HTML export carries a print stylesheet —
+A4, a light page whatever the theme is, the theme's own colors on the links
+and the list markers — so `weasyprint` or headless Chrome turns an exported
+note into a PDF that reads like Bear's own: [recipe](docs/actions.md#a-pdf).
+
 ## Development
 
 ```sh

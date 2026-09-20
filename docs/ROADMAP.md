@@ -14,7 +14,9 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Deferred (carried from bjorn's ROADMAP, still open here)
 
-- PDF export (headless-browser concern recorded in bjorn's ROADMAP).
+- PDF written by Bjorn itself (the headless-browser concern recorded in bjorn's
+  ROADMAP still stands: no converter in the binary). The HTML export's print
+  stylesheet and an action are the way there — docs/actions.md.
 - EPUB export.
 - Search-box completion inside a multi-word tag; completion candidate cycling.
 - Notes list snippet line (first body line, as Bear shows).

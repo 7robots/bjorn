@@ -107,6 +107,56 @@ anything else your shell exported when you launched Bjorn is there. It does not
 read your `~/.zshrc`: it is `sh -c`, not a login shell. If an action needs a
 shell function or an alias, put it in a script and call the script.
 
+## A PDF
+
+`bearcli` does not export, and Bjorn has no PDF writer: nothing in it draws a
+page, and a converter that did would be the first thing it could not do on its
+own. The HTML export is the way there. It carries a print stylesheet — A4 (what
+Bear's own PDF export uses), a white page whatever the theme's background is,
+headings kept with the text under them, and the theme's colors on the links
+and the list markers, the way Bear puts its own on its PDF — so an HTML-to-PDF
+converter is all an action needs. Neither of these ships with macOS.
+
+```toml
+[[actions]]
+name = "Save as PDF to Desktop"
+command = 'out="$HOME/Desktop/$(basename "$BJORN_NOTE_FILE" .html).pdf"; weasyprint "$BJORN_NOTE_FILE" "$out" 2>/dev/null && echo "saved $out"'
+format = "html"
+timeout = 120
+```
+
+```toml
+[[actions]]
+name = "Save as PDF to Desktop (Chrome)"
+command = 'out="$HOME/Desktop/$(basename "$BJORN_NOTE_FILE" .html).pdf"; cp "$BJORN_NOTE_FILE" note.html && "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --user-data-dir="$(mktemp -d)" --host-resolver-rules="MAP * ~NOTFOUND" --disable-remote-fonts --no-pdf-header-footer --print-to-pdf="$out" "file://$PWD/note.html" >/dev/null 2>&1 && echo "saved $out"'
+format = "html"
+timeout = 120
+```
+
+`weasyprint` (`pipx install weasyprint`, or `uv tool install weasyprint`) reads
+the page directly; headless Chrome is already on most Macs and renders the CSS
+the way the browser you preview in does. Attachments are embedded in the HTML
+as `data:` URIs, so the PDF carries the note's images either way.
+
+Three details in those commands are load-bearing:
+
+- **The name comes from the file, not the title.** `$BJORN_NOTE_TITLE` is the
+  title verbatim — a note called `Q1/Q2 plan` would send the PDF to a directory
+  that does not exist. The temp file's name is already sanitized, so
+  `basename "$BJORN_NOTE_FILE" .html` is the safe stem.
+- **Chrome gets a copy at a plain path.** `#` and `%` survive the filename
+  sanitizing and mean something else inside a URL, so `file://$BJORN_NOTE_FILE`
+  can quietly print the wrong page — and Chrome still exits 0. The temp
+  directory is the command's working directory; copying to `note.html` first
+  sidesteps it.
+- **Chrome gets its own throwaway profile and no network.** A note can contain
+  inline HTML, and a converter renders it: `--user-data-dir` keeps the render
+  away from your logged-in profile (and stops the action failing when Chrome is
+  already open), and `--host-resolver-rules="MAP * ~NOTFOUND"` means a note that
+  carries a tracking pixel or a script cannot reach anything. WeasyPrint runs no
+  scripts but does fetch remote URLs; there is no flag to stop it, so print
+  notes you did not write with Chrome.
+
 ## What comes back
 
 Exit status 0 is success: a toast titled with the action's name, carrying the
