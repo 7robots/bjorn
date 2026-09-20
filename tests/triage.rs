@@ -532,3 +532,34 @@ async fn remctl_client_add_and_search_against_fake() {
     assert!(remctl.add(&t2, "Nope", "").await.is_err());
     assert!(remctl.add(&t2, "", "whenever").await.is_err());
 }
+
+/// The shared reveal: a triage row whose note has gone since the scan says so
+/// and leaves the list and the reader where they were.
+#[tokio::test]
+async fn enter_on_a_todo_whose_note_is_gone_says_so_and_changes_nothing() {
+    let fake = Fake::new();
+    let mut h = fake.harness_with(fake.config(), Some("home"));
+    h.load().await;
+    open_triage(&mut h).await;
+    h.press("j");
+    let before = h.app.reader.note.as_ref().map(|n| n.id.clone());
+    let cursor = h.app.notes.cursor;
+    // The note is deleted in Bear between the scan and the keypress.
+    if let Some(triage) = h.app.triage.as_mut()
+        && let Some(row) = triage.rows.get_mut(1)
+    {
+        row.todo.note_id = "NOTE-GONE".into();
+    }
+    h.press("enter");
+    h.settle().await;
+    assert!(
+        h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.contains("no longer in the list")),
+        "{:?}",
+        h.app.toast_messages()
+    );
+    assert_eq!(h.app.reader.note.as_ref().map(|n| n.id.clone()), before);
+    assert_eq!(h.app.notes.cursor, cursor);
+}

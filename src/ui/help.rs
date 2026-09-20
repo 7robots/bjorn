@@ -103,6 +103,29 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Dated sections",
+        &[
+            (
+                "s",
+                "add today's section to the note under the cursor, from the [sections] template: a date heading, the day tag, and whatever prompts you keep in it. It goes above the first dated section, so the newest stays on top; if today already has one, nothing is written and the reader jumps to it",
+            ),
+            (
+                "T",
+                "the day screen: every section written on one day, across your notes and archive (archived ones are marked), grouped by note. Found by the day tag and by the date heading as a phrase",
+            ),
+            ("← → / [ ]", "a day back / forward; t returns to today"),
+            (
+                "enter / b",
+                "open the note in the reader at that section / open it in Bear.app there",
+            ),
+            ("/ · r", "filter · reload"),
+            (
+                "esc / q",
+                "clear the filter if one is on, else close the day screen",
+            ),
+        ],
+    ),
+    (
         "Triage",
         &[
             ("t", "every open todo in the workspace, grouped by note"),

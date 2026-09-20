@@ -26,6 +26,9 @@ pub struct RLine {
     pub spans: Vec<Span<'static>>,
     pub block: usize,
     pub cont: Vec<Span<'static>>,
+    /// This line is a heading, not body text that happens to read like one.
+    /// What lets a jump to a section land on the heading itself.
+    pub heading: bool,
 }
 
 impl RLine {
@@ -80,6 +83,7 @@ struct Renderer {
     lists: Vec<ListLevel>,
     quote_depth: usize,
     in_code: bool,
+    in_heading: bool,
     in_image: bool,
     image_alt: String,
     item_open: bool,
@@ -114,6 +118,7 @@ impl Renderer {
             lists: Vec::new(),
             quote_depth: 0,
             in_code: false,
+            in_heading: false,
             in_image: false,
             image_alt: String::new(),
             item_open: false,
@@ -171,6 +176,7 @@ impl Renderer {
             spans,
             block: self.block,
             cont,
+            heading: self.in_heading,
         });
     }
 
@@ -185,6 +191,7 @@ impl Renderer {
                 spans: prefix,
                 block: self.block,
                 cont: Vec::new(),
+                heading: false,
             });
         }
     }
@@ -292,6 +299,7 @@ impl Renderer {
                 spans,
                 block: self.block,
                 cont: Vec::new(),
+                heading: false,
             });
             if r + 1 == table.header_rows && table.header_rows > 0 {
                 let mut spans = prefix.clone();
@@ -301,6 +309,7 @@ impl Renderer {
                     spans,
                     block: self.block,
                     cont: Vec::new(),
+                    heading: false,
                 });
             }
         }
@@ -327,6 +336,7 @@ pub fn render(content: &str) -> Vec<RLine> {
                 Tag::Heading { level, .. } => {
                     r.blank();
                     r.new_block();
+                    r.in_heading = true;
                     r.push(Renderer::heading_style(level));
                 }
                 Tag::BlockQuote(_) => {
@@ -432,6 +442,7 @@ pub fn render(content: &str) -> Vec<RLine> {
                 TagEnd::Heading(_) => {
                     r.pop();
                     r.flush();
+                    r.in_heading = false;
                     r.blank();
                 }
                 TagEnd::BlockQuote(_) => {
@@ -765,6 +776,7 @@ mod tests {
             spans: vec![Span::raw("• "), Span::raw("one two three four five six")],
             block: 1,
             cont: vec![Span::raw("  ")],
+            heading: false,
         };
         let rows: Vec<String> = wrap(&line, 12).iter().map(|l| l.to_string()).collect();
         assert_eq!(rows, vec!["• one two", "  three four", "  five six"]);
@@ -772,6 +784,7 @@ mod tests {
             spans: vec![Span::raw("abcdefghijklmnop")],
             block: 1,
             cont: vec![],
+            heading: false,
         };
         let rows: Vec<String> = wrap(&long, 5).iter().map(|l| l.to_string()).collect();
         assert_eq!(rows, vec!["abcde", "fghij", "klmno", "p"]);

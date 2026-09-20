@@ -916,10 +916,24 @@ impl BearClient {
         if !payload.is_object() {
             return Err(BearError::new("bearcli cat returned no content"));
         }
+        // A null `content` is not an empty note, and a missing `hash` is not a
+        // receipt: every write guards on that hash, and `overwrite --base ""`
+        // is an unguarded write. Neither shape is a read this can build on.
+        if payload.get("content").is_none_or(Value::is_null) {
+            return Err(BearError::new(
+                "bearcli cat returned no content for the note",
+            ));
+        }
+        let hash = text_of(payload.get("hash"));
+        if hash.trim().is_empty() {
+            return Err(BearError::new(
+                "bearcli cat returned no content hash; a guarded write is not possible",
+            ));
+        }
         Ok(NoteContent {
             id: note_id.to_string(),
             content: text_of(payload.get("content")),
-            hash: text_of(payload.get("hash")),
+            hash,
         })
     }
 
@@ -950,6 +964,59 @@ impl BearClient {
             )
             .await?;
         Ok(Self::rows(rows))
+    }
+
+    /// Raw rows for the notes that may hold a section written on one day,
+    /// content included. `sections::scan_day_rows` turns them into sections.
+    ///
+    /// Two searches, because a section can be dated two ways: the day tag, and
+    /// the date heading as a phrase (a note that heads its sections by date
+    /// but carries no day tag is found only by the second). Results are merged
+    /// by note id, tag matches first. `phrase` may be empty, in which case only
+    /// the tag is searched.
+    ///
+    /// Archived notes count: a running log archives finished topics, and their
+    /// history is still what was written that day. Trashed notes do not — each
+    /// query runs once over every location and `sections::scan_day_rows` drops
+    /// the trash, which is one bearcli process per query instead of two.
+    pub async fn day_rows(&self, tag: &str, phrase: &str) -> Result<Vec<Value>> {
+        let tag = normalize_tag(tag);
+        let mut queries: Vec<String> = Vec::new();
+        if !tag.is_empty() {
+            queries.push(display_tag(&tag));
+        }
+        if !phrase.is_empty() {
+            queries.push(format!("\"{phrase}\""));
+        }
+        let mut out: Vec<Value> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for query in queries {
+            let payload = self
+                .run(
+                    &[
+                        "search",
+                        "--query",
+                        &query,
+                        "--location",
+                        "all",
+                        "--format",
+                        "json",
+                        "--fields",
+                        "id,title,tags,locked,location,content",
+                    ],
+                    true,
+                    None,
+                )
+                .await?;
+            for row in Self::rows(payload) {
+                let id = text_of(row.get("id"));
+                if id.is_empty() || !seen.insert(id) {
+                    continue;
+                }
+                out.push(row);
+            }
+        }
+        Ok(out)
     }
 
     /// The note's attachment filenames, as they appear in its markdown links
@@ -1157,11 +1224,16 @@ impl BearClient {
 
     // -- app -----------------------------------------------------------------
 
+    /// Open the note in Bear.app, at `header` when one is given.
+    ///
+    /// The heading is passed as `--header=<value>`, one argv element: a
+    /// section headed `## --version` would otherwise arrive as a flag of its
+    /// own. A note's headings are user text, so they are never argv.
     pub async fn open_in_app(&self, note_id: &str, header: &str) -> Result<()> {
+        let flag = format!("--header={header}");
         let mut args = vec!["app", "open", note_id];
         if !header.is_empty() {
-            args.push("--header");
-            args.push(header);
+            args.push(&flag);
         }
         self.run(&args, false, None).await.map(|_| ())
     }
@@ -1527,6 +1599,96 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["N0", "N1", "N2"]);
         assert!(snap.bodies.iter().all(|(_, body)| !body.is_empty()));
+    }
+
+    /// A bearcli that answers every call with one canned document.
+    struct Canned(Value);
+
+    impl Runner for Canned {
+        fn run<'a>(
+            &'a self,
+            _args: &'a [String],
+            _stdin: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<RawOutput>> {
+            Box::pin(async move {
+                Ok(RawOutput {
+                    status: 0,
+                    stdout: self.0.to_string().into_bytes(),
+                    stderr: String::new(),
+                })
+            })
+        }
+
+        fn describe(&self) -> String {
+            "canned".into()
+        }
+    }
+
+    async fn cat_of(payload: Value) -> Result<NoteContent> {
+        BearClient::from_runner(Box::new(Canned(payload)))
+            .cat("N")
+            .await
+    }
+
+    #[tokio::test]
+    async fn cat_refuses_a_read_it_cannot_write_against() {
+        // The hash is the receipt every write is guarded by, and
+        // `overwrite --base ""` is an unguarded write, so a read without one
+        // is an error rather than a value to pass on.
+        let err = cat_of(json!({"content": "# N\n"})).await.unwrap_err();
+        assert!(err.message.contains("content hash"), "{err}");
+        let err = cat_of(json!({"content": "# N\n", "hash": "  "}))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("content hash"), "{err}");
+        // A null body is not an empty note.
+        let err = cat_of(json!({"content": null, "hash": "h"}))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("no content"), "{err}");
+        let err = cat_of(json!({"hash": "h"})).await.unwrap_err();
+        assert!(err.message.contains("no content"), "{err}");
+        // A whole read still comes back, empty body and all.
+        let ok = cat_of(json!({"content": "", "hash": "h"})).await.unwrap();
+        assert_eq!((ok.content.as_str(), ok.hash.as_str()), ("", "h"));
+    }
+
+    /// A bearcli that says nothing and keeps the argv it was handed.
+    #[derive(Default)]
+    struct ArgLog(Mutex<Vec<Vec<String>>>);
+
+    impl Runner for Arc<ArgLog> {
+        fn run<'a>(
+            &'a self,
+            args: &'a [String],
+            _stdin: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<RawOutput>> {
+            Box::pin(async move {
+                self.0.lock().unwrap().push(args.to_vec());
+                Ok(RawOutput::default())
+            })
+        }
+
+        fn describe(&self) -> String {
+            "arglog".into()
+        }
+    }
+
+    #[tokio::test]
+    async fn open_in_app_passes_the_header_as_one_argument() {
+        // A section headed `## --version` must reach bearcli as a value, not
+        // as a flag of its own.
+        let log: Arc<ArgLog> = Arc::new(ArgLog::default());
+        let client = BearClient::from_runner(Box::new(log.clone()));
+        client.open_in_app("N", "--version").await.unwrap();
+        client.open_in_app("N", "").await.unwrap();
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            vec![
+                vec!["app", "open", "N", "--header=--version"],
+                vec!["app", "open", "N"],
+            ]
+        );
     }
 
     #[tokio::test]

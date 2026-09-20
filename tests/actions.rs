@@ -39,6 +39,14 @@ fn receipt(fake: &Fake, name: &str) -> String {
     std::fs::read_to_string(fake.dir.path().join(format!("{name}.receipt"))).unwrap()
 }
 
+/// The shell redirect creates the receipt before the command has written a
+/// word into it, so waiting for the file to exist can hand a test an empty
+/// one. Wait for the note's body to have landed in it instead.
+fn written(fake: &Fake, name: &str) -> bool {
+    std::fs::read_to_string(fake.dir.path().join(format!("{name}.receipt")))
+        .is_ok_and(|text| text.lines().count() > 3)
+}
+
 #[tokio::test]
 async fn the_palette_filters_and_runs_the_highlighted_action() {
     let fake = Fake::new();
@@ -108,8 +116,7 @@ async fn bang_runs_the_default_action_without_the_palette() {
     h.load().await;
     h.press("!");
     assert!(h.app.overlay.is_none(), "no palette for a default action");
-    h.until(|_| fake.dir.path().join("Publish.receipt").exists())
-        .await;
+    h.until(|_| written(&fake, "Publish")).await;
     assert!(receipt(&fake, "Publish").starts_with("Publish\nSprint Planning\n"));
 }
 
@@ -138,8 +145,7 @@ async fn a_lone_action_is_the_default() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| fake.dir.path().join("Copy.receipt").exists())
-        .await;
+    h.until(|_| written(&fake, "Copy")).await;
 }
 
 #[tokio::test]
@@ -164,8 +170,7 @@ async fn a_confirm_action_asks_first_and_can_be_cancelled() {
 
     h.press("!");
     h.press("y");
-    h.until(|_| fake.dir.path().join("Publish.receipt").exists())
-        .await;
+    h.until(|_| written(&fake, "Publish")).await;
 }
 
 #[tokio::test]
@@ -208,8 +213,7 @@ async fn html_actions_get_the_rendered_note() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| fake.dir.path().join("Web.receipt").exists())
-        .await;
+    h.until(|_| written(&fake, "Web")).await;
     let receipt = receipt(&fake, "Web");
     assert!(receipt.contains("Sprint Planning.html"), "{receipt}");
     assert!(receipt.contains("<!DOCTYPE html>"), "{receipt}");

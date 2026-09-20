@@ -1,0 +1,6 @@
+## {{date}}
+{{tag}}
+* People:
+* Topic:
+
+---

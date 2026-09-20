@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha1::Digest;
 
+use crate::sections::SectionsConfig;
 use crate::util::{home_dir, now_iso};
 
 const META_FIELDS: [&str; 12] = [
@@ -104,6 +105,57 @@ fn note(
     }
 }
 
+/// A note whose body is dated sections, newest first: what the day screen
+/// (`T`) and `s` are for. The dates are relative to the day the state file is
+/// seeded, so `--demo` always has something to show; `days` is
+/// (days back, people, topic) per section, newest first.
+/// The day the sample sections are dated from: `$BJORN_FAKE_BEAR_TODAY`
+/// (`%Y-%m-%d`) when set, else today. Tests pin it so that a suite which
+/// starts a moment before midnight cannot seed one date and assert another.
+fn seed_today() -> chrono::NaiveDate {
+    std::env::var("BJORN_FAKE_BEAR_TODAY")
+        .ok()
+        .and_then(|value| chrono::NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").ok())
+        .unwrap_or_else(|| chrono::Local::now().date_naive())
+}
+
+fn dated_note(
+    id: &str,
+    title: &str,
+    topic_tag: &str,
+    preamble: &str,
+    config: &SectionsConfig,
+    days: &[(i64, &str, &str)],
+    modified: &str,
+) -> FakeNote {
+    let today = seed_today();
+    let mut tags: Vec<String> = vec![topic_tag.to_string()];
+    let mut body = format!("# {title}\n#{topic_tag}\n\n{preamble}\n");
+    for (back, people, topic) in days {
+        let Some(date) = today.checked_sub_signed(chrono::Duration::days(*back)) else {
+            continue;
+        };
+        with_ancestors(&mut tags, &config.day_tag_for(date));
+        body.push_str(&format!(
+            "\n## {}\n{}\n* People: {people}\n* Topic: {topic}\n\n---\n",
+            config.heading_text(date),
+            config.day_tag_display(date),
+        ));
+    }
+    let mut note = note(
+        id,
+        title,
+        &[],
+        &[],
+        "notes",
+        "2026-07-01T09:00:00Z",
+        modified,
+        body,
+    );
+    note.tags = tags;
+    note
+}
+
 fn seed_state() -> State {
     let today = now_iso();
     let mut garden = note(
@@ -159,6 +211,45 @@ fn seed_state() -> State {
             "# CAD and Design\n#work/CAD and Design#\n\nMulti-word tag note.\n".into(),
         ),
         note("NOTE-UNTAGGED", "Loose Thought", &[], &[], "notes", "2026-04-01T09:00:00Z", "2026-07-01T12:00:00Z", "# Loose Thought\n\nNo tags on this one.\n".into()),
+        dated_note(
+            "NOTE-FIELD",
+            "Field Notes",
+            "survey",
+            "Running notes from the river survey.",
+            &SectionsConfig::default(),
+            &[
+                (0, "Robin, Sam", "sensor drift at the weir station"),
+                (1, "Sam", "recalibrated the humidity probe"),
+                (2, "Robin", "walked the upper reach, marked three gauges"),
+            ],
+            "2026-08-25T09:00:00Z",
+        ),
+        dated_note(
+            "NOTE-FERRY",
+            "Ferry Timetable",
+            "survey",
+            "Everything about the winter timetable.",
+            &SectionsConfig::default(),
+            &[
+                (0, "Ada", "agreed the two-boat schedule"),
+                (2, "Ada, Ines", "counted foot passengers on the 7:40"),
+            ],
+            "2026-08-24T09:00:00Z",
+        ),
+        // The same shape under a different day-tag pattern, so the day screen
+        // can be pointed at one by config.
+        dated_note(
+            "NOTE-TRAIL",
+            "Trail Journal",
+            "trail",
+            "Section hike, kept day by day.",
+            &SectionsConfig {
+                day_tag: "journal/%Y-%m-%d".into(),
+                ..SectionsConfig::default()
+            },
+            &[(1, "solo", "rain all morning, dry by the col")],
+            "2026-08-23T09:00:00Z",
+        ),
         note("NOTE-TRASHED", "Old Draft", &["work"], &[], "trash", "2026-03-01T09:00:00Z", "2026-06-01T12:00:00Z", "# Old Draft\n#work\n\nThrown away.\n".into()),
         note("NOTE-ARCHIVED", "Finished Project", &["work"], &[], "archive", "2026-02-01T09:00:00Z", "2026-05-01T12:00:00Z", "# Finished Project\n#work\n\nDone and dusted.\n".into()),
     ];
@@ -639,7 +730,12 @@ enum AppCmd {
     Open {
         #[command(flatten)]
         target: Target,
-        #[arg(long, allow_hyphen_values = true)]
+        // No `allow_hyphen_values`: a section heading that starts with `-`
+        // has to arrive as `--header=<heading>`, one argument, the way Bear's
+        // own argument parser wants it. Passing the heading as a separate
+        // argument fails here, which is the point — that is the bug this
+        // spelling avoids.
+        #[arg(long)]
         header: Option<String>,
         #[arg(long)]
         edit: bool,

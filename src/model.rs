@@ -113,8 +113,71 @@ impl Selection {
     }
 }
 
+/// A date pinned by the test harness, in debug builds only.
+///
+/// Every dated-section test seeds a fake library from one date and then asserts
+/// against it, so the app and the fixture have to agree on which day "today"
+/// is even when the suite starts a moment before midnight. This is the only
+/// way in: it is a plain atomic (no env var, so nothing races with `getenv`),
+/// and it does not exist in a release build, where `cfg(debug_assertions)` is
+/// off — a shipped Bjorn cannot have its clock pinned.
+#[cfg(debug_assertions)]
+mod pinned {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    use chrono::{Datelike, NaiveDate};
+
+    /// Days from the common era, or `UNSET`.
+    static DAY: AtomicI32 = AtomicI32::new(UNSET);
+    const UNSET: i32 = i32::MIN;
+
+    /// Pin the clock's date, unless it is already pinned; the date in force is
+    /// returned either way, so every caller in the process shares one day.
+    pub fn pin_once(date: NaiveDate) -> NaiveDate {
+        let _ = DAY.compare_exchange(
+            UNSET,
+            date.num_days_from_ce(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        get().unwrap_or(date)
+    }
+
+    pub fn get() -> Option<NaiveDate> {
+        match DAY.load(Ordering::SeqCst) {
+            UNSET => None,
+            days => NaiveDate::from_num_days_from_ce_opt(days),
+        }
+    }
+}
+
+/// Pin the date `today()` and `now_local()` report, for tests; the date in
+/// force is returned. In a release build this does nothing at all and hands
+/// back what it was given, so nothing can move a shipped Bjorn's clock — and
+/// `cargo test --release` still compiles, it just runs on the real one.
+#[cfg(debug_assertions)]
+pub fn pin_today_once(date: NaiveDate) -> NaiveDate {
+    pinned::pin_once(date)
+}
+
+#[cfg(not(debug_assertions))]
+pub fn pin_today_once(date: NaiveDate) -> NaiveDate {
+    date
+}
+
 pub fn today() -> NaiveDate {
+    #[cfg(debug_assertions)]
+    if let Some(pinned) = pinned::get() {
+        return pinned;
+    }
     Local::now().date_naive()
+}
+
+/// Now, in local time, on `today()`'s date: what a new dated section is stamped
+/// with. The time of day is always the real clock; only the date can be pinned.
+pub fn now_local() -> chrono::NaiveDateTime {
+    let now = Local::now().naive_local();
+    today().and_time(now.time())
 }
 
 pub fn in_workspace(note: &Note, workspace: &str) -> bool {

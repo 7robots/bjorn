@@ -142,6 +142,34 @@ impl Reader {
         true
     }
 
+    /// Scroll to the block holding a heading, given the heading line as it is
+    /// written in the note (`## September 19, 2026 (Saturday)`). The rendered
+    /// line carries the text without its `#` markers, which is what is matched
+    /// — and only against lines the renderer marked as headings, so a body
+    /// line repeating the date cannot win. False when there is no such heading.
+    pub fn scroll_to_heading(&mut self, heading: &str, width: usize) -> bool {
+        let needle = heading.trim().trim_start_matches('#').trim();
+        if needle.is_empty() {
+            return false;
+        }
+        let Some(block) = self
+            .lines
+            .iter()
+            .find(|line| line.heading && line.plain().trim() == needle)
+            .map(|line| line.block)
+        else {
+            return false;
+        };
+        self.ensure_wrapped(width);
+        match self.wrapped.iter().position(|(_, b)| *b == block) {
+            Some(row) => {
+                self.scroll = row;
+                true
+            }
+            None => false,
+        }
+    }
+
     fn match_label(&self) -> String {
         if self.pattern.is_none() || self.matches.is_empty() {
             return String::new();
@@ -254,5 +282,42 @@ impl Reader {
             .map(RLine::plain)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BODY: &str = "# Topic\n#topic\n\nPreamble.\n\n## September 19, 2026 (Saturday)\n\
+                        #log/2026/09/19\n* People:\n\n---\n\nSeptember 12, 2026 (Saturday)\n\n\
+                        ## September 12, 2026 (Saturday)\n\
+                        #log/2026/09/12\n* People:\n\n---\n";
+
+    #[test]
+    fn scrolling_to_a_heading_lands_on_its_block() {
+        let mut reader = Reader::default();
+        reader.show(&Note::default(), BODY);
+        assert_eq!(reader.scroll, 0);
+        // A body line above it says exactly the same thing; the heading wins.
+        assert!(reader.scroll_to_heading("## September 12, 2026 (Saturday)", 60));
+        let at = reader.scroll;
+        assert!(at > 0, "the second section is below the first");
+        let body_line = reader
+            .plain_text()
+            .lines()
+            .position(|l| l.trim() == "September 12, 2026 (Saturday)")
+            .unwrap();
+        assert!(
+            at > body_line,
+            "the paragraph that repeats the date is above the heading, not the landing spot"
+        );
+        // The `#` markers are optional: the rendered line carries the text only.
+        assert!(reader.scroll_to_heading("September 12, 2026 (Saturday)", 60));
+        assert_eq!(reader.scroll, at);
+        // A heading the note does not have leaves the scroll alone.
+        assert!(!reader.scroll_to_heading("## Not in this note", 60));
+        assert_eq!(reader.scroll, at);
+        assert!(!reader.scroll_to_heading("  ", 60));
     }
 }

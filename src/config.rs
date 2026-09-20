@@ -10,6 +10,7 @@ use anyhow::Context;
 use toml::Value;
 
 use crate::actions::{Action, DEFAULT_TIMEOUT_SECONDS};
+use crate::sections::{InsertPosition, SectionsConfig};
 use crate::util::{expand_tilde, home_dir, which};
 
 pub const APP_NAME: &str = "bjorn";
@@ -87,6 +88,8 @@ pub struct Config {
     /// Rust build never negotiates pixel mouse reporting, so it has no effect.
     pub mouse_pixels: bool,
     pub reminders: RemindersConfig,
+    /// `[sections]`: the dated-section template and the day-tag time axis.
+    pub sections: SectionsConfig,
     /// `[[actions]]` from the config file, in the order they are written.
     pub actions: Vec<Action>,
     pub path: Option<PathBuf>,
@@ -106,6 +109,7 @@ impl Default for Config {
             theme: crate::ui::theme::DEFAULT_THEME.into(),
             mouse_pixels: true,
             reminders: RemindersConfig::default(),
+            sections: SectionsConfig::default(),
             actions: Vec::new(),
             path: None,
         }
@@ -206,8 +210,43 @@ impl Config {
                 remctl: text(section.get("remctl"), "").trim().to_string(),
             };
         }
+        if let Some(Value::Table(section)) = data.get("sections") {
+            cfg.sections = parse_sections(section);
+        }
         cfg.actions = parse_actions(data.get("actions"));
         Ok(cfg)
+    }
+}
+
+/// `[sections]`: the dated-section template, the day tag and the date heading
+/// (both strftime patterns), and where a new section goes. An empty or missing
+/// value keeps the built-in default, so a half-written block never stops the
+/// app — the same leniency the rest of the file gets.
+fn parse_sections(section: &toml::Table) -> SectionsConfig {
+    let defaults = SectionsConfig::default();
+    let read = |key: &str, fallback: &str| {
+        let value = text(section.get(key), fallback);
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            fallback.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    SectionsConfig {
+        // The template keeps its own leading and trailing whitespace trimmed
+        // but nothing inside it: the blank line before the rule is the shape.
+        template: {
+            let raw = text(section.get("template"), &defaults.template);
+            if raw.trim().is_empty() {
+                defaults.template.clone()
+            } else {
+                raw.trim_matches('\n').to_string()
+            }
+        },
+        day_tag: read("day_tag", &defaults.day_tag),
+        heading_format: read("heading_format", &defaults.heading_format),
+        insert: InsertPosition::parse(&read("insert", defaults.insert.as_str())),
     }
 }
 
@@ -389,6 +428,34 @@ mod tests {
             }
         );
         assert_eq!(Config::default().reminders.due, "today");
+    }
+
+    #[test]
+    fn sections_block_is_read_and_falls_back_key_by_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[sections]\ntemplate = \"\"\"\n## {{date}}\n{{tag}}\n\"\"\"\nday_tag = \" journal/%Y-%m-%d \"\n\
+             heading_format = \"%Y-%m-%d\"\ninsert = \"Top\"\n",
+        );
+        let cfg = Config::load(Some(&path)).unwrap().sections;
+        assert_eq!(cfg.template, "## {{date}}\n{{tag}}");
+        assert_eq!(cfg.day_tag, "journal/%Y-%m-%d");
+        assert_eq!(cfg.heading_format, "%Y-%m-%d");
+        assert_eq!(cfg.insert, InsertPosition::Top);
+
+        // An empty value is no value: the default stands.
+        let path = write(&dir, "[sections]\ntemplate = \"\"\nday_tag = \"\"\n");
+        assert_eq!(
+            Config::load(Some(&path)).unwrap().sections,
+            SectionsConfig::default()
+        );
+        assert_eq!(
+            Config::load(Some(&dir.path().join("nope.toml")))
+                .unwrap()
+                .sections,
+            SectionsConfig::default()
+        );
     }
 
     #[test]
