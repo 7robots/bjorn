@@ -250,6 +250,93 @@ pub fn export_rtf(
     Ok(destination)
 }
 
+/// Attributes a browser or WeasyPrint fetches on its own: an image, a frame,
+/// a stylesheet. `href` is here for `<link>` only — an anchor's href is
+/// followed by a reader, not by the converter.
+static FETCHED_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)\s(src|srcset|poster|background)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#).unwrap()
+});
+static LINK_TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<link\b[^>]*>").unwrap());
+static HREF_OR_DATA_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?is)\s(href|data)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#).unwrap());
+static OBJECT_TAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<object\b[^>]*>").unwrap());
+static CSS_URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?is)url\(\s*([^)]*?)\s*\)"#).unwrap());
+static CSS_IMPORT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)@import\b[^;]*;").unwrap());
+
+fn is_embedded(value: &str) -> bool {
+    value
+        .trim()
+        .trim_matches(['"', '\''])
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("data:")
+}
+
+/// Everything the note's own text points at, taken out.
+///
+/// A converter fetches what the page it is given points at: WeasyPrint has no
+/// flag to stop it, and Chrome's `--host-resolver-rules` cannot help with
+/// `file:`, which is the scheme the page itself is loaded from. A Bear note is
+/// not always one you wrote — imports, web clips, a note someone shared — and
+/// its inline HTML reaches the converter as written, so a remote image is a
+/// note telling somebody it was printed, and a local one bakes a file off the
+/// disk into a PDF that is usually about to be sent on.
+///
+/// Nothing is lost that was going to print: an attachment is already a
+/// `data:` URI by the time the HTML is written, and a `data:` URI is what
+/// this keeps. Anything else is dropped: the image leaves an empty frame, the
+/// stylesheet does not apply.
+pub fn only_embedded(html: &str) -> String {
+    let html = FETCHED_ATTR_RE.replace_all(html, |caps: &regex::Captures| {
+        if is_embedded(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            String::new()
+        }
+    });
+    let html = LINK_TAG_RE.replace_all(&html, |caps: &regex::Captures| {
+        HREF_OR_DATA_RE
+            .replace_all(&caps[0], |inner: &regex::Captures| {
+                if is_embedded(&inner[2]) {
+                    inner[0].to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .into_owned()
+    });
+    let html = OBJECT_TAG_RE.replace_all(&html, |caps: &regex::Captures| {
+        HREF_OR_DATA_RE
+            .replace_all(&caps[0], |inner: &regex::Captures| {
+                if is_embedded(&inner[2]) {
+                    inner[0].to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .into_owned()
+    });
+    let html = CSS_IMPORT_RE.replace_all(&html, |caps: &regex::Captures| {
+        if caps[0].to_ascii_lowercase().contains("data:") {
+            caps[0].to_string()
+        } else {
+            String::new()
+        }
+    });
+    CSS_URL_RE
+        .replace_all(&html, |caps: &regex::Captures| {
+            if is_embedded(&caps[1]) {
+                caps[0].to_string()
+            } else {
+                "url(about:blank)".to_string()
+            }
+        })
+        .into_owned()
+}
+
 /// What turns the HTML rendering into a PDF. macOS ships nothing that can:
 /// `textutil` stops at RTF, and `cupsfilter` refuses HTML outright ("No filter
 /// to convert from text/html to application/pdf"), so this is the one format
@@ -381,7 +468,8 @@ pub fn export_pdf(
     let source = tmp.path().join("note.html");
     let printed = tmp.path().join("note.pdf");
     let html = render_html::render(content, title, images, &HashMap::new());
-    write(&source, &html.replacen("</head>", PRINT_PAGE, 1))?;
+    let html = only_embedded(&html.replacen("</head>", PRINT_PAGE, 1));
+    write(&source, &html)?;
     let log = tmp.path().join("converter.log");
     let mut command = converter.command(&source, &printed, &tmp.path().join("profile"));
     let mut child = command
@@ -590,6 +678,66 @@ pub fn export_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_embedded_keeps_the_note_and_drops_what_it_points_at() {
+        let html = concat!(
+            r#"<img src="data:image/png;base64,iVBOR"> "#,
+            r#"<img src="https://tracker.test/p.png"> "#,
+            r#"<img src="http://127.0.0.1:8080/x" srcset="http://a.test/2x 2x"> "#,
+            r#"<img src="file:///Users/you/.ssh/id_rsa"> "#,
+            r#"<iframe src="file:///etc/passwd"></iframe> "#,
+            r#"<object data="https://b.test/x.pdf"></object> "#,
+            r#"<link rel="stylesheet" href="https://c.test/x.css"> "#,
+            r#"<a href="https://example.test/read">a link</a> "#,
+            r#"<style>@import url("https://d.test/x.css"); body { background: url('https://bg-host.test/bg.png'); }</style>"#,
+        );
+        let out = only_embedded(html);
+        assert!(
+            out.contains(r#"<img src="data:image/png;base64,iVBOR">"#),
+            "an attachment is already embedded and stays\n{out}"
+        );
+        for gone in [
+            "tracker.test",
+            "127.0.0.1:8080",
+            "a.test",
+            "id_rsa",
+            "/etc/passwd",
+            "b.test",
+            "c.test",
+            "d.test",
+            "bg-host.test",
+        ] {
+            assert!(!out.contains(gone), "{gone} still reachable\n{out}");
+        }
+        assert!(
+            out.contains(r#"<a href="https://example.test/read">a link</a>"#),
+            "a reader's link is not something the converter fetches\n{out}"
+        );
+        assert!(out.contains("url(about:blank)"), "{out}");
+        // The elements themselves stay; only the reaching stops.
+        assert_eq!(out.matches("<img").count(), 4, "{out}");
+        assert!(out.contains("<iframe") && out.contains("<object"), "{out}");
+    }
+
+    #[test]
+    fn a_pdf_carries_no_thread_back_to_whoever_wrote_the_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("Note.pdf");
+        let note =
+            "# Note\n\n<img src=\"https://tracker.test/pixel.png\">\n\n![](Front%20bed.png)\n";
+        let images = HashMap::from([("Front bed.png".to_string(), b"\x89PNG\r\n".to_vec())]);
+        let Some(_) = Converter::find() else { return };
+        let written = export_pdf(note, "Note", &target, &images).expect("a PDF");
+        let bytes = std::fs::read(&written).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+        // The URL cannot survive into the PDF, because it never reached the
+        // page the converter was handed.
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("tracker.test"),
+            "the tracker's URL is in the PDF"
+        );
+    }
 
     #[test]
     fn pdf_sits_in_the_picker_with_a_key_of_its_own() {
