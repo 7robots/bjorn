@@ -100,15 +100,16 @@ a reminder is added.
 ## Configuration
 
 `~/.config/bjorn/config.toml` (or `$XDG_CONFIG_HOME/bjorn/config.toml`), or
-`--config PATH`. Every key is optional:
+`--config PATH`. Every key is optional. The block below is a sample, not a
+list of defaults: each line says whether its value is the default or an example.
 
 ```toml
-editor = "nvim"               # overrides $VISUAL / $EDITOR
+editor = "nvim"               # example; unset falls back to $VISUAL, $EDITOR, vim
 export_dir = "~/Downloads"    # where `x` proposes to write
 export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle
 poll_seconds = 5              # 0 disables the background refresh
-workspace = "work"            # start scoped to this tag
-bearcli = "/usr/local/bin/bearcli"  # optional; default searches PATH, then Bear.app
+workspace = "work"            # example; unset starts unscoped
+bearcli = "/usr/local/bin/bearcli"  # example; unset searches PATH, then Bear.app
 icon_style = "auto"           # auto | nerd | emoji | lucide | none
 theme = "red-graphite-dark"   # see Themes below; `bjorn --list-themes` prints the names
 
@@ -118,7 +119,7 @@ school = "emoji:🎓"
 
 [reminders]                   # triage can push todos to Apple Reminders
 enabled = false               # off by default
-list = "Bear"                 # target list; remctl's default when empty
+list = "Bear"                 # example; unset uses remctl's own default list
 due = "today"                 # due date for new reminders; "" for none
 remctl = ""                   # path to remctl; default searches PATH
 
