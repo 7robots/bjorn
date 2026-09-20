@@ -1422,9 +1422,10 @@ pub fn run(argv: Vec<String>) -> i32 {
         fields: cli.fields.as_deref(),
     };
     // Failure injection for tests: while the file named by
-    // $BJORN_FAKE_BEAR_FAIL_READ exists, the next listing (a `list` that is
-    // not a `--count` probe, or a `search`) removes it and fails, so a test
-    // can break exactly one reload.
+    // $BJORN_FAKE_BEAR_FAIL_READ exists, every listing (a `list` that is not a
+    // `--count` probe, or a `search`) fails. The file stays, so which reload
+    // takes the failure is not a race with the background poll; the test
+    // removes it when it wants reads to work again.
     let listing = match &cmd {
         Cmd::List { listing, .. } => !listing.count,
         Cmd::Search { .. } => true,
@@ -1432,7 +1433,7 @@ pub fn run(argv: Vec<String>) -> i32 {
     };
     if listing
         && let Some(flag) = std::env::var_os("BJORN_FAKE_BEAR_FAIL_READ").filter(|v| !v.is_empty())
-        && std::fs::remove_file(&flag).is_ok()
+        && std::path::Path::new(&flag).exists()
     {
         return fail(ctx.fmt, "injected", "Injected failure");
     }

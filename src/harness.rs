@@ -100,9 +100,19 @@ impl Harness {
         }
     }
 
-    /// `wait_until` with the default five seconds, panicking on timeout.
+    /// `wait_until` with the default budget, panicking on timeout.
+    ///
+    /// The budget is generous because a step can spawn several `bearcli`
+    /// processes, and a loaded machine running the suites in parallel needs
+    /// longer than a quiet one; a test that is going to pass returns as soon
+    /// as it does, so only a real failure waits this out. `BJORN_TEST_WAIT`
+    /// overrides it, in seconds.
     pub async fn until(&mut self, pred: impl Fn(&App) -> bool) {
-        if let Err(err) = self.wait_until(pred, Duration::from_secs(5)).await {
+        let secs = std::env::var("BJORN_TEST_WAIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        if let Err(err) = self.wait_until(pred, Duration::from_secs(secs)).await {
             panic!("{err}");
         }
     }

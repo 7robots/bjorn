@@ -597,7 +597,7 @@ async fn a_failed_reload_after_d_forgets_the_note_it_was_to_show() {
         bjorn::harness::Harness::new(steady(&fake), std::sync::Arc::new(client), None, (120, 40));
     h.load().await;
     let first = h.app.notes.current().unwrap().id.clone();
-    // `create` is not a read, so the flag waits for the reload D starts.
+    // `create` is not a read, so every listing fails until the flag goes.
     std::fs::write(&flag, "").unwrap();
     h.press("D");
     h.until(|app| {
@@ -606,9 +606,9 @@ async fn a_failed_reload_after_d_forgets_the_note_it_was_to_show() {
             .any(|m| m.contains("Injected failure"))
     })
     .await;
-    assert!(!flag.exists());
     assert_eq!(h.app.notes.current().unwrap().id, first);
-    // The next reload shows the new note in the list but stays put.
+    // Reads work again; the next reload shows the new note but stays put.
+    std::fs::remove_file(&flag).unwrap();
     h.press("r");
     h.until(|app| app.notes.titles().contains(&TITLE.to_string()))
         .await;
