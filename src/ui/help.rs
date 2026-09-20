@@ -88,6 +88,24 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Links",
+        &[
+            (
+                "L",
+                "the note's [[wiki links]] and the notes linking to it, under a search box; enter follows. A missing note is offered for creation. Backlinks read at most 200 candidates, and say so when the list may be incomplete",
+            ),
+            (
+                "click",
+                "a link in the reader (or a table) follows it; [[Title/Heading]] lands on the heading",
+            ),
+            (
+                "backspace",
+                "back to the note you followed a link from, list and scroll included (also ctrl+o, alt+←, alt+b); edits the query while the search box is open",
+            ),
+            ("alt+→", "forward again (also alt+f)"),
+        ],
+    ),
+    (
         "Tags and workspace",
         &[
             (

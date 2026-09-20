@@ -886,6 +886,29 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             frame.render_widget(Paragraph::new(lines), inner);
             field_cursor(frame, field, inner.x + 2, inner.y, width as u16);
         }
+        Overlay::Links {
+            field,
+            index,
+            note,
+            outgoing,
+            more,
+            backlinks,
+            capped,
+            error,
+        } => draw_links(
+            frame,
+            area,
+            LinksView {
+                field,
+                index: *index,
+                note,
+                outgoing,
+                more: *more,
+                backlinks: backlinks.as_deref(),
+                capped: *capped,
+                error,
+            },
+        ),
         Overlay::NewAction {
             name,
             command,
@@ -1044,4 +1067,178 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             frame.render_widget(Paragraph::new(shown), text_area);
         }
     }
+}
+
+/// What the Links list draws, borrowed from its overlay.
+struct LinksView<'a> {
+    field: &'a Field,
+    index: usize,
+    note: &'a crate::bear::Note,
+    outgoing: &'a [crate::ui::modals::LinkRow],
+    more: usize,
+    backlinks: Option<&'a [crate::ui::modals::LinkRow]>,
+    capped: bool,
+    error: &'a str,
+}
+
+/// One row of the Links list, highlighted when `selected`. With a detail to
+/// show, the label gets at most half the row, so an alias never hides the
+/// `→ target` after it.
+fn link_row_line(row: &crate::ui::modals::LinkRow, selected: bool, width: usize) -> Line<'static> {
+    let style = if selected {
+        theme::match_style()
+    } else if row.missing {
+        theme::muted()
+    } else {
+        theme::link()
+    };
+    let room = width.saturating_sub(4);
+    let cap = if row.detail.is_empty() {
+        room
+    } else {
+        room / 2
+    };
+    let label_width = UnicodeWidthStr::width(row.label.as_str()).min(cap);
+    let mut spans = vec![
+        Span::styled(if selected { "  ▸ " } else { "    " }, style),
+        Span::styled(
+            fit_cells(&row.label, label_width).trim_end().to_string(),
+            style,
+        ),
+    ];
+    let rest = room.saturating_sub(label_width + 2);
+    if !row.detail.is_empty() && rest > 1 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            fit_cells(&row.detail, rest).trim_end().to_string(),
+            theme::muted(),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// `L`: a search box, the links out of the note, then the notes linking in.
+/// The list can be long, so only the rows in the window are built.
+fn draw_links(frame: &mut Frame, area: Rect, view: LinksView) {
+    use crate::ui::modals::filter_links;
+    let (out, back) = filter_links(view.outgoing, view.backlinks, &view.field.value);
+    let wide = area.width.saturating_sub(8).clamp(50, 96);
+    let width = wide.min(area.width).saturating_sub(6) as usize;
+
+    let heading = |text: String| {
+        Line::from(Span::styled(
+            format!("  {text}"),
+            theme::accent().add_modifier(Modifier::BOLD),
+        ))
+    };
+    let muted = |text: &str| Line::from(Span::styled(format!("    {text}"), theme::muted()));
+
+    // The lines are: the outgoing heading; its rows (or a note that there are
+    // none) and an "…and N more" row; a blank; the backlink heading; its
+    // status lines; its rows. Row `i` of either group is selectable as `i`
+    // (outgoing) or `out.len() + i` (backlinks).
+    let out_placeholder = usize::from(out.is_empty());
+    let more_row = usize::from(view.more > 0);
+    let out_block = out.len() + out_placeholder + more_row;
+    let mut status: Vec<Line<'static>> = Vec::new();
+    let back_heading = match view.backlinks {
+        None => {
+            status.push(muted("searching Bear…"));
+            heading("Linked from".to_string())
+        }
+        Some(all) => {
+            if !view.error.is_empty() {
+                status.push(Line::from(Span::styled(
+                    format!("    {}", view.error),
+                    Style::default().fg(theme::error_color()),
+                )));
+            } else if back.is_empty() {
+                status.push(muted(if all.is_empty() {
+                    "no other note links here"
+                } else {
+                    "no link matches"
+                }));
+            }
+            if view.capped {
+                status.push(Line::from(Span::styled(
+                    format!(
+                        "    {}+ candidates, list may be incomplete",
+                        crate::wiki::BACKLINK_LIMIT
+                    ),
+                    Style::default().fg(theme::warning_color()),
+                )));
+            }
+            heading(format!("Linked from · {}", back.len()))
+        }
+    };
+    let total = 1 + out_block + 2 + status.len() + back.len();
+    let line_at = |k: usize| -> Line<'static> {
+        if k == 0 {
+            return heading(format!("Links from this note · {}", out.len()));
+        }
+        let k = k - 1;
+        if k < out_block {
+            if k < out.len() {
+                return link_row_line(out[k], k == view.index, width);
+            }
+            if out_placeholder == 1 && k == 0 {
+                return muted(if view.outgoing.is_empty() {
+                    "none: write [[Note title]] to link one"
+                } else {
+                    "no link matches"
+                });
+            }
+            return muted(&format!("…and {} more", view.more));
+        }
+        let k = k - out_block;
+        match k {
+            0 => Line::from(""),
+            1 => back_heading.clone(),
+            _ if k - 2 < status.len() => status[k - 2].clone(),
+            _ => {
+                let i = k - 2 - status.len();
+                let n = out.len() + i;
+                link_row_line(back[i], n == view.index, width)
+            }
+        }
+    };
+    let selected_line = if view.index < out.len() {
+        1 + view.index
+    } else {
+        1 + out_block + 2 + status.len() + (view.index - out.len())
+    };
+
+    // Search box, blank, the body, blank, hint; inside borders.
+    let chrome = 2 + 2 + 2;
+    let room = (area.height as usize).saturating_sub(chrome + 2).max(3);
+    let shown = total.min(room);
+    let top = selected_line
+        .min(total - 1)
+        .saturating_sub(shown.saturating_sub(1))
+        .min(total - shown);
+    let height = (shown + chrome) as u16;
+    let title = format!("Links · “{}”", fit_cells(&view.note.title, 40).trim_end());
+    let inner = dialog(frame, area, wide, height, Some(&title));
+
+    let mut lines = Vec::with_capacity(shown + 4);
+    if view.field.value.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                fit_cells("type to filter the links…", width),
+                theme::cursor_focused().add_modifier(Modifier::DIM),
+            ),
+        ]));
+    } else {
+        lines.push(field_line(view.field, true, width));
+    }
+    lines.push(Line::from(""));
+    lines.extend((top..top + shown).map(line_at));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  type to filter · ↑/↓ pick · enter follows · esc closes · backspace returns later",
+        theme::muted(),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+    field_cursor(frame, view.field, inner.x + 2, inner.y, width as u16);
 }

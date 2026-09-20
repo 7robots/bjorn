@@ -26,6 +26,13 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
+- Wiki links: `[[Title]]`, `[[Title/Heading]]` and `[[Title|shown text]]` are
+  drawn as links and followed by a click or from the `L` list, which also
+  shows the notes linking in (a `bearcli search` for `[[Title`, at most 200
+  candidates, each hit's body checked, so prefixes and mentions in code are
+  dropped). A missing title offers to create the note; `backspace` / `alt+→`
+  walk back and forward.
+
 - Actions: `[[actions]]` in the config, `!` for the default one and `a` for a
   searchable palette. The note is rendered through the exporter, handed to a
   shell command as a temp file and on stdin, and the command's first line comes

@@ -115,7 +115,8 @@ fn seed_state() -> State {
         "2026-07-12T09:00:00Z",
         "2026-08-28T10:00:00Z",
         "# Garden Plan\n#home/garden\n\n- [ ] order bulbs for the front bed\n- [x] mulch the roses\n\n\
-         ## Next spring\n- [ ] move the hydrangea\n```\n- [ ] this is inside a code block\n```\n\n![](Front%20bed.png)\n"
+         ## Next spring\n- [ ] move the hydrangea\n```\n- [ ] this is inside a code block\n```\n\n![](Front%20bed.png)\n\n\
+         Weekends are planned in [[Sprint Planning/Notes]].\n"
             .into(),
     );
     garden.attachments = vec!["Front bed.png".into()];
@@ -134,7 +135,9 @@ fn seed_state() -> State {
             "2026-08-01T09:00:00Z",
             &today,
             "# Sprint Planning\n#work/sprint\n\n## Tasks\n- [x] book the retro room\n- [ ] write the release notes\n\
-             - [ ] ask Priya about the API deprecation\n  - [ ] confirm the sunset date\n\n## Notes\nVelocity is ==holding== steady.\n"
+             - [ ] ask Priya about the API deprecation\n  - [ ] confirm the sunset date\n\n## Notes\nVelocity is ==holding== steady.\n\n\
+             ## Links\nKeep [[Reading Queue|the reading list]] short, and draft the [[Team Offsite]] agenda. \
+             Bear writes a link as `[[Note title]]`.\n"
                 .into(),
         ),
         garden,
@@ -146,7 +149,10 @@ fn seed_state() -> State {
             "notes",
             "2026-06-01T09:00:00Z",
             "2026-08-15T12:00:00Z",
-            format!("# Reading Queue\n#home\n\nNo tasks here, just titles.\n\n{}\n", books.join("\n")),
+            format!(
+                "# Reading Queue\n#home\n\nNo tasks here, just titles. Next year: [[Garden Plan 2027]].\n\n{}\n",
+                books.join("\n")
+            ),
         ),
         note(
             "NOTE-DESIGN",
@@ -158,9 +164,9 @@ fn seed_state() -> State {
             "2026-08-01T12:00:00Z",
             "# CAD and Design\n#work/CAD and Design#\n\nMulti-word tag note.\n".into(),
         ),
-        note("NOTE-UNTAGGED", "Loose Thought", &[], &[], "notes", "2026-04-01T09:00:00Z", "2026-07-01T12:00:00Z", "# Loose Thought\n\nNo tags on this one.\n".into()),
-        note("NOTE-TRASHED", "Old Draft", &["work"], &[], "trash", "2026-03-01T09:00:00Z", "2026-06-01T12:00:00Z", "# Old Draft\n#work\n\nThrown away.\n".into()),
-        note("NOTE-ARCHIVED", "Finished Project", &["work"], &[], "archive", "2026-02-01T09:00:00Z", "2026-05-01T12:00:00Z", "# Finished Project\n#work\n\nDone and dusted.\n".into()),
+        note("NOTE-UNTAGGED", "Loose Thought", &[], &[], "notes", "2026-04-01T09:00:00Z", "2026-07-01T12:00:00Z", "# Loose Thought\n\nNo tags on this one. It points at [[Garden Plan/Next spring|the spring list]].\n\n```\n[[Sprint Planning]] in a fence is not a link\n```\n".into()),
+        note("NOTE-TRASHED", "Old Draft", &["work"], &[], "trash", "2026-03-01T09:00:00Z", "2026-06-01T12:00:00Z", "# Old Draft\n#work\n\nThrown away. Was part of [[Sprint Planning]].\n".into()),
+        note("NOTE-ARCHIVED", "Finished Project", &["work"], &[], "archive", "2026-02-01T09:00:00Z", "2026-05-01T12:00:00Z", "# Finished Project\n#work\n\nDone and dusted. It grew out of [[sprint planning]].\n".into()),
     ];
     State {
         notes,
@@ -523,7 +529,7 @@ enum Cmd {
         cmd: Option<TagsCmd>,
     },
     Create {
-        #[arg(allow_hyphen_values = true)]
+        /// Like bearcli, a title starting with `-` needs `--` before it.
         title: Option<String>,
         #[arg(short = 'c', long, allow_hyphen_values = true)]
         content: Option<String>,
@@ -705,10 +711,37 @@ fn paginate(notes: &[FakeNote], offset: i64, limit: Option<i64>) -> Vec<FakeNote
     }
 }
 
+/// Split a query into terms: whitespace-separated words, with a `"quoted
+/// phrase"` (optionally `-"negated"`) kept whole, quotes included.
+fn query_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for ch in query.chars() {
+        match ch {
+            '"' => {
+                current.push(ch);
+                quoted = !quoted;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    terms.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+    terms
+}
+
 fn matches_query(note: &FakeNote, query: &str) -> bool {
     let (todos, _) = todo_counts(&note.content);
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    for term in query.split_whitespace() {
+    for term in query_terms(query) {
+        let term = term.as_str();
         let negate = term.starts_with('-');
         let term = if negate { &term[1..] } else { term };
         let ok = if term.starts_with('#') {
@@ -723,12 +756,16 @@ fn matches_query(note: &FakeNote, query: &str) -> bool {
             note.modified.starts_with(&today)
         } else if term == "@pinned" {
             note.pins.iter().any(|p| p == "global")
+        } else if term == "@wikilinks" {
+            note.content.contains("[[")
         } else if term.starts_with('@') {
             true
         } else {
-            note.content
-                .to_lowercase()
-                .contains(&term.trim_matches('"').to_lowercase())
+            // Bear matches nothing for a term with no letter or digit in it:
+            // `"[["` finds no note at all.
+            let needle = term.trim_matches('"').to_lowercase();
+            needle.chars().any(char::is_alphanumeric)
+                && note.content.to_lowercase().contains(&needle)
         };
         if ok == negate {
             return false;
@@ -1349,6 +1386,18 @@ mod tests {
         assert!(!matches_query(&n, "#*/work"));
         assert!(matches_query(&n, "@pinned @whatever"));
         assert!(!matches_query(&n, "@untagged"));
+        assert!(matches_query(&n, "\"hello world\""));
+        assert!(!matches_query(&n, "\"world hello\""));
+        assert!(!matches_query(&n, "-\"hello world\""));
+        assert!(
+            !matches_query(&n, "\"[[\""),
+            "punctuation alone matches nothing"
+        );
+        assert!(!matches_query(&n, "@wikilinks"));
+        assert_eq!(
+            query_terms("a \"b c\" -\"d e\" f"),
+            vec!["a", "\"b c\"", "-\"d e\"", "f"]
+        );
     }
 
     #[test]

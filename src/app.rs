@@ -17,8 +17,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::actions::{self, Action};
 use crate::bear::{
-    BearClient, BearError, Note, NoteContent, Probe, Snapshot, display_tag, normalize_tag,
-    recently_modified,
+    BearClient, BearError, Location, Note, NoteContent, Probe, Snapshot, display_tag,
+    normalize_tag, recently_modified,
 };
 use crate::config::{Config, editor_available, resolve_editor};
 use crate::editor::{self, EditorJob};
@@ -26,18 +26,21 @@ use crate::export::{
     FORMATS, Format, default_export_path, export_note, extension_for, format_by_id,
 };
 use crate::icons::IconSet;
-use crate::model::{Selection, View, duplicate_titles, select_notes, today};
+use crate::model::{Selection, View, duplicate_titles, in_workspace, select_notes, today};
 use crate::pty::PtySession;
 use crate::reminders::{
     RemctlClient, Status, join as join_reminders, remctl_found, resolve_remctl,
 };
 use crate::search::{query_pattern, rewrite_subtags};
 use crate::todos::{TodoScan, scan_rows};
-use crate::ui::modals::{Field, Overlay, Pending, Severity, TextPurpose, Toast};
+use crate::ui::modals::{
+    Field, LinkRow, LinkTarget, Overlay, Pending, Severity, TextPurpose, Toast, filter_links,
+};
 use crate::ui::note_list::{NoteList, ROW_HEIGHT};
 use crate::ui::note_view::Reader;
 use crate::ui::sidebar::{Row, Sidebar};
 use crate::ui::triage::{Triage, TriageRow};
+use crate::wiki::{self, Backlinks, WikiLink};
 
 /// Delay between the list cursor moving and the note being fetched and rendered.
 /// Only a note whose body has to be read from Bear waits: a cached one is drawn
@@ -54,6 +57,29 @@ pub const CONTENT_CACHE_BYTES: usize = 24 * 1024 * 1024;
 pub const PREFETCH_RADIUS: usize = 3;
 /// Read-aheads allowed in flight at once; bearcli is a process per call.
 pub const PREFETCH_INFLIGHT: usize = 2;
+/// Notes kept in the back (and the forward) history.
+pub const HISTORY_LIMIT: usize = 100;
+/// Outgoing links listed by `L`; a note with more says how many are left out.
+pub const OUTGOING_LIMIT: usize = 1000;
+
+/// A place in the reading history: the note, the list it was read from, and
+/// how far down it was scrolled.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Place {
+    pub id: String,
+    pub selection: Selection,
+    pub query: String,
+    pub scroll: usize,
+}
+
+/// Where the reader should land once a note it is waiting for is drawn.
+#[derive(Debug, Clone, PartialEq)]
+enum Jump {
+    /// A heading, from `[[Title/Heading]]`.
+    Section(String),
+    /// A scroll offset, going back or forward.
+    Scroll(usize),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -139,6 +165,13 @@ pub enum Msg {
         failures: Vec<String>,
         keys: Vec<String>,
     },
+    /// The notes linking to `note_id`, checked, for the Links list. Only
+    /// the answer to the latest search (`generation`) is shown.
+    Backlinks {
+        generation: u64,
+        note_id: String,
+        result: Result<Backlinks, BearError>,
+    },
 }
 
 /// Where the last frame put each pane, for mouse events.
@@ -208,6 +241,23 @@ pub struct App {
     reminders_notice_shown: bool,
     reader_width: usize,
     reader_height: usize,
+    /// Notes left by following a link, most recent last; `backspace` returns.
+    pub back: Vec<Place>,
+    /// Notes left by going back, most recent last.
+    pub forward: Vec<Place>,
+    /// Where to land in a note once the reader draws it.
+    pending_jump: Option<(String, Jump)>,
+    /// Snapshot positions by lowercased title, for following links.
+    title_index: HashMap<String, Vec<usize>>,
+    /// The latest backlink search; only its answer is shown.
+    backlinks_gen: u64,
+    /// The note whose backlinks are being searched for, if any.
+    backlinks_running: Option<String>,
+    /// A Links list opened while that search ran, for another note.
+    backlinks_queued: Option<Note>,
+    /// The search box shows a query put back by `backspace`/`alt+→` and not
+    /// touched since; `backspace` keeps going back through history.
+    search_restored: bool,
 }
 
 impl App {
@@ -284,6 +334,14 @@ impl App {
             reminders_notice_shown: false,
             reader_width: 80,
             reader_height: 24,
+            back: Vec::new(),
+            forward: Vec::new(),
+            pending_jump: None,
+            title_index: HashMap::new(),
+            backlinks_gen: 0,
+            backlinks_running: None,
+            backlinks_queued: None,
+            search_restored: false,
         };
         app.reader.clear("Loading\u{2026}");
         if let Some(name) = unknown_theme {
@@ -426,6 +484,7 @@ impl App {
         // them means the reader never waits for bearcli again this session.
         let bodies = std::mem::take(&mut snapshot.bodies);
         self.snapshot = snapshot;
+        self.rebuild_title_index();
         self.loaded = true;
         // The previews this snapshot settled on are worth the next launch not
         // having to read every body again. Off the frame's path, and only when
@@ -654,6 +713,11 @@ impl App {
                     Duration::from_secs(10),
                 ),
             },
+            Msg::Backlinks {
+                generation,
+                note_id,
+                result,
+            } => self.on_backlinks(generation, &note_id, result),
             Msg::Exported(result) => match result {
                 Ok(path) => self.notify(
                     &format!("Exported to {}", path.display()),
@@ -675,6 +739,14 @@ impl App {
     /// version of it: a list rebuild re-highlights the same note, and redrawing
     /// it would blank the page for nothing.
     pub fn schedule_preview(&mut self, note: Note, immediate: bool, force: bool) {
+        // A jump waiting for another note is moot once the reader moves on.
+        if self
+            .pending_jump
+            .as_ref()
+            .is_some_and(|(id, _)| *id != note.id)
+        {
+            self.pending_jump = None;
+        }
         if !force && !recently_modified(note.modified, None) && self.reader.shows(&note) {
             return;
         }
@@ -828,6 +900,7 @@ impl App {
         }
         if let Some(body) = self.cached_content(&note) {
             self.reader.show(&note, &body);
+            self.apply_pending_jump();
             self.prefetch_around_cursor();
             return;
         }
@@ -861,6 +934,7 @@ impl App {
                     self.remember_content(&note.id, &stamp, &content.content);
                 }
                 self.reader.show(&note, &content.content);
+                self.apply_pending_jump();
                 self.prefetch_around_cursor();
             }
             Err(err) => self
@@ -920,6 +994,7 @@ impl App {
 
     /// A new view or tag replaces the search: forget the query and close the box.
     fn drop_search(&mut self) {
+        self.search_restored = false;
         self.search_query.clear();
         if self.notes.search.open {
             self.notes.search.close();
@@ -957,6 +1032,7 @@ impl App {
     // -- search --------------------------------------------------------------------
 
     pub fn open_search(&mut self) {
+        self.search_restored = false;
         let query = self.search_query.clone();
         self.notes.search.open_with(&query);
         let tags = self.query_tags();
@@ -966,6 +1042,7 @@ impl App {
 
     /// `esc`: close the box and drop the search and its highlights.
     pub fn clear_search(&mut self) {
+        self.search_restored = false;
         if self.notes.search.open {
             self.notes.search.close();
             if self.focus == Pane::Search {
@@ -1017,6 +1094,7 @@ impl App {
     }
 
     fn search_key(&mut self, key: KeyEvent) {
+        self.search_restored = false;
         let box_ = &mut self.notes.search;
         let mut edited = false;
         match key.code {
@@ -1214,6 +1292,11 @@ impl App {
             Pending::Tick(rows) => self.tick_rows(rows),
             Pending::RunAction(action, note) => self.spawn_action(action, note),
             Pending::DeleteAction(action, note) => self.delete_action(action, note),
+            Pending::CreateLinked(title) => {
+                self.push_history();
+                let tags = self.new_note_tags();
+                self.create_note(title, tags);
+            }
             Pending::Trash(note) => {
                 let client = self.client.clone();
                 let tx = self.tx.clone();
@@ -1262,12 +1345,17 @@ impl App {
 
     // -- actions: writes -----------------------------------------------------------
 
-    fn new_note(&mut self) {
-        let default_tags = if self.selection.tag.is_empty() {
+    /// The tags a new note starts with: the selected tag, else the workspace.
+    fn new_note_tags(&self) -> String {
+        if self.selection.tag.is_empty() {
             self.selection.workspace.clone()
         } else {
             self.selection.tag.clone()
-        };
+        }
+    }
+
+    fn new_note(&mut self) {
+        let default_tags = self.new_note_tags();
         self.overlay = Some(Overlay::NewNote {
             title: Field::new(""),
             tags: Field::new(&default_tags),
@@ -1793,7 +1881,24 @@ impl App {
             return;
         }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
+            // History: backspace and ctrl+o as in a pager or vim, alt+← and
+            // alt+→ as in a browser. Terminals that send option+arrow as a
+            // word motion deliver alt+b and alt+f instead.
+            // With the search box open, backspace belongs to the query (even
+            // once `enter` has moved the focus to the list), never to history;
+            // unless the box only shows a query that going back put there.
+            KeyCode::Backspace => {
+                if !self.notes.search.open || self.search_restored {
+                    self.go_back();
+                }
+            }
+            KeyCode::Char('o') if ctrl => self.go_back(),
+            KeyCode::Left | KeyCode::Char('b') if alt => self.go_back(),
+            KeyCode::Right | KeyCode::Char('f') if alt => self.go_forward(),
+            KeyCode::Char('L') => self.open_links(),
             KeyCode::Char('q') => self.confirm_quit(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help { scroll: 0 }),
             KeyCode::Char('r') => self.refresh(),
@@ -2159,6 +2264,73 @@ impl App {
                     editing,
                 });
             }
+            Overlay::Links {
+                mut field,
+                index,
+                note,
+                outgoing,
+                more,
+                backlinks,
+                capped,
+                error,
+            } => {
+                let (rows, chosen) = {
+                    let (out, back) = filter_links(&outgoing, backlinks.as_deref(), &field.value);
+                    let chosen = if index < out.len() {
+                        out.get(index)
+                    } else {
+                        back.get(index - out.len())
+                    }
+                    .map(|r| r.target.clone());
+                    (out.len() + back.len(), chosen)
+                };
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let delta = match key.code {
+                    KeyCode::Down | KeyCode::Tab => Some(1),
+                    KeyCode::Up | KeyCode::BackTab => Some(-1),
+                    KeyCode::Char('n') if ctrl => Some(1),
+                    KeyCode::Char('p') if ctrl => Some(-1),
+                    _ => None,
+                };
+                let mut index = index;
+                match key.code {
+                    _ if delta.is_some() => {
+                        if rows > 0 {
+                            index = (index as i32 + delta.unwrap_or(0)).rem_euclid(rows as i32)
+                                as usize;
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.overlay = None;
+                        return;
+                    }
+                    KeyCode::Enter => {
+                        let Some(target) = chosen else { return };
+                        self.overlay = None;
+                        match target {
+                            LinkTarget::Wiki(link) => self.follow_link(link),
+                            LinkTarget::Note { id } => self.follow_note(&id),
+                        }
+                        return;
+                    }
+                    _ => {
+                        // Typing filters, so the highlight goes back to the top.
+                        if Self::field_key(&mut field, &key) {
+                            index = 0;
+                        }
+                    }
+                }
+                self.overlay = Some(Overlay::Links {
+                    field,
+                    index,
+                    note,
+                    outgoing,
+                    more,
+                    backlinks,
+                    capped,
+                    error,
+                });
+            }
             Overlay::NewNote {
                 mut title,
                 mut tags,
@@ -2243,6 +2415,16 @@ impl App {
                     }
                 } else if inside(self.rects.reader_body) {
                     self.focus = Pane::Reader;
+                    // The text starts two cells in from the pane's edge.
+                    let left = self.rects.reader_body.x + 2;
+                    let row = (y - self.rects.reader_body.y) as usize;
+                    if x >= left
+                        && let Some(link) =
+                            self.reader
+                                .link_at((x - left) as usize, row, self.reader_width)
+                    {
+                        self.follow_link(link);
+                    }
                 }
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
@@ -2278,6 +2460,428 @@ impl App {
 
     pub fn reader_viewport(&self) -> (usize, usize) {
         (self.reader_width, self.reader_height)
+    }
+}
+
+// -- wiki links and history ----------------------------------------------------------
+
+impl App {
+    /// Index the snapshot's titles for `resolve_title`, once per snapshot.
+    fn rebuild_title_index(&mut self) {
+        self.title_index.clear();
+        for (i, note) in self.snapshot.notes.iter().enumerate() {
+            self.title_index
+                .entry(wiki::title_key(&note.title))
+                .or_default()
+                .push(i);
+        }
+    }
+
+    /// The note a wiki link names: an exact title match, ignoring case. When
+    /// several notes share the title, an active note beats an archived one,
+    /// which beats one in the trash, and then the most recently modified wins.
+    pub fn resolve_title(&self, title: &str) -> Option<&Note> {
+        let rank = |n: &Note| match n.location {
+            Location::Notes => 0,
+            Location::Archive => 1,
+            Location::Trash => 2,
+        };
+        self.title_index
+            .get(&wiki::title_key(title))?
+            .iter()
+            .filter_map(|&i| self.snapshot.notes.get(i))
+            .min_by_key(|n| (rank(n), std::cmp::Reverse(n.modified)))
+    }
+
+    /// The note a link points at; `[[/Heading]]` is the note on the page.
+    /// With the reading of the link that named it: the first of
+    /// `WikiLink::readings` whose title is a note.
+    fn link_target(&self, link: &WikiLink) -> Option<(Note, WikiLink)> {
+        link.readings().into_iter().find_map(|reading| {
+            let note = if reading.title.is_empty() {
+                self.reader.note.clone()
+            } else {
+                self.resolve_title(&reading.title).cloned()
+            }?;
+            Some((note, reading))
+        })
+    }
+
+    /// Is the reader showing note `id`, body and all?
+    fn reader_shows(&self, id: &str) -> bool {
+        self.reader.full_text.is_some() && self.reader.note.as_ref().is_some_and(|n| n.id == id)
+    }
+
+    /// Follow a wiki link: open the note it names, at its heading if it names
+    /// one. A title no note has offers to create that note.
+    pub fn follow_link(&mut self, link: WikiLink) {
+        let Some((note, link)) = self.link_target(&link) else {
+            // No reading names a note: offer the one as written.
+            self.overlay = Some(Overlay::Confirm {
+                message: format!("No note is called “{}”. Create it?", link.title),
+                confirm_label: "Create".into(),
+                action: Pending::CreateLinked(link.title),
+            });
+            return;
+        };
+        if self.reader_shows(&note.id) {
+            // A link into the page itself: scroll, nothing to load.
+            if !link.section.is_empty() {
+                self.push_history();
+                self.pending_jump = Some((note.id, Jump::Section(link.section)));
+                self.apply_pending_jump();
+            }
+            self.focus = Pane::Reader;
+            return;
+        }
+        self.push_history();
+        self.reveal(&note.id);
+        // Set after `reveal`, whose preview would drop a jump for another note.
+        self.pending_jump =
+            (!link.section.is_empty()).then_some((note.id, Jump::Section(link.section)));
+        self.apply_pending_jump();
+    }
+
+    /// Open a note by id, remembering where the reader was.
+    pub fn follow_note(&mut self, id: &str) {
+        self.push_history();
+        self.pending_jump = None;
+        self.reveal(id);
+    }
+
+    /// Put the note under the list cursor and in the reader. When the list
+    /// does not hold it, the list widens to the view it lives in (Notes,
+    /// Archive or Trash), and a workspace that excludes it is cleared, with a
+    /// toast saying so. False when the note is not in the snapshot.
+    fn reveal(&mut self, id: &str) -> bool {
+        if !self.notes.select_id(id) {
+            let Some(note) = self.snapshot.by_id(id).cloned() else {
+                self.notify("That note is no longer in Bear.", Duration::from_secs(4));
+                return false;
+            };
+            let view = match note.location {
+                Location::Archive => View::Archive,
+                Location::Trash => View::Trash,
+                Location::Notes => View::All,
+            };
+            let mut workspace = self.selection.workspace.clone();
+            if !in_workspace(&note, &workspace) {
+                self.notify_titled(
+                    "Workspace cleared",
+                    &format!(
+                        "“{}” is outside {}; backspace goes back to it, w sets a workspace again.",
+                        note.title,
+                        display_tag(&workspace)
+                    ),
+                    Severity::Information,
+                    Duration::from_secs(6),
+                );
+                workspace.clear();
+            }
+            self.drop_search();
+            self.selection = Selection {
+                view,
+                workspace: workspace.clone(),
+                ..Selection::default()
+            };
+            self.sidebar.populate(&self.snapshot, &workspace, "", view);
+            self.apply_selection(Some(id), false);
+            if !self.notes.select_id(id) {
+                return false;
+            }
+        }
+        if let Some(note) = self.notes.current().cloned() {
+            self.schedule_preview(note, true, false);
+        }
+        self.focus = Pane::Reader;
+        true
+    }
+
+    /// Land where `pending_jump` says, once the reader shows that note.
+    fn apply_pending_jump(&mut self) {
+        let Some((id, jump)) = self.pending_jump.clone() else {
+            return;
+        };
+        if !self.reader_shows(&id) {
+            return;
+        }
+        self.pending_jump = None;
+        match jump {
+            Jump::Scroll(row) => self.reader.scroll = row,
+            Jump::Section(section) => {
+                if !self.reader.scroll_to_heading(&section, self.reader_width) {
+                    let title = self.reader.header.clone();
+                    self.notify(
+                        &format!("No heading “{section}” in “{title}”."),
+                        Duration::from_secs(4),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Where the reader is now, as a history entry.
+    fn here(&self) -> Option<Place> {
+        let note = self.reader.note.as_ref()?;
+        Some(Place {
+            id: note.id.clone(),
+            selection: self.selection.clone(),
+            query: self.search_query.clone(),
+            scroll: self.reader.scroll,
+        })
+    }
+
+    /// Remember the current place before leaving it; a new trail drops the
+    /// forward history, as a browser does.
+    fn push_history(&mut self) {
+        if let Some(place) = self.here()
+            && self.back.last() != Some(&place)
+        {
+            self.back.push(place);
+            if self.back.len() > HISTORY_LIMIT {
+                self.back.remove(0);
+            }
+        }
+        self.forward.clear();
+    }
+
+    /// The newest entry of `stack` whose note still exists, dropping any
+    /// above it whose note is gone.
+    fn pop_live(snapshot: &Snapshot, stack: &mut Vec<Place>) -> Option<Place> {
+        while let Some(place) = stack.pop() {
+            if snapshot.by_id(&place.id).is_some() {
+                return Some(place);
+            }
+        }
+        None
+    }
+
+    /// `backspace`: the note before the last link followed.
+    pub fn go_back(&mut self) {
+        let Some(place) = Self::pop_live(&self.snapshot, &mut self.back) else {
+            self.notify("Nothing to go back to.", Duration::from_secs(2));
+            return;
+        };
+        if let Some(here) = self.here() {
+            self.forward.push(here);
+        }
+        self.restore(place);
+    }
+
+    /// `alt+→`: undo a `backspace`.
+    pub fn go_forward(&mut self) {
+        let Some(place) = Self::pop_live(&self.snapshot, &mut self.forward) else {
+            self.notify("Nothing to go forward to.", Duration::from_secs(2));
+            return;
+        };
+        if let Some(here) = self.here() {
+            self.back.push(here);
+        }
+        self.restore(place);
+    }
+
+    /// Return to a place: its list (view, tag, workspace, search), its note
+    /// and its scroll offset.
+    fn restore(&mut self, place: Place) {
+        let Place {
+            id,
+            selection,
+            query,
+            scroll,
+        } = place;
+        if query.is_empty() {
+            if self.notes.search.open {
+                self.notes.search.close();
+            }
+        } else {
+            self.notes.search.open_with(&query);
+        }
+        self.search_restored = !query.is_empty();
+        self.search_query = query;
+        self.sidebar.populate(
+            &self.snapshot,
+            &selection.workspace,
+            &selection.tag,
+            selection.view,
+        );
+        self.selection = selection;
+        self.apply_selection(Some(&id), false);
+        if self.notes.current().is_some_and(|n| n.id == id) {
+            if let Some(note) = self.notes.current().cloned() {
+                self.schedule_preview(note, true, false);
+            }
+        } else {
+            // It has left that list since (retagged, archived): find it anyway.
+            self.reveal(&id);
+        }
+        self.focus = Pane::Reader;
+        self.pending_jump = Some((id, Jump::Scroll(scroll)));
+        self.apply_pending_jump();
+    }
+
+    /// `L`: the note's wiki links, and a search for the notes linking to it.
+    pub fn open_links(&mut self) {
+        let Some(note) = self.current_note().cloned() else {
+            self.notify("No note selected.", Duration::from_secs(3));
+            return;
+        };
+        if note.locked {
+            self.notify_titled(
+                "",
+                "Locked notes do not show their links.",
+                Severity::Warning,
+                Duration::from_secs(5),
+            );
+            return;
+        }
+        if !self.reader_shows(&note.id) {
+            self.notify("The note is still loading.", Duration::from_secs(2));
+            return;
+        }
+        let links = self.reader.wiki_links();
+        let more = links.len().saturating_sub(OUTGOING_LIMIT);
+        let outgoing = links
+            .into_iter()
+            .take(OUTGOING_LIMIT)
+            .map(|link| self.outgoing_row(link))
+            .collect();
+        self.overlay = Some(Overlay::Links {
+            field: Field::default(),
+            index: 0,
+            note: note.clone(),
+            outgoing,
+            more,
+            backlinks: None,
+            capped: false,
+            error: String::new(),
+        });
+        self.start_backlinks(note);
+    }
+
+    /// The generation a backlink answer must carry to be shown.
+    pub fn backlinks_generation(&self) -> u64 {
+        self.backlinks_gen
+    }
+
+    /// Search for the notes linking to `note`. One search runs at a time: a
+    /// list opened again for the note being searched waits for that answer,
+    /// and one for another note starts when it lands.
+    fn start_backlinks(&mut self, note: Note) {
+        if let Some(running) = &self.backlinks_running {
+            if *running != note.id {
+                self.backlinks_queued = Some(note);
+            }
+            return;
+        }
+        self.backlinks_gen += 1;
+        self.backlinks_running = Some(note.id.clone());
+        let generation = self.backlinks_gen;
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .backlink_rows(&note.title)
+                .await
+                .map(|(rows, capped)| {
+                    wiki::backlinks(
+                        &rows,
+                        capped,
+                        &note.title,
+                        &note.id,
+                        crate::ui::markdown::wiki_links,
+                    )
+                });
+            let _ = tx.send(Msg::Backlinks {
+                generation,
+                note_id: note.id,
+                result,
+            });
+        });
+    }
+
+    fn outgoing_row(&self, link: WikiLink) -> LinkRow {
+        let target = self.link_target(&link);
+        // The reading that resolved names the target best.
+        let reading = target.as_ref().map_or(&link, |(_, r)| r);
+        let label = if link.alias.is_empty() {
+            reading.target_label()
+        } else {
+            link.alias.clone()
+        };
+        let mut detail: Vec<String> = Vec::new();
+        if !link.alias.is_empty() {
+            detail.push(format!("→ {}", reading.target_label()));
+        }
+        match target.as_ref().map(|(note, _)| note) {
+            None => detail.push("no such note yet · enter creates it".into()),
+            Some(note) if note.location != Location::Notes => {
+                detail.push(format!("in the {}", note.location))
+            }
+            Some(_) => {}
+        }
+        LinkRow {
+            label,
+            detail: detail.join(" · "),
+            missing: target.is_none(),
+            target: LinkTarget::Wiki(link),
+        }
+    }
+
+    fn on_backlinks(
+        &mut self,
+        generation: u64,
+        note_id: &str,
+        result: Result<wiki::Backlinks, BearError>,
+    ) {
+        if generation != self.backlinks_gen {
+            // An older search's answer; a newer one is (or was) running.
+            return;
+        }
+        self.backlinks_running = None;
+        if let Some(Overlay::Links {
+            note,
+            backlinks,
+            capped,
+            error,
+            ..
+        }) = self.overlay.as_mut()
+            && note.id == note_id
+        {
+            match result {
+                Ok(found) => {
+                    *capped = found.capped;
+                    *backlinks = Some(
+                        found
+                            .notes
+                            .into_iter()
+                            .map(|b| {
+                                let mut detail: Vec<String> =
+                                    b.sections.iter().map(|s| format!("› {s}")).collect();
+                                if b.location != Location::Notes {
+                                    detail.push(format!("in the {}", b.location));
+                                }
+                                LinkRow {
+                                    label: b.title,
+                                    detail: detail.join(" · "),
+                                    target: LinkTarget::Note { id: b.id },
+                                    missing: false,
+                                }
+                            })
+                            .collect(),
+                    )
+                }
+                Err(err) => {
+                    *backlinks = Some(Vec::new());
+                    *error = err.message;
+                }
+            }
+        }
+        // A list opened for another note meanwhile gets its search now.
+        if let Some(next) = self.backlinks_queued.take()
+            && matches!(&self.overlay, Some(Overlay::Links { note, .. }) if note.id == next.id)
+        {
+            self.start_backlinks(next);
+        }
     }
 }
 
@@ -2467,23 +3071,11 @@ impl App {
         }
     }
 
+    /// `enter` in triage: the note, as a history entry, with the list focused.
     fn triage_goto(&mut self, note_id: &str) {
         self.close_triage();
-        if !self.notes.select_id(note_id) {
-            self.drop_search();
-            self.selection = Selection {
-                view: View::All,
-                workspace: self.selection.workspace.clone(),
-                ..Selection::default()
-            };
-            self.sidebar.select_view(View::All);
-            self.apply_selection(Some(note_id), false);
-            self.notes.select_id(note_id);
-        }
+        self.follow_note(note_id);
         self.focus = Pane::Notes;
-        if let Some(note) = self.notes.current().cloned() {
-            self.schedule_preview(note, true, false);
-        }
     }
 
     fn triage_add(&mut self) {
