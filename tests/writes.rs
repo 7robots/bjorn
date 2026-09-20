@@ -486,6 +486,36 @@ async fn r_exports_rtf_and_rtfd_when_the_note_has_images() {
 }
 
 #[tokio::test]
+async fn p_exports_a_pdf_or_reports_the_missing_converter() {
+    let fake = Fake::new();
+    let mut h = fake.harness();
+    h.load().await;
+    // Neither converter ships with macOS, so the export has to be honest on a
+    // machine without one rather than fail blankly.
+    if bjorn::export::Converter::find().is_none() {
+        h.press("x");
+        h.press("p");
+        let target = std::path::PathBuf::from(prefill(&h));
+        h.press("enter");
+        h.until(|app| {
+            app.toast_messages()
+                .iter()
+                .any(|m| m.contains("weasyprint"))
+        })
+        .await;
+        assert!(!target.exists(), "nothing half-written");
+        return;
+    }
+    let written = export_via_picker(&mut h, "p").await;
+    assert_eq!(
+        written,
+        fake.config().export_dir.join("Sprint Planning.pdf")
+    );
+    let bytes = std::fs::read(&written).unwrap();
+    assert!(bytes.starts_with(b"%PDF"), "not a PDF: {:?}", &bytes[..8]);
+}
+
+#[tokio::test]
 async fn b_exports_a_textbundle_with_assets_and_rewritten_links() {
     let fake = Fake::new();
     let mut h = fake.harness();

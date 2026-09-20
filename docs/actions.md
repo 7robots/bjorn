@@ -80,7 +80,7 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 |---|---|---|
 | `name` | the command | what the palette shows and the toast reports |
 | `command` | — | required; run through `sh -c`, so pipes, `&&` and redirection all work |
-| `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`. An unknown name falls back to `md` |
+| `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`, `pdf`. An unknown name falls back to `md` |
 | `confirm` | `false` | ask before running. Worth setting on anything that publishes or deletes |
 | `timeout` | `60` | seconds; a command that overruns is killed and reported |
 | `default` | `false` | the action `!` runs. With exactly one action configured, that one is the default whether or not it says so |

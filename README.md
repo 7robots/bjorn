@@ -43,7 +43,7 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `enter` | move into the reader for the highlighted note, at the first match while searching | `1`–`7` | Notes, Untagged, Todo, Today, Pinned, Archive, Trash |
 | `n` | new note (title, tags), then edit | `d` | move the note to the trash, after a confirm |
 | `e` | edit in `$VISUAL` / `$EDITOR` | `u` | restore from Trash or Archive |
-| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle (`←` `→` pick, `enter` confirms) |
+| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle, PDF (`←` `→` pick, `enter` confirms) |
 | `b` | open in Bear.app | `!` / `a` | run the default action / open the action menu (see [Actions](#actions)) |
 | `w` | make the highlighted tag the workspace; again on it to leave | `W` | clear the workspace |
 | `f` | fold / unfold the highlighted tag's subtree | `F` | fold every tag, or unfold them all when all are folded |
@@ -105,7 +105,7 @@ a reminder is added.
 ```toml
 editor = "nvim"               # overrides $VISUAL / $EDITOR
 export_dir = "~/Downloads"    # where `x` proposes to write
-export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle
+export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle | pdf
 poll_seconds = 5              # 0 disables the background refresh
 workspace = "work"            # start scoped to this tag
 bearcli = "/usr/local/bin/bearcli"  # optional; default searches PATH, then Bear.app
@@ -219,7 +219,7 @@ command of yours: publish it, copy it, POST it, push it.
 [[actions]]
 name = "Publish to S3"
 command = 'aws s3 cp "$BJORN_NOTE_FILE" "s3://notes/$BJORN_NOTE_TITLE.html"'
-format = "html"        # md (default), html, txt, rtf, textbundle
+format = "html"        # md (default), html, txt, rtf, textbundle, pdf
 confirm = true         # ask first
 default = true         # this is what `!` runs
 

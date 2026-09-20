@@ -14,7 +14,6 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Deferred (carried from bjorn's ROADMAP, still open here)
 
-- PDF export (headless-browser concern recorded in bjorn's ROADMAP).
 - EPUB export.
 - Search-box completion inside a multi-word tag; completion candidate cycling.
 - Notes list snippet line (first body line, as Bear shows).
@@ -25,6 +24,15 @@ plan lives in `docs/plans/bjorn-rust.md`.
   snooze, un-tick `@done`, "Todo in workspace" view).
 
 ## Closed since
+
+- PDF export, as the sixth format in the picker. The headless-browser concern
+  recorded in bjorn's ROADMAP is why nothing draws a page inside the binary:
+  the HTML rendering is handed to a converter the user already has, WeasyPrint
+  or Chrome, the way RTF is handed to `textutil`. macOS ships neither (its own
+  `cupsfilter` refuses HTML), so a machine without one gets a plain error
+  naming both rather than a format that fails blankly. Chrome is given a
+  throwaway profile and no network, because a converter renders whatever
+  inline HTML a note happens to carry.
 
 - Actions: `[[actions]]` in the config, `!` for the default one and `a` for a
   searchable palette. The note is rendered through the exporter, handed to a

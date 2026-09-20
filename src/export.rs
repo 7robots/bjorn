@@ -6,8 +6,11 @@
 //! app's job.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 
@@ -29,7 +32,7 @@ pub struct Format {
     pub needs_attachments: bool,
 }
 
-pub const FORMATS: [Format; 5] = [
+pub const FORMATS: [Format; 6] = [
     Format {
         id: "md",
         label: "Markdown",
@@ -56,6 +59,13 @@ pub const FORMATS: [Format; 5] = [
         label: "RTF",
         key: 'r',
         ext: "rtf",
+        needs_attachments: true,
+    },
+    Format {
+        id: "pdf",
+        label: "PDF",
+        key: 'p',
+        ext: "pdf",
         needs_attachments: true,
     },
     Format {
@@ -240,6 +250,160 @@ pub fn export_rtf(
     Ok(destination)
 }
 
+/// What turns the HTML rendering into a PDF. macOS ships nothing that can:
+/// `textutil` stops at RTF, and `cupsfilter` refuses HTML outright ("No filter
+/// to convert from text/html to application/pdf"), so this is the one format
+/// that asks for a tool of your own, the way RTF asks for `textutil`.
+#[derive(Debug, Clone)]
+pub enum Converter {
+    /// `weasyprint in.html out.pdf`: no browser, no scripts, no network fetch
+    /// beyond what the page points at.
+    WeasyPrint(PathBuf),
+    /// Chrome's own printer, in a throwaway profile with nowhere to go.
+    Chrome(PathBuf),
+}
+
+/// Where a browser hides on macOS, for the ones that are app bundles rather
+/// than something on `PATH`.
+const CHROME_BUNDLES: [&str; 4] = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "~/Applications/Chromium.app/Contents/MacOS/Chromium",
+];
+
+impl Converter {
+    /// The first converter this machine has, WeasyPrint before Chrome: it is
+    /// the quieter of the two and runs no scripts at all.
+    pub fn find() -> Option<Self> {
+        if let Some(path) = crate::util::which("weasyprint") {
+            return Some(Converter::WeasyPrint(path));
+        }
+        for name in ["chromium", "google-chrome", "google-chrome-stable"] {
+            if let Some(path) = crate::util::which(name) {
+                return Some(Converter::Chrome(path));
+            }
+        }
+        CHROME_BUNDLES
+            .iter()
+            .map(|p| expand_tilde(p))
+            .find(|p| p.is_file())
+            .map(Converter::Chrome)
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Converter::WeasyPrint(_) => "weasyprint",
+            Converter::Chrome(_) => "Chrome",
+        }
+    }
+
+    fn command(&self, source: &Path, destination: &Path, profile: &Path) -> Command {
+        match self {
+            Converter::WeasyPrint(bin) => {
+                let mut command = Command::new(bin);
+                command.arg(source).arg(destination);
+                command
+            }
+            Converter::Chrome(bin) => {
+                let mut command = Command::new(bin);
+                command
+                    .arg("--headless=new")
+                    // Its own profile: the render never sees your cookies, and
+                    // the print does not fail because Chrome is already open.
+                    .arg(format!("--user-data-dir={}", profile.display()))
+                    // A note can carry inline HTML and Chrome renders it, so it
+                    // is given nowhere to send anything: no hostname resolves,
+                    // and a bare IP address — which never reaches the resolver
+                    // — meets a dead proxy.
+                    .arg("--host-resolver-rules=MAP * ~NOTFOUND")
+                    .arg("--proxy-server=127.0.0.1:1")
+                    .arg("--proxy-bypass-list=<-loopback>")
+                    .arg("--disable-remote-fonts")
+                    .arg("--no-pdf-header-footer")
+                    .arg(format!("--print-to-pdf={}", destination.display()))
+                    .arg(format!("file://{}", source.display()));
+                command
+            }
+        }
+    }
+}
+
+/// How long a converter gets before it is killed. Chrome has been known to sit
+/// there; the export runs off the UI thread, but not forever.
+const CONVERT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The HTML rendering, printed. The page carries a print stylesheet — A4, a
+/// light page whatever the theme — so the result reads like Bear's own PDF.
+pub fn export_pdf(
+    content: &str,
+    title: &str,
+    destination: &Path,
+    images: &HashMap<String, Vec<u8>>,
+) -> Result<PathBuf, ExportError> {
+    let Some(converter) = Converter::find() else {
+        return Err(ExportError(
+            "PDF export needs weasyprint or Google Chrome; macOS ships neither.".into(),
+        ));
+    };
+    let destination = prepare(destination)?;
+    let tmp = tempfile::Builder::new()
+        .prefix("bjorn-pdf-")
+        .tempdir()
+        .map_err(|e| ExportError(e.to_string()))?;
+    // A plain name: `#` and `%` are legal in a note's title and mean something
+    // else inside the `file://` URL Chrome is handed.
+    let source = tmp.path().join("note.html");
+    write(
+        &source,
+        &render_html::render(content, title, images, &HashMap::new()),
+    )?;
+    let profile = tmp.path().join("profile");
+    let mut child = converter
+        .command(&source, &destination, &profile)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| ExportError(format!("{}: {e}", converter.name())))?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < CONVERT_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ExportError(format!(
+                    "{} took longer than {}s",
+                    converter.name(),
+                    CONVERT_TIMEOUT.as_secs()
+                )));
+            }
+            Err(e) => return Err(ExportError(format!("{}: {e}", converter.name()))),
+        }
+    };
+    // Chrome exits 0 after printing its own error page, so the file is the
+    // only honest signal, as it is for textutil.
+    let wrote = std::fs::metadata(&destination)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false);
+    if !status.success() || !wrote {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        let first = stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.contains("ERROR:"))
+            .unwrap_or("it wrote nothing");
+        return Err(ExportError(format!("{}: {first}", converter.name())));
+    }
+    Ok(destination)
+}
+
 /// Percent-encode a filename the way Bear writes attachment links.
 pub fn percent_encode(name: &str) -> String {
     const SAFE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
@@ -321,6 +485,7 @@ pub fn export_note(
         "txt" => export_text(content, destination),
         "html" => export_html(content, title, destination, images),
         "rtf" => export_rtf(content, title, destination, images),
+        "pdf" => export_pdf(content, title, destination, images),
         "textbundle" => export_textbundle(content, destination, images),
         other => Err(ExportError(format!("unknown export format {other}"))),
     }
@@ -329,6 +494,46 @@ pub fn export_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pdf_sits_in_the_picker_with_a_key_of_its_own() {
+        let pdf = format_by_id("pdf");
+        assert_eq!((pdf.label, pdf.key, pdf.ext), ("PDF", 'p', "pdf"));
+        assert!(pdf.needs_attachments, "a note's images belong in its PDF");
+        assert_eq!(extension_for(pdf, true), "pdf");
+        let mut keys: Vec<char> = FORMATS.iter().map(|f| f.key).collect();
+        keys.sort_unstable();
+        let unique = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), unique, "two formats on one key");
+    }
+
+    #[test]
+    fn export_pdf_writes_a_pdf_or_says_what_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("Note.pdf");
+        let result = export_pdf("# Note\n\nA line.\n", "Note", &target, &HashMap::new());
+        match Converter::find() {
+            // Nothing to print with is the ordinary case on a machine that has
+            // not installed one, and it has to say so rather than fail blankly.
+            None => {
+                let message = result.expect_err("no converter, no PDF").0;
+                assert!(message.contains("weasyprint"), "{message}");
+                assert!(message.contains("Chrome"), "{message}");
+                assert!(!target.exists(), "nothing half-written");
+            }
+            Some(converter) => {
+                let written = result.unwrap_or_else(|e| panic!("{converter:?}: {}", e.0));
+                let bytes = std::fs::read(&written).unwrap();
+                assert!(bytes.starts_with(b"%PDF"), "{converter:?} wrote no PDF");
+                assert!(
+                    bytes.len() > 1000,
+                    "{converter:?} wrote {} bytes",
+                    bytes.len()
+                );
+            }
+        }
+    }
 
     #[test]
     fn safe_filename_and_unique_path() {
