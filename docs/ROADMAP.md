@@ -18,6 +18,12 @@ plan lives in `docs/plans/bjorn-rust.md`.
   ROADMAP still stands: no converter in the binary). The HTML export's print
   stylesheet and an action are the way there — docs/actions.md.
 - EPUB export.
+- Math in the HTML export. Bear renders `$x$` and `$$…$$`; Bjorn prints them as
+  the note wrote them, because typesetting them needs an engine (KaTeX, MathML
+  with a font) that the binary does not carry and would not be able to fetch.
+  Ruled fine as it stands 2026-09-19, with the note that the text is at least
+  never lost. Bear's callout icons are the other thing an exported note does
+  not draw — the panel's color and bar carry the type instead.
 - Search-box completion inside a multi-word tag; completion candidate cycling.
 - Notes list snippet line (first body line, as Bear shows).
 - Permanent delete from Trash (no bearcli command yet).
