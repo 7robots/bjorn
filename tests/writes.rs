@@ -58,7 +58,10 @@ async fn visual_beats_editor_and_config_beats_both() {
     ]));
     h.load().await;
     h.press("e");
-    h.until(|_| marker.exists()).await;
+    // The editor wrote only its marker, so the note is unchanged: the toast
+    // says the editor has exited, and with it that the marker is complete.
+    h.until(|app| app.toast_messages().iter().any(|m| m == "No changes."))
+        .await;
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "visual");
     let configured = fake_editor(
         fake.dir.path(),

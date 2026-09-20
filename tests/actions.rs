@@ -35,6 +35,13 @@ fn config_with(fake: &Fake, actions: Vec<Action>) -> Config {
     }
 }
 
+/// Wait for an action to finish: its toast, not its output file, which the
+/// shell creates before it has written a byte.
+async fn until_toast(h: &mut bjorn::harness::Harness, message: &str) {
+    h.until(|app| app.toast_messages().iter().any(|m| m == message))
+        .await;
+}
+
 fn receipt(fake: &Fake, name: &str) -> String {
     std::fs::read_to_string(fake.dir.path().join(format!("{name}.receipt"))).unwrap()
 }
@@ -108,8 +115,7 @@ async fn bang_runs_the_default_action_without_the_palette() {
     h.load().await;
     h.press("!");
     assert!(h.app.overlay.is_none(), "no palette for a default action");
-    h.until(|_| fake.dir.path().join("Publish.receipt").exists())
-        .await;
+    until_toast(&mut h, "sent").await;
     assert!(receipt(&fake, "Publish").starts_with("Publish\nSprint Planning\n"));
 }
 
@@ -138,8 +144,8 @@ async fn a_lone_action_is_the_default() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| fake.dir.path().join("Copy.receipt").exists())
-        .await;
+    until_toast(&mut h, "sent").await;
+    assert!(fake.dir.path().join("Copy.receipt").exists());
 }
 
 #[tokio::test]
@@ -164,8 +170,8 @@ async fn a_confirm_action_asks_first_and_can_be_cancelled() {
 
     h.press("!");
     h.press("y");
-    h.until(|_| fake.dir.path().join("Publish.receipt").exists())
-        .await;
+    until_toast(&mut h, "sent").await;
+    assert!(fake.dir.path().join("Publish.receipt").exists());
 }
 
 #[tokio::test]
@@ -208,8 +214,7 @@ async fn html_actions_get_the_rendered_note() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| fake.dir.path().join("Web.receipt").exists())
-        .await;
+    until_toast(&mut h, "sent").await;
     let receipt = receipt(&fake, "Web");
     assert!(receipt.contains("Sprint Planning.html"), "{receipt}");
     assert!(receipt.contains("<!DOCTYPE html>"), "{receipt}");
@@ -324,7 +329,7 @@ async fn actions_come_from_the_config_file() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| receipt.exists()).await;
+    until_toast(&mut h, "Done.").await;
     let text = std::fs::read_to_string(&receipt).unwrap();
     assert!(text.starts_with("Sprint Planning\n"), "{text}");
     assert!(!text.contains("- [ ]"), "txt renders the checkbox: {text}");
