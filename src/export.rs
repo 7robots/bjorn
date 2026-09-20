@@ -316,7 +316,11 @@ impl Converter {
             Converter::Chrome(bin) => {
                 let mut command = Command::new(bin);
                 command
-                    .arg("--headless")
+                    // `--headless=new`, not plain `--headless`: the old one
+                    // spins on this machine, looping
+                    // `CVDisplayLinkCreateWithCGDisplay failed` on stderr
+                    // forever instead of printing.
+                    .arg("--headless=new")
                     // Its own profile: the render never sees your cookies, and
                     // the print does not fail because Chrome is already open.
                     .arg(format!("--user-data-dir={}", profile.display()))
@@ -389,16 +393,7 @@ pub fn export_pdf(
         .process_group(0)
         .spawn()
         .map_err(|e| ExportError(format!("{}: {e}", converter.name())))?;
-    let status = wait_for(&mut child, &converter)?;
-    // Chrome exits 0 after printing its own error page, so the file has to be
-    // there as well, as it does for textutil.
-    if !status.success() || !printed.exists() {
-        return Err(ExportError(format!(
-            "{}: {}",
-            converter.name(),
-            first_complaint(&log)
-        )));
-    }
+    wait_for_pdf(&mut child, &converter, &printed, &log)?;
     // Across devices a rename fails, so fall back to a copy.
     if std::fs::rename(&printed, &destination).is_err() {
         std::fs::copy(&printed, &destination)
@@ -407,34 +402,68 @@ pub fn export_pdf(
     Ok(destination)
 }
 
-/// Wait for `child`, killing its whole process group if it overruns: a browser
-/// leaves helpers behind, and the profile they are writing to is about to go.
-fn wait_for(
+/// Wait for the PDF, not for the converter. WeasyPrint prints and exits;
+/// headless Chrome has been seen to print in under a second and then spin
+/// forever (looping `CVDisplayLinkCreateWithCGDisplay failed` on stderr), so
+/// a finished file that has stopped growing is success even while the browser
+/// is still running — and the group is killed on the way out either way.
+fn wait_for_pdf(
     child: &mut std::process::Child,
     converter: &Converter,
-) -> Result<std::process::ExitStatus, ExportError> {
+    printed: &Path,
+    log: &Path,
+) -> Result<(), ExportError> {
     let started = Instant::now();
+    let mut settled: Option<(u64, Instant)> = None;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) if started.elapsed() < CONVERT_TIMEOUT => {
-                std::thread::sleep(Duration::from_millis(50));
+            // It exited on its own: the file is the only honest signal, since
+            // Chrome exits 0 after printing its own error page.
+            Ok(Some(status)) => {
+                return if status.success() && printed.exists() {
+                    Ok(())
+                } else {
+                    Err(ExportError(format!(
+                        "{}: {}",
+                        converter.name(),
+                        first_complaint(log)
+                    )))
+                };
             }
-            Ok(None) => {
-                kill_group(child);
-                return Err(ExportError(format!(
-                    "{} took longer than {}s",
-                    converter.name(),
-                    CONVERT_TIMEOUT.as_secs()
-                )));
-            }
+            Ok(None) => {}
             Err(e) => {
                 kill_group(child);
                 return Err(ExportError(format!("{}: {e}", converter.name())));
             }
         }
+        if let Ok(size) = std::fs::metadata(printed).map(|m| m.len())
+            && size > 0
+        {
+            match settled {
+                Some((seen, at)) if seen == size => {
+                    if at.elapsed() >= SETTLE {
+                        kill_group(child);
+                        return Ok(());
+                    }
+                }
+                _ => settled = Some((size, Instant::now())),
+            }
+        }
+        if started.elapsed() >= CONVERT_TIMEOUT {
+            kill_group(child);
+            return Err(ExportError(format!(
+                "{} took longer than {}s",
+                converter.name(),
+                CONVERT_TIMEOUT.as_secs()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// How long the PDF has to stop growing before a converter that has not
+/// exited is taken at its word.
+const SETTLE: Duration = Duration::from_millis(400);
 
 fn kill_group(child: &mut std::process::Child) {
     // The whole group, not just the one process: a browser leaves helpers
