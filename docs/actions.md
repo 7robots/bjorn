@@ -138,6 +138,16 @@ the page directly; headless Chrome is already on most Macs and renders the CSS
 the way the browser you preview in does. Attachments are embedded in the HTML
 as `data:` URIs, so the PDF carries the note's images either way.
 
+What comes across: Bear's colored highlights (it writes the color as a
+circle at the front of the run, which becomes the highlight's color rather
+than a character in it), its `> [!NOTE]` callouts as panels, note links
+(`[[Another note]]`) as the target in the accent color, ticked tasks grayed
+out, tables, code, quotes with the accent bar, and images, which are embedded
+in the HTML as `data:` URIs. Two things do not: `$math$`, which needs a math
+engine Bjorn does not carry, and the icon Bear draws inside a callout. And
+WeasyPrint paints form controls itself, so a ticked task's box is its own
+square there, where Chrome draws Bear's rounded one.
+
 Three details in those commands are load-bearing:
 
 - **The name comes from the file, not the title.** `$BJORN_NOTE_TITLE` is the

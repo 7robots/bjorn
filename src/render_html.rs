@@ -91,26 +91,60 @@ pub fn stylesheet(theme: &Theme) -> String {
     format!(
         r#":root {{ color-scheme: light dark; --accent: {on_light}; --bullet: {bullet_light}; }}
 body {{ max-width: 44em; margin: 2em auto; padding: 0 1.5em; font: 16px/1.55 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; color: #222; background: #fff; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --accent: {on_dark}; --bullet: {bullet_dark}; }} body {{ color: #ddd; background: #1e1e1e; }} mark {{ background: #6b5b00; color: inherit; }} pre, code {{ background: #2a2a2a; }} th, td {{ border-color: #444; }} blockquote {{ border-color: #444; color: #aaa; }} .tag {{ background: #3a3a3a; color: #ccc; }} }}
-h1, h2, h3, h4 {{ line-height: 1.25; margin: 1.4em 0 0.5em; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --accent: {on_dark}; --bullet: {bullet_dark}; }} body {{ color: #ddd; background: #1e1e1e; }} mark {{ background: #6b5b00; color: inherit; }} pre, code {{ background: #2a2a2a; }} th, td {{ border-color: #444; }} th {{ background: #2a2a2a; }} .tag {{ background: #3a3a3a; color: #ccc; }} }}
+h1, h2, h3, h4, h5, h6 {{ line-height: 1.25; margin: 1.4em 0 0.5em; }}
 h1 {{ font-size: 1.8em; margin-top: 0; }}
+h2 {{ font-size: 1.4em; }}
+h3 {{ font-size: 1.15em; }}
+/* Bear sets h4 to h6 at body size, bold; browsers shrink h5 and h6 below it. */
+h4, h5, h6 {{ font-size: 1em; }}
 a {{ color: var(--accent); text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
-mark {{ background: #fde68a; padding: 0 0.15em; border-radius: 2px; }}
+/* A note link, `[[Another note]]`: Bear shows the target, colored, not brackets. */
+.note-link {{ color: var(--accent); }}
+u {{ text-decoration-color: var(--bullet); }}
+del {{ color: #888; }}
+/* Bear's highlighter palette, from its own theme files: a color Bear writes
+   as an emoji at the front of the run, and the ink it puts on each. */
+mark {{ padding: 0 0.15em; border-radius: 2px; background: #d3ffa4; color: #1a3200; }}
+mark.red {{ background: #ffd5d5; color: #321a00; }}
+mark.green {{ background: #cdf7bd; color: #102d05; }}
+mark.blue {{ background: #c9e5ff; color: #001a32; }}
+mark.yellow {{ background: #fcf195; color: #312c01; }}
+mark.purple {{ background: #fedaff; color: #310032; }}
 pre, code {{ font: 0.92em/1.45 ui-monospace, "SF Mono", Menlo, monospace; background: #f4f4f4; border-radius: 4px; }}
 code {{ padding: 0.1em 0.3em; }}
 pre {{ padding: 0.8em 1em; overflow-x: auto; }}
 pre code {{ padding: 0; background: none; }}
-blockquote {{ margin: 1em 0; padding: 0 1em; border-left: 3px solid #ddd; color: #666; }}
+blockquote {{ margin: 1em 0; padding: 0 1em; border-left: 3px solid var(--bullet); }}
+/* `> [!NOTE]` and its four siblings: Bear's panels, a bar and a tint each. The
+   ink is set here because the tint stays light on a dark page. */
+.callout {{ margin: 1em 0; padding: 0.7em 1em; border-left: 4px solid; border-radius: 4px; color: #1a1a1a; }}
+.callout > :first-child {{ margin-top: 0; }}
+.callout > p:first-child {{ font-weight: 600; }}
+.callout > :last-child {{ margin-bottom: 0; }}
+.callout.note {{ border-color: #3b78b1; background: #f6fbff; }}
+.callout.tip {{ border-color: #5bb13a; background: #f7fdf5; }}
+.callout.important {{ border-color: #af3db2; background: #fef9ff; }}
+.callout.warning {{ border-color: #fabd05; background: #fefcef; }}
+.callout.caution {{ border-color: #ff8500; background: #fef7f0; }}
 table {{ border-collapse: collapse; margin: 1em 0; }}
 th, td {{ border: 1px solid #ddd; padding: 0.35em 0.7em; text-align: left; }}
+th {{ background: #f7f7f9; }}
 img {{ max-width: 100%; height: auto; }}
 ul, ol {{ padding-left: 1.5em; }}
+/* Bear alternates filled and hollow markers by depth; browsers reach a square. */
+ul {{ list-style: disc; }}
+ul ul, ul ul ul ul, ul ul ul ul ul ul, ul ul ul ul ul ul ul ul {{ list-style: circle; }}
+ul ul ul, ul ul ul ul ul, ul ul ul ul ul ul ul {{ list-style: disc; }}
 li {{ margin: 0.15em 0; }}
 li::marker {{ color: var(--bullet); }}
 li.task::marker {{ color: transparent; }}
-/* display: some converters lay a bare checkbox out as a block, which drops the task text onto its own line. */
-input[type=checkbox] {{ display: inline-block; margin: 0 0.4em 0 0; vertical-align: -0.1em; }}
+/* A ticked task is grayed out in Bear, box and words together. */
+li.task.done {{ color: #999; }}
+/* display: some converters lay a bare checkbox out as a block, which drops the task's text onto its own line. */
+input[type=checkbox] {{ appearance: none; -webkit-appearance: none; display: inline-block; width: 0.95em; height: 0.95em; margin: 0 0.4em 0 0; vertical-align: -0.15em; border: 1.5px solid #c3c3c7; border-radius: 4px; background: transparent; }}
+input[type=checkbox]:checked {{ background: #ececec url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-6' fill='none' stroke='%23999' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/0.8em no-repeat; }}
 .tags {{ margin: -0.5em 0 1.5em; }}
 .tag {{ display: inline-block; background: #eee; color: #555; border-radius: 1em; padding: 0.05em 0.7em; margin-right: 0.3em; font-size: 0.85em; }}
 hr {{ border: 0; border-top: 1px solid #ddd; margin: 2em 0; }}
@@ -123,17 +157,17 @@ hr {{ border: 0; border-top: 1px solid #ddd; margin: 2em 0; }}
   mark {{ background: #fde68a; color: #1a1a1a; }}
   pre, code {{ background: #f5f5f5; color: #1a1a1a; }}
   pre {{ white-space: pre-wrap; }}
-  blockquote {{ border-color: #e0e0e0; color: #555; }}
   th, td {{ border-color: #e0e0e0; }}
   .tag {{ background: #ececec; color: #6b6b6b; }}
   /* A quote or a code block longer than the page has to be allowed to split. */
-  li, tr, img {{ break-inside: avoid; }}
+  li, tr, img, .callout {{ break-inside: avoid; }}
   /* The pills, the highlights and the code ground are the note, not decoration. */
-  mark, .tag, pre, code {{ print-color-adjust: exact; -webkit-print-color-adjust: exact; }}
+  mark, .tag, pre, code, th, .callout, input[type=checkbox] {{ print-color-adjust: exact; -webkit-print-color-adjust: exact; }}
 }}"#
     )
 }
 
+static NOTE_LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]\n]+)\]\]").unwrap());
 static LI_TASK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"<li>\s*(<p>)?\s*(<input type="checkbox"[^>]*>)"#).unwrap());
 
@@ -177,11 +211,51 @@ fn task_inputs(line: &str) -> String {
         .into_owned()
 }
 
+/// Bear writes a highlight's color as a colored circle at the front of the
+/// run: `==🟢green==`. The emoji is the color, not text, so it comes out of
+/// the words and goes into a class. An unknown leading emoji is left alone and
+/// the highlight takes Bear's default.
+fn highlight_color(text: &str) -> (&'static str, &str) {
+    for (emoji, name) in [
+        ("🔴", "red"),
+        ("🟢", "green"),
+        ("🔵", "blue"),
+        ("🟡", "yellow"),
+        ("🟣", "purple"),
+    ] {
+        if let Some(rest) = text.strip_prefix(emoji) {
+            return (name, rest.trim_start());
+        }
+    }
+    ("default", text)
+}
+
+/// The five callouts Bear draws as a panel, by the marker that opens one.
+const CALLOUTS: [&str; 5] = ["note", "tip", "important", "warning", "caution"];
+
+/// `> [!NOTE] …` and the quote lines under it. `None` when the line opens no
+/// callout.
+fn callout_kind(line: &str) -> Option<&'static str> {
+    let rest = line.trim_start().strip_prefix('>')?.trim_start();
+    let marker = rest.strip_prefix("[!")?;
+    let end = marker.find(']')?;
+    let name = marker[..end].to_ascii_lowercase();
+    CALLOUTS.iter().copied().find(|k| *k == name)
+}
+
+/// The text of a quote line, without its `>`.
+fn unquote(line: &str) -> &str {
+    let rest = line.trim_start().strip_prefix('>').unwrap_or(line);
+    rest.strip_prefix(' ').unwrap_or(rest)
+}
+
 /// Bear markdown -> markdown with inline HTML for Bear's own marks.
 pub fn prepare(content: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut in_fence = false;
-    for line in content.lines() {
+    let mut in_callout = false;
+    let lines: Vec<&str> = content.lines().collect();
+    for line in lines {
         if is_fence(line) {
             in_fence = !in_fence;
             out.push(line.to_string());
@@ -189,6 +263,35 @@ pub fn prepare(content: &str) -> String {
         }
         if in_fence {
             out.push(line.to_string());
+            continue;
+        }
+        // A callout runs to the first line that is not a quote line; a plain
+        // quote under one is part of it, the way Bear keeps the panel open.
+        if in_callout && !line.trim_start().starts_with('>') {
+            out.push("</div>".to_string());
+            out.push(String::new());
+            in_callout = false;
+        }
+        if let Some(kind) = callout_kind(line) {
+            if in_callout {
+                out.push("</div>".to_string());
+                out.push(String::new());
+            }
+            // The blank line ends the HTML block, so what follows is still
+            // markdown; the closing div is a block of its own.
+            out.push(format!("<div class=\"callout {kind}\">"));
+            out.push(String::new());
+            in_callout = true;
+            let rest = unquote(line);
+            let text = rest[rest.find(']').map(|at| at + 1).unwrap_or(0)..].trim_start();
+            if text.is_empty() {
+                continue;
+            }
+            out.push(inline(text));
+            continue;
+        }
+        if in_callout {
+            out.push(inline(unquote(line)));
             continue;
         }
         if is_tag_line(line) {
@@ -202,12 +305,28 @@ pub fn prepare(content: &str) -> String {
             out.push(String::new());
             continue;
         }
-        let line = task_inputs(line);
-        let line = HIGHLIGHT_RE.replace_all(&line, "<mark>$1</mark>");
-        let line = UNDERLINE_RE.replace_all(&line, "<u>$1</u>");
-        out.push(line.into_owned());
+        out.push(inline(line));
+    }
+    if in_callout {
+        out.push("</div>".to_string());
     }
     format!("{}\n", out.join("\n"))
+}
+
+/// One line's Bear marks: task boxes, highlights, underline and the note
+/// links Bear writes as `[[Another note]]`.
+fn inline(line: &str) -> String {
+    let line = task_inputs(line);
+    let line = HIGHLIGHT_RE.replace_all(&line, |caps: &fancy_regex::Captures<'_, str>| {
+        let (color, text) = highlight_color(&caps[1]);
+        format!("<mark class=\"{color}\">{text}</mark>")
+    });
+    let line = UNDERLINE_RE.replace_all(&line, "<u>$1</u>");
+    NOTE_LINK_RE
+        .replace_all(&line, |caps: &regex::Captures| {
+            format!("<span class=\"note-link\">{}</span>", escape(&caps[1]))
+        })
+        .into_owned()
 }
 
 pub fn mime_type(filename: &str) -> &'static str {
@@ -276,7 +395,19 @@ pub fn render_body(
     let mut body = String::new();
     pulldown_cmark::html::push_html(&mut body, events);
     LI_TASK_RE
-        .replace_all(&body, "<li class=\"task\">$1$2")
+        .replace_all(&body, |caps: &regex::Captures| {
+            // Bear grays a ticked task out; the class is what carries that.
+            let done = if caps[2].contains("checked") {
+                " done"
+            } else {
+                ""
+            };
+            format!(
+                "<li class=\"task{done}\">{}{}",
+                caps.get(1).map(|m| m.as_str()).unwrap_or(""),
+                &caps[2]
+            )
+        })
         .into_owned()
 }
 
@@ -315,7 +446,7 @@ See [REV](https://www.revrobotics.com) and ![the frame](Front%20bed.png).\n";
     fn prepare_turns_bear_marks_into_inline_html_outside_fences() {
         let out = prepare(NOTE);
         assert!(out.contains("<p class=\"tags\"><span class=\"tag\">#garden/greenhouse</span><span class=\"tag\">#multi word#</span></p>"));
-        assert!(out.contains("<mark>ridge</mark>") && out.contains("<u>12'</u>"));
+        assert!(out.contains("<mark class=\"default\">ridge</mark>") && out.contains("<u>12'</u>"));
         assert!(out.contains("- <input type=\"checkbox\" disabled> hang the door"));
         assert!(out.contains("- <input type=\"checkbox\" disabled checked> level the footings"));
         assert!(
@@ -399,6 +530,87 @@ See [REV](https://www.revrobotics.com) and ![the frame](Front%20bed.png).\n";
     }
 
     #[test]
+    fn a_highlight_takes_its_color_from_the_circle_bear_writes() {
+        let body = render_body(
+            "==🟢green== ==🔵blue== ==plain==\n",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            body.contains("<mark class=\"green\">green</mark>"),
+            "{body}"
+        );
+        assert!(body.contains("<mark class=\"blue\">blue</mark>"), "{body}");
+        assert!(
+            body.contains("<mark class=\"default\">plain</mark>"),
+            "no circle, Bear's own color\n{body}"
+        );
+        // The trailing space is Bear's own rule: it makes the run no highlight
+        // at all, circle and all.
+        let loose = render_body("==🔴red ==\n", &HashMap::new(), &HashMap::new());
+        assert!(!loose.contains("<mark"), "{loose}");
+    }
+
+    #[test]
+    fn a_callout_becomes_a_panel_with_its_markdown_intact() {
+        let body = render_body(
+            "> [!NOTE] Mind the **gap**\n> and the second line\n\nafter\n",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(body.contains("<div class=\"callout note\">"), "{body}");
+        assert!(
+            body.contains("<strong>gap</strong>"),
+            "the panel holds markdown, not raw text\n{body}"
+        );
+        assert!(body.contains("and the second line"), "{body}");
+        assert!(body.contains("</div>"), "{body}");
+        assert!(
+            body.contains("<p>after</p>"),
+            "the panel closes at the first line that is not a quote\n{body}"
+        );
+        for kind in ["tip", "important", "warning", "caution"] {
+            let marker = kind.to_uppercase();
+            let body = render_body(
+                &format!("> [!{marker}] hi\n"),
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            assert!(
+                body.contains(&format!("class=\"callout {kind}\"")),
+                "{body}"
+            );
+        }
+        // An ordinary quote is still an ordinary quote.
+        let quote = render_body("> just a quote\n", &HashMap::new(), &HashMap::new());
+        assert!(
+            quote.contains("<blockquote>") && !quote.contains("callout"),
+            "{quote}"
+        );
+        // And one Bear does not know stays as it was written.
+        let unknown = render_body("> [!SIDEBAR] hm\n", &HashMap::new(), &HashMap::new());
+        assert!(
+            unknown.contains("<blockquote>") && unknown.contains("[!SIDEBAR]"),
+            "{unknown}"
+        );
+    }
+
+    #[test]
+    fn a_note_link_loses_its_brackets_and_keeps_its_target() {
+        let body = render_body(
+            "See [[Feb 19, 2021 (Friday)/Meeting]] today\n",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            body.contains("<span class=\"note-link\">Feb 19, 2021 (Friday)/Meeting</span>"),
+            "{body}"
+        );
+        let fenced = prepare("```\n[[not a link]]\n```\n");
+        assert!(fenced.contains("[[not a link]]"), "{fenced}");
+    }
+
+    #[test]
     fn a_task_keeps_its_box_and_loses_its_bullet_loose_or_tight() {
         let tight = render_body("- [ ] one\n- [x] two\n", &HashMap::new(), &HashMap::new());
         let loose = render_body("- [ ] one\n\n- [x] two\n", &HashMap::new(), &HashMap::new());
@@ -406,9 +618,14 @@ See [REV](https://www.revrobotics.com) and ![the frame](Front%20bed.png).\n";
             // A loose list wraps each item in a paragraph; the marker is
             // hidden by the class, so it has to survive that wrapping.
             assert_eq!(
-                body.matches("<li class=\"task\">").count(),
+                body.matches("<li class=\"task").count(),
                 2,
                 "{shape}\n{body}"
+            );
+            assert_eq!(
+                body.matches("<li class=\"task done\">").count(),
+                1,
+                "a ticked task is grayed out by its class\n{shape}\n{body}"
             );
             assert_eq!(
                 body.matches("<input type=\"checkbox\"").count(),
