@@ -92,7 +92,7 @@ in Bear.app at that section, `/` filters, `r` reloads, `esc` or `q` closes.
 With `[reminders] enabled = true` and [remctl](https://github.com/7robots/remctl)
 on your PATH, `a` also pushes marked items to Apple Reminders. Each reminder's
 notes carry the note's `bear://` link and a `bear-todo: <key>` line (the same
-scheme remtui uses, so reminders it created are recognised); on every load
+scheme remtui uses, so reminders it created are recognized); on every load
 they are read back and rows show ⏰ for an open reminder or ✓ for one you
 completed in Reminders, ready to `x` in Bear. Nothing is written into Bear when
 a reminder is added.
@@ -169,8 +169,8 @@ bjorn --theme nord
 
 They are generated from the theme files inside Bear.app by
 `tools/bear_theme.py`, which maps Bear's keys onto the app's palette fields
-(page, sidebar, headers, cursor, links, code, tags). The toast colours come
-from the palette a theme is named after, or from Bear's highlighter colours
+(page, sidebar, headers, cursor, links, code, tags). The toast colors come
+from the palette a theme is named after, or from Bear's highlighter colors
 for Bear's own designs; text over the accent is chosen for contrast. When a
 Bear update adds a theme, `python3 tools/bear_theme.py > src/ui/palettes.rs`
 picks it up. `?` inside the app lists the names and marks the one in use.

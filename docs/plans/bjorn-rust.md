@@ -45,7 +45,7 @@ untouched. Phase numbers continue from bjorn's last (21).
 - **Runtime shape.** Single UI task owns `App` state and draws each frame from
   it. Bearcli work runs in tokio tasks and reports back on one `mpsc` channel as
   `Msg` values tagged with a generation number; stale results are dropped, never
-  cancelled mid-render. The Python idioms that survive: `_load_gen`, the
+  canceled mid-render. The Python idioms that survive: `_load_gen`, the
   content cache (64 entries, epoch counter), the busy flag pausing the poll,
   `PREVIEW_DEBOUNCE` 120 ms. Modals are an `Overlay` enum on the state, and
   multi-step flows (new note → create → editor; export → format → path → write)
