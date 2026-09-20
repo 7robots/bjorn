@@ -30,9 +30,11 @@ plan lives in `docs/plans/bjorn-rust.md`.
   the HTML rendering is handed to a converter the user already has, WeasyPrint
   or Chrome, the way RTF is handed to `textutil`. macOS ships neither (its own
   `cupsfilter` refuses HTML), so a machine without one gets a plain error
-  naming both rather than a format that fails blankly. Chrome is given a
-  throwaway profile and no network, because a converter renders whatever
-  inline HTML a note happens to carry.
+  naming both rather than a format that fails blankly. A browser is given a
+  throwaway profile, no scripting and no network, because a converter renders
+  whatever inline HTML a note happens to carry; WeasyPrint runs no scripts but
+  still fetches what a page points at, remote or local, and has no flag to
+  stop it — worth knowing before printing a note you did not write.
 
 - Actions: `[[actions]]` in the config, `!` for the default one and `a` for a
   searchable palette. The note is rendered through the exporter, handed to a

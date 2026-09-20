@@ -66,7 +66,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("b", "open the note in Bear.app"),
             (
                 "x",
-                "export as Markdown, HTML, plain text, RTF or TextBundle; ← → pick, export_format in the config sets the default",
+                "export as Markdown, HTML, plain text, RTF, TextBundle or PDF; ← → pick, export_format in the config sets the default",
             ),
         ],
     ),

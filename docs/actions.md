@@ -82,7 +82,7 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 | `command` | — | required; run through `sh -c`, so pipes, `&&` and redirection all work |
 | `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`, `pdf`. An unknown name falls back to `md` |
 | `confirm` | `false` | ask before running. Worth setting on anything that publishes or deletes |
-| `timeout` | `60` | seconds; a command that overruns is killed and reported |
+| `timeout` | `60` | seconds; a command that overruns is killed and reported. It covers the command, not the rendering before it: `format = "pdf"` gives the converter up to 60s of its own first |
 | `default` | `false` | the action `!` runs. With exactly one action configured, that one is the default whether or not it says so |
 
 An entry without a `command` is skipped rather than raised, so a half-written
@@ -96,7 +96,8 @@ after the note (`Sprint Planning.md`), and it is deleted as soon as the command
 ends.
 
 - **stdin** — the note's text in the chosen format. A TextBundle is a folder, so
-  stdin gets its `text.md`.
+  stdin gets its `text.md`; `pdf` puts the PDF's own bytes there, which a
+  command that expects text should not read.
 - `BJORN_NOTE_FILE` — the full path to that file. Quote it; titles have spaces.
 - `BJORN_NOTE_TITLE`, `BJORN_NOTE_ID`, `BJORN_NOTE_TAGS` (comma-separated),
   `BJORN_NOTE_CREATED`, `BJORN_NOTE_MODIFIED` (RFC 3339), `BJORN_NOTE_PINNED`

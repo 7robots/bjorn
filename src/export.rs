@@ -6,7 +6,7 @@
 //! app's job.
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -256,25 +256,31 @@ pub fn export_rtf(
 /// that asks for a tool of your own, the way RTF asks for `textutil`.
 #[derive(Debug, Clone)]
 pub enum Converter {
-    /// `weasyprint in.html out.pdf`: no browser, no scripts, no network fetch
-    /// beyond what the page points at.
+    /// `weasyprint in.html out.pdf`: no browser and no scripts.
     WeasyPrint(PathBuf),
-    /// Chrome's own printer, in a throwaway profile with nowhere to go.
+    /// A Chromium browser's own printer, run headless.
     Chrome(PathBuf),
 }
 
-/// Where a browser hides on macOS, for the ones that are app bundles rather
-/// than something on `PATH`.
-const CHROME_BUNDLES: [&str; 4] = [
+/// Chromium browsers that are app bundles rather than something on `PATH`.
+/// They all print the same way; a user who has Brave and no Chrome should not
+/// be told to install one.
+const CHROME_BUNDLES: [&str; 10] = [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
     "~/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "~/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "~/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+    "~/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
 ];
 
 impl Converter {
-    /// The first converter this machine has, WeasyPrint before Chrome: it is
-    /// the quieter of the two and runs no scripts at all.
+    /// The first converter this machine has, WeasyPrint before a browser: it
+    /// is the quieter of the two and runs no scripts at all.
     pub fn find() -> Option<Self> {
         if let Some(path) = crate::util::which("weasyprint") {
             return Some(Converter::WeasyPrint(path));
@@ -302,20 +308,26 @@ impl Converter {
         match self {
             Converter::WeasyPrint(bin) => {
                 let mut command = Command::new(bin);
-                command.arg(source).arg(destination);
+                // `--` first: a destination the user typed can start with a
+                // dash, and argparse would read it as an option.
+                command.arg("--").arg(source).arg(destination);
                 command
             }
             Converter::Chrome(bin) => {
                 let mut command = Command::new(bin);
                 command
-                    .arg("--headless=new")
+                    .arg("--headless")
                     // Its own profile: the render never sees your cookies, and
                     // the print does not fail because Chrome is already open.
                     .arg(format!("--user-data-dir={}", profile.display()))
-                    // A note can carry inline HTML and Chrome renders it, so it
-                    // is given nowhere to send anything: no hostname resolves,
-                    // and a bare IP address — which never reaches the resolver
-                    // — meets a dead proxy.
+                    // A note can carry inline HTML and a browser renders it, so
+                    // this one is given nothing to run and nowhere to send
+                    // anything: no hostname resolves, and a bare IP address —
+                    // which never reaches the resolver — meets a dead proxy.
+                    // (`--blink-settings=scriptEnabled=false` would be tidier,
+                    // but it breaks --print-to-pdf outright: empty file, and
+                    // the exit code still says 0.)
+                    .arg("--disable-javascript")
                     .arg("--host-resolver-rules=MAP * ~NOTFOUND")
                     .arg("--proxy-server=127.0.0.1:1")
                     .arg("--proxy-bypass-list=<-loopback>")
@@ -329,12 +341,19 @@ impl Converter {
     }
 }
 
-/// How long a converter gets before it is killed. Chrome has been known to sit
-/// there; the export runs off the UI thread, but not forever.
-const CONVERT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a converter gets before it is killed. Short on purpose: the export
+/// runs off the UI thread, but quitting Bjorn waits for it, so a wedged
+/// browser must not hold the terminal for long.
+const CONVERT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The HTML rendering, printed. The page carries a print stylesheet — A4, a
-/// light page whatever the theme — so the result reads like Bear's own PDF.
+/// Bear prints a note on A4. WeasyPrint agrees; Chrome would use US Letter,
+/// so the page is named here rather than left to whichever tool is installed.
+/// The screen's own column and margins go with it.
+const PRINT_PAGE: &str = "<style>@page { size: A4; margin: 18mm 16mm; }\n\
+     @media print { body { max-width: none; margin: 0; padding: 0; color: #1a1a1a; background: #fff; } }\n\
+     </style>\n</head>";
+
+/// The HTML rendering, printed by whichever converter the machine has.
 pub fn export_pdf(
     content: &str,
     title: &str,
@@ -351,57 +370,105 @@ pub fn export_pdf(
         .prefix("bjorn-pdf-")
         .tempdir()
         .map_err(|e| ExportError(e.to_string()))?;
-    // A plain name: `#` and `%` are legal in a note's title and mean something
-    // else inside the `file://` URL Chrome is handed.
+    // Plain names inside the temp directory: `#` and `%` are legal in a note's
+    // title and mean something else inside the `file://` URL Chrome is handed.
+    // The PDF is written here too, and moved into place only once it is whole,
+    // so a failure never leaves a stub where the note should be.
     let source = tmp.path().join("note.html");
-    write(
-        &source,
-        &render_html::render(content, title, images, &HashMap::new()),
-    )?;
-    let profile = tmp.path().join("profile");
-    let mut child = converter
-        .command(&source, &destination, &profile)
+    let printed = tmp.path().join("note.pdf");
+    let html = render_html::render(content, title, images, &HashMap::new());
+    write(&source, &html.replacen("</head>", PRINT_PAGE, 1))?;
+    let log = tmp.path().join("converter.log");
+    let mut command = converter.command(&source, &printed, &tmp.path().join("profile"));
+    let mut child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        // To a file, not a pipe: a converter that outruns the pipe buffer
+        // while nothing is reading it would block there until the timeout.
+        .stderr(std::fs::File::create(&log).map_err(|e| ExportError(e.to_string()))?)
+        .process_group(0)
         .spawn()
         .map_err(|e| ExportError(format!("{}: {e}", converter.name())))?;
+    let status = wait_for(&mut child, &converter)?;
+    // Chrome exits 0 after printing its own error page, so the file has to be
+    // there as well, as it does for textutil.
+    if !status.success() || !printed.exists() {
+        return Err(ExportError(format!(
+            "{}: {}",
+            converter.name(),
+            first_complaint(&log)
+        )));
+    }
+    // Across devices a rename fails, so fall back to a copy.
+    if std::fs::rename(&printed, &destination).is_err() {
+        std::fs::copy(&printed, &destination)
+            .map_err(|e| ExportError(format!("{}: {e}", destination.display())))?;
+    }
+    Ok(destination)
+}
+
+/// Wait for `child`, killing its whole process group if it overruns: a browser
+/// leaves helpers behind, and the profile they are writing to is about to go.
+fn wait_for(
+    child: &mut std::process::Child,
+    converter: &Converter,
+) -> Result<std::process::ExitStatus, ExportError> {
     let started = Instant::now();
-    let status = loop {
+    loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => return Ok(status),
             Ok(None) if started.elapsed() < CONVERT_TIMEOUT => {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_group(child);
                 return Err(ExportError(format!(
                     "{} took longer than {}s",
                     converter.name(),
                     CONVERT_TIMEOUT.as_secs()
                 )));
             }
-            Err(e) => return Err(ExportError(format!("{}: {e}", converter.name()))),
+            Err(e) => {
+                kill_group(child);
+                return Err(ExportError(format!("{}: {e}", converter.name())));
+            }
         }
-    };
-    // Chrome exits 0 after printing its own error page, so the file is the
-    // only honest signal, as it is for textutil.
-    let wrote = std::fs::metadata(&destination)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false);
-    if !status.success() || !wrote {
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
-        }
-        let first = stderr
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty() && !l.contains("ERROR:"))
-            .unwrap_or("it wrote nothing");
-        return Err(ExportError(format!("{}: {first}", converter.name())));
     }
-    Ok(destination)
+}
+
+fn kill_group(child: &mut std::process::Child) {
+    // The whole group, not just the one process: a browser leaves helpers
+    // behind, and they are still writing to a profile that is about to be
+    // deleted. `process_group(0)` made the child its own leader, so the
+    // negative pid names them all. `/bin/kill` rather than a `libc`
+    // dependency for the one call.
+    let _ = Command::new("/bin/kill")
+        .arg("-KILL")
+        .arg(format!("-{}", child.id()))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The line of a converter's log that says what went wrong. Chrome writes a
+/// `ERROR:` line about the display link on every run, headless or not, so a
+/// line without that prefix is preferred — but a run whose only output is
+/// those lines still has to report one of them rather than nothing.
+fn first_complaint(log: &Path) -> String {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines
+        .iter()
+        .find(|l| !l.contains("ERROR:"))
+        .or_else(|| lines.first())
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| "it wrote nothing".to_string())
 }
 
 /// Percent-encode a filename the way Bear writes attachment links.
@@ -520,7 +587,7 @@ mod tests {
                 let message = result.expect_err("no converter, no PDF").0;
                 assert!(message.contains("weasyprint"), "{message}");
                 assert!(message.contains("Chrome"), "{message}");
-                assert!(!target.exists(), "nothing half-written");
+                assert!(!target.exists(), "it says so before it writes anything");
             }
             Some(converter) => {
                 let written = result.unwrap_or_else(|e| panic!("{converter:?}: {}", e.0));

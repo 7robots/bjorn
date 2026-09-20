@@ -669,7 +669,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             frame.render_widget(Paragraph::new(lines), inner);
         }
         Overlay::Format { index, .. } => {
-            let inner = dialog(frame, area, 70, 7, None);
+            let inner = dialog(frame, area, 80, 7, None);
             let mut choices: Vec<Span<'static>> = vec![Span::raw("  ")];
             for (i, fmt) in FORMATS.iter().enumerate() {
                 if i > 0 {
