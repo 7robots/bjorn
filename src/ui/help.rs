@@ -57,6 +57,14 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("n", "new note (title, tags), then edit"),
             (
+                "N",
+                "new note from a template in the templates dir ([templates] dir, default ~/.config/bjorn/templates): pick one, then title and tags",
+            ),
+            (
+                "D",
+                "today's daily note, made from the daily template the first time; bjorn capture -- \"text\" adds to it from the shell",
+            ),
+            (
                 "e",
                 "edit in $VISUAL / $EDITOR. Hash-guarded: if the note changed in Bear meanwhile, nothing is written and your version is kept in a temp file",
             ),

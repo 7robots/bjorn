@@ -26,6 +26,12 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
+- Work notes: `D` opens today's daily note (title, dated tag and template
+  from `[daily]`, found or made with `create --if-not-exists`), `N` makes a
+  note from a template in `~/.config/bjorn/templates/` with `{{date}}`-style
+  placeholders, and `bjorn capture` / `bjorn today` reach the daily note from
+  the shell. Example templates ship in `config/templates/`.
+
 - Actions: `[[actions]]` in the config, `!` for the default one and `a` for a
   searchable palette. The note is rendered through the exporter, handed to a
   shell command as a temp file and on stdin, and the command's first line comes

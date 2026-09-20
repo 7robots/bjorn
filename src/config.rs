@@ -70,6 +70,41 @@ impl Default for RemindersConfig {
     }
 }
 
+/// `[daily]`: the note `D` opens and `bjorn capture` writes to. `title` and
+/// `tag` are strftime formats for the day; `template` names a file in the
+/// templates directory (`daily` falls back to the built-in layout when there
+/// is no `daily.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DailyConfig {
+    pub title: String,
+    pub tag: String,
+    pub template: String,
+    /// A heading line (`## Inbox`) for `bjorn capture` to add under, made at
+    /// the end of the note when missing; empty adds at the end of the note.
+    pub capture_section: String,
+    /// What one capture writes; `{{text}}` is what was captured.
+    pub capture_format: String,
+}
+
+pub const DEFAULT_DAILY_TEMPLATE: &str = "daily";
+
+impl Default for DailyConfig {
+    fn default() -> Self {
+        Self {
+            title: "%B %-d, %Y (%A)".into(),
+            tag: "log/%Y/%m/%d".into(),
+            template: DEFAULT_DAILY_TEMPLATE.into(),
+            capture_section: String::new(),
+            capture_format: "* {{time}} {{text}}".into(),
+        }
+    }
+}
+
+/// `[templates] dir`: where `N` and the daily note look for `*.md` templates.
+pub fn default_templates_dir() -> PathBuf {
+    config_dir().join("templates")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub editor: String,
@@ -89,6 +124,8 @@ pub struct Config {
     pub reminders: RemindersConfig,
     /// `[[actions]]` from the config file, in the order they are written.
     pub actions: Vec<Action>,
+    pub daily: DailyConfig,
+    pub templates_dir: PathBuf,
     pub path: Option<PathBuf>,
 }
 
@@ -107,6 +144,8 @@ impl Default for Config {
             mouse_pixels: true,
             reminders: RemindersConfig::default(),
             actions: Vec::new(),
+            daily: DailyConfig::default(),
+            templates_dir: default_templates_dir(),
             path: None,
         }
     }
@@ -207,6 +246,35 @@ impl Config {
             };
         }
         cfg.actions = parse_actions(data.get("actions"));
+        if let Some(Value::Table(section)) = data.get("daily") {
+            let defaults = DailyConfig::default();
+            // An empty title or template would make a note nobody can find
+            // again, so those fall back; an empty tag means no tag.
+            let or_default = |key: &str, default: &str| {
+                let value = text(section.get(key), "").trim().to_string();
+                if value.is_empty() {
+                    default.to_string()
+                } else {
+                    value
+                }
+            };
+            cfg.daily = DailyConfig {
+                title: or_default("title", &defaults.title),
+                tag: match section.get("tag") {
+                    None => defaults.tag,
+                    Some(value) => text(Some(value), "").trim().trim_matches('#').to_string(),
+                },
+                template: or_default("template", &defaults.template),
+                capture_section: text(section.get("capture_section"), "").trim().to_string(),
+                capture_format: or_default("capture_format", &defaults.capture_format),
+            };
+        }
+        if let Some(Value::Table(section)) = data.get("templates") {
+            let dir = text(section.get("dir"), "").trim().to_string();
+            if !dir.is_empty() {
+                cfg.templates_dir = expand_tilde(&dir);
+            }
+        }
         Ok(cfg)
     }
 }
@@ -420,6 +488,45 @@ mod tests {
                 .actions
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn daily_and_templates_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let defaults = Config::load(Some(&dir.path().join("nope.toml"))).unwrap();
+        assert_eq!(defaults.daily, DailyConfig::default());
+        assert_eq!(defaults.daily.title, "%B %-d, %Y (%A)");
+        assert_eq!(defaults.daily.tag, "log/%Y/%m/%d");
+        assert!(defaults.templates_dir.ends_with("bjorn/templates"));
+        let path = write(
+            &dir,
+            "[daily]\ntitle = \"%Y-%m-%d\"\ntag = \"#daily\"\ntemplate = \"\"\n\
+             capture_section = \" ## Inbox \"\ncapture_format = \"- {{text}}\"\n\
+             [templates]\ndir = \"~/tpl\"\n",
+        );
+        let cfg = Config::load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.daily,
+            DailyConfig {
+                title: "%Y-%m-%d".into(),
+                tag: "daily".into(),
+                template: "daily".into(),
+                capture_section: "## Inbox".into(),
+                capture_format: "- {{text}}".into(),
+            }
+        );
+        assert_eq!(cfg.templates_dir, home_dir().join("tpl"));
+        let path = write(&dir, "[daily]\ntag = \"\"\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().daily.tag, "");
+    }
+
+    /// `config/config.toml.example` shows the defaults; loading it must give
+    /// exactly what no config file gives.
+    #[test]
+    fn the_example_config_is_the_defaults() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example");
+        let cfg = Config::load(Some(&path)).unwrap();
+        assert_eq!(Config { path: None, ..cfg }, Config::default());
     }
 
     #[test]

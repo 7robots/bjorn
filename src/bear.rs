@@ -1018,14 +1018,43 @@ impl BearClient {
 
     /// Create a note and return its id.
     pub async fn create(&self, title: &str, tags: &[String], content: &str) -> Result<String> {
-        let mut args: Vec<String> = vec![
-            "create".into(),
-            title.into(),
-            "--format".into(),
-            "json".into(),
-            "--fields".into(),
-            "id".into(),
-        ];
+        self.create_note(title, tags, content, false)
+            .await
+            .map(|(id, _)| id)
+    }
+
+    /// `create --if-not-exists`: the id and location of the note titled
+    /// `title` (Bear matches titles case-insensitively), made from `content`
+    /// only when there is none. The match can be a note in the Trash or the
+    /// Archive, hence the location. Content whose first line Bear reads as
+    /// that title, a `## ` heading included, is kept as it is.
+    pub async fn create_if_missing(
+        &self,
+        title: &str,
+        tags: &[String],
+        content: &str,
+    ) -> Result<(String, Location)> {
+        self.create_note(title, tags, content, true).await
+    }
+
+    async fn create_note(
+        &self,
+        title: &str,
+        tags: &[String],
+        content: &str,
+        if_not_exists: bool,
+    ) -> Result<(String, Location)> {
+        // Options first, then `--`, then the title: a title that starts with a
+        // dash (`--tags=x`) is a title, not an option.
+        let mut args: Vec<String> = vec!["create".into()];
+        if if_not_exists {
+            args.push("--if-not-exists".into());
+        }
+        args.extend(
+            ["--format", "json", "--fields", "id,location"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
         let tag_list = tags
             .iter()
             .map(|t| normalize_tag(t))
@@ -1036,6 +1065,8 @@ impl BearClient {
             args.push("--tags".into());
             args.push(tag_list);
         }
+        args.push("--".into());
+        args.push(title.into());
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let payload = {
             let _guard = self.write_lock.lock().await;
@@ -1049,7 +1080,21 @@ impl BearClient {
         if !payload.is_object() || id.is_empty() {
             return Err(BearError::new("bearcli create returned no id"));
         }
-        Ok(id)
+        Ok((id, Location::parse(&text_of(payload.get("location")))))
+    }
+
+    /// Add `content` at the end of the note, or at the end of the section
+    /// whose heading line is `section`. Content goes on stdin, so nothing in
+    /// it is read as an escape.
+    pub async fn append(&self, note_id: &str, content: &str, section: &str) -> Result<()> {
+        let mut args: Vec<String> = vec!["append".into(), note_id.into()];
+        if !section.is_empty() {
+            args.push("--section".into());
+            args.push(escape_flag(section));
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _guard = self.write_lock.lock().await;
+        self.run(&refs, false, Some(content)).await.map(|_| ())
     }
 
     /// Replace a note's whole content, guarded by the hash from `cat`.

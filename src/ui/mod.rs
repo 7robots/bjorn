@@ -990,11 +990,20 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 _ => {}
             }
         }
-        Overlay::NewNote { title, tags, field } => {
+        Overlay::NewNote {
+            title,
+            tags,
+            field,
+            template,
+        } => {
             let inner = dialog(frame, area, 70, 10, None);
             let width = inner.width.saturating_sub(4) as usize;
+            let heading = match template {
+                Some(t) => format!("  New note from “{}”", fit_cells(&t.name, 40).trim_end()),
+                None => "  New note".to_string(),
+            };
             let lines = vec![
-                Line::from("  New note"),
+                Line::from(heading),
                 Line::from(""),
                 Line::from("  Title"),
                 field_line(title, *field == 0, width),
@@ -1013,6 +1022,104 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 (tags, inner.y + 5)
             };
             field_cursor(frame, active, inner.x + 2, y, width as u16);
+        }
+        Overlay::Templates {
+            field,
+            index,
+            templates,
+            skipped,
+        } => {
+            let matched = crate::ui::modals::filter_templates(templates, &field.value);
+            let wide = area.width.saturating_sub(8).clamp(60, 84);
+            let width = wide.min(area.width).saturating_sub(6) as usize;
+            let rows = matched.len().clamp(1, 10);
+            const PREVIEW: usize = 6;
+            let height = (2 + rows + 2 + PREVIEW + 2 + 2) as u16;
+            let title = format!(
+                "New note from a template · {}",
+                tilde_path(&app.config.templates_dir)
+            );
+            let inner = dialog(frame, area, wide, height, Some(&title));
+            let mut lines = Vec::new();
+            if field.value.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        fit_cells("type to filter templates by name…", width),
+                        theme::cursor_focused().add_modifier(Modifier::DIM),
+                    ),
+                ]));
+            } else {
+                lines.push(field_line(field, true, width));
+            }
+            lines.push(Line::from(""));
+            if templates.is_empty() {
+                let what = if *skipped > 0 {
+                    format!(
+                        "no usable templates ({skipped} skipped: too big, not UTF-8 or unreadable)"
+                    )
+                } else {
+                    "no templates".to_string()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("  {what} in {}", tilde_path(&app.config.templates_dir)),
+                    theme::muted(),
+                )));
+            } else if matched.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  no template matches",
+                    theme::muted(),
+                )));
+            }
+            let top = index.saturating_sub(rows - 1);
+            for (i, template) in matched.iter().enumerate().skip(top).take(rows) {
+                let selected = i == *index;
+                let style = if selected {
+                    theme::match_style()
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(if selected { "  ▸ " } else { "    " }, style),
+                    Span::styled(
+                        fit_cells(&template.name, width.saturating_sub(4))
+                            .trim_end()
+                            .to_string(),
+                        style.add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", "─".repeat(width)),
+                theme::border(),
+            )));
+            // The highlighted template's first lines, as written.
+            let preview: Vec<&str> = match matched.get(*index) {
+                Some(t) => t.body.lines().take(PREVIEW).collect(),
+                None if templates.is_empty() => vec![
+                    "Put Markdown files there, one per template; the shipped",
+                    "ones are in the repo's config/templates/ (meeting, 1:1,",
+                    "decision record, daily). {{date}}, {{time}}, {{title}},",
+                    "{{tag}}, {{workspace}} and {{date:%A}} are filled in.",
+                ],
+                None => Vec::new(),
+            };
+            for row in preview {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", fit_cells(row, width).trim_end()),
+                    theme::muted(),
+                )));
+            }
+            while lines.len() < (inner.height as usize).saturating_sub(1) {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                "  type to filter · ↑/↓ pick · enter uses it · esc closes",
+                theme::muted(),
+            )));
+            frame.render_widget(Paragraph::new(lines), inner);
+            field_cursor(frame, field, inner.x + 2, inner.y, width as u16);
         }
         Overlay::Help { scroll } => {
             let inner = dialog(

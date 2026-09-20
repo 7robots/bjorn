@@ -6,7 +6,8 @@
 //! (exit 1) when they fail. State lives in a JSON file at
 //! $BJORN_FAKE_BEAR_STATE (default ~/.cache/bjorn/demo-bear.json), seeded with
 //! sample notes on first run. Every `app open` call is appended to
-//! `<state>.opened` so tests can assert on it.
+//! `<state>.opened` so tests can assert on it, and $BJORN_FAKE_BEAR_FAIL_READ
+//! makes one read fail (see `run`).
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -329,11 +330,25 @@ fn parse_fields(spec: Option<&str>, default: &[&str], extra: &[&str]) -> Vec<Str
     out
 }
 
+/// A note by id (any location) or by title. Like bearcli, a title only finds
+/// notes in Notes: one in the Trash or the Archive needs its id, and
+/// `create --if-not-exists` makes a fresh note beside it.
 fn find_note(state: &State, note_id: Option<&str>, title: Option<&str>) -> Option<usize> {
     state.notes.iter().position(|n| {
         note_id.is_some_and(|id| n.id == id)
-            || title.is_some_and(|t| n.title.to_lowercase() == t.to_lowercase())
+            || title.is_some_and(|t| {
+                in_location(n, "notes") && n.title.to_lowercase() == t.to_lowercase()
+            })
     })
+}
+
+/// bearcli's message for a lookup that found nothing.
+fn not_found(target: &Target) -> &'static str {
+    if target.note_id.is_none() && target.title.is_some() {
+        "Note not found (in notes; use the note ID for trash/archive)"
+    } else {
+        "Note not found"
+    }
 }
 
 fn strip_tag(tag: &str) -> String {
@@ -523,7 +538,7 @@ enum Cmd {
         cmd: Option<TagsCmd>,
     },
     Create {
-        #[arg(allow_hyphen_values = true)]
+        /// Like bearcli, a title starting with `-` needs `--` before it.
         title: Option<String>,
         #[arg(short = 'c', long, allow_hyphen_values = true)]
         content: Option<String>,
@@ -559,6 +574,18 @@ enum Cmd {
         delete: bool,
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        no_update_modified: bool,
+    },
+    Append {
+        #[command(flatten)]
+        target: Target,
+        #[arg(short = 'c', long, allow_hyphen_values = true)]
+        content: Option<String>,
+        #[arg(long, default_value = "end", value_parser = ["beginning", "end"])]
+        position: String,
+        #[arg(long, allow_hyphen_values = true)]
+        section: Option<String>,
         #[arg(long)]
         no_update_modified: bool,
     },
@@ -773,7 +800,7 @@ fn cmd_search(
 
 fn cmd_cat(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
     let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
-        return Err(fail(ctx.fmt, "not_found", "Note not found"));
+        return Err(fail(ctx.fmt, "not_found", not_found(target)));
     };
     let note = &state.notes[i];
     if note.locked {
@@ -793,7 +820,7 @@ fn cmd_cat(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
 
 fn cmd_show(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
     let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
-        return Err(fail(ctx.fmt, "not_found", "Note not found"));
+        return Err(fail(ctx.fmt, "not_found", not_found(target)));
     };
     let fields = parse_fields(ctx.fields, &["id", "title", "tags"], &[]);
     let row = row_for(&state.notes[i], &fields);
@@ -893,7 +920,8 @@ fn cmd_create(
     };
     let title = match title {
         Some(t) => t.to_string(),
-        None => content
+        None => crate::templates::split_front_matter(&content)
+            .1
             .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("Untitled")
@@ -906,22 +934,31 @@ fn cmd_create(
         emit_rows(&[row_for(&state.notes[i], &fields)], &fields, ctx.fmt);
         return Ok(());
     }
-    let mut all_tags: Vec<String> = Vec::new();
-    for t in tags.unwrap_or("").split(',') {
-        let t = strip_tag(t);
+    // Tags the content already carries are not added again.
+    let mut inline: Vec<String> = Vec::new();
+    for caps in TAG_RE.captures_iter(&content).flatten() {
+        let t = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .map(|m| m.as_str().trim())
+            .unwrap_or("");
         if !t.is_empty() {
-            with_ancestors(&mut all_tags, &t);
+            with_ancestors(&mut inline, t);
         }
     }
-    let heading = format!("# {title}");
-    let body = match content.strip_prefix(heading.as_str()) {
-        Some(rest) => rest.trim_start_matches('\n').to_string(),
-        None => content.clone(),
-    };
-    let leaf_tags: Vec<&String> = all_tags
+    let mut all_tags = inline.clone();
+    let mut added: Vec<String> = Vec::new();
+    for t in tags.unwrap_or("").split(',') {
+        let t = strip_tag(t);
+        if !t.is_empty() && !inline.contains(&t) {
+            with_ancestors(&mut all_tags, &t);
+            with_ancestors(&mut added, &t);
+        }
+    }
+    let leaf_tags: Vec<&String> = added
         .iter()
         .filter(|t| {
-            !all_tags
+            !added
                 .iter()
                 .any(|o| o != *t && o.starts_with(&format!("{t}/")))
         })
@@ -931,13 +968,32 @@ fn cmd_create(
         .map(|t| display_tag(t))
         .collect::<Vec<_>>()
         .join(" ");
-    let mut full = format!("{heading}\n");
-    if tag_line.is_empty() {
-        full.push('\n');
+    // Content whose first line Bear already reads as the title (a heading at
+    // any level, case-insensitive) is kept as it is; otherwise the title is
+    // written as a `# ` heading above it. Added tags go under the title.
+    // YAML front matter (a `---` block opening on the first line) stays on
+    // top; the title goes after it.
+    let (front, content) = crate::templates::split_front_matter(&content);
+    let (first, rest) = content.split_once('\n').unwrap_or((content, ""));
+    let first_title = first.trim_start_matches('#').trim();
+    let mut full = front.to_string();
+    full.push_str(&if first_title.to_lowercase() == title.to_lowercase() {
+        let mut full = format!("{first}\n");
+        if !tag_line.is_empty() {
+            full.push_str(&format!("{tag_line}\n"));
+        }
+        full.push_str(rest);
+        full
     } else {
-        full.push_str(&format!("{tag_line}\n\n"));
-    }
-    full.push_str(&body);
+        let mut full = format!("# {title}\n");
+        if tag_line.is_empty() {
+            full.push('\n');
+        } else {
+            full.push_str(&format!("{tag_line}\n\n"));
+        }
+        full.push_str(content);
+        full
+    });
     if !full.ends_with('\n') {
         full.push('\n');
     }
@@ -1090,6 +1146,120 @@ fn cmd_edit(
     let note = &mut state.notes[i];
     note.content = format!("{}{}{}", &content[..start], region, &content[end..]);
     note.modified = now_iso();
+    save_state(state);
+    Ok(())
+}
+
+/// The line range `[first, last)` of the section whose heading line is
+/// `heading`: from the heading to the next heading at its level or above.
+fn section_lines(lines: &[&str], heading: &str) -> Result<(usize, usize), i32> {
+    let heading = heading.trim();
+    let level = heading.len() - heading.trim_start_matches('#').len();
+    // Only a heading line is an address; bearcli finds nothing for plain text.
+    if !(1..=6).contains(&level) {
+        return Err(fail_text("Section not found", 1));
+    }
+    let starts: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim() == heading)
+        .map(|(i, _)| i)
+        .collect();
+    if starts.len() != 1 {
+        return Err(fail_text(
+            if starts.is_empty() {
+                "Section not found"
+            } else {
+                "Section address is ambiguous"
+            },
+            1,
+        ));
+    }
+    let first = starts[0];
+    let last = lines
+        .iter()
+        .enumerate()
+        .skip(first + 1)
+        .find(|(_, line)| {
+            HEADING_RE
+                .captures(line)
+                .is_some_and(|m| m[1].len() <= level)
+        })
+        .map(|(j, _)| j)
+        .unwrap_or(lines.len());
+    Ok((first, last))
+}
+
+/// `append`: content always ends on its own line. At the end of a section it
+/// goes after the section's last non-blank line, so the blank lines before the
+/// next heading stay where they are.
+fn cmd_append(
+    state: &mut State,
+    target: &Target,
+    content: Option<&str>,
+    position: &str,
+    section: Option<&str>,
+    no_update_modified: bool,
+) -> CmdResult {
+    let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
+        return Err(fail_text("Note not found", 1));
+    };
+    let mut addition = match content {
+        Some(c) => unescape(c),
+        None => read_stdin(),
+    };
+    if !addition.ends_with('\n') {
+        addition.push('\n');
+    }
+    let text = state.notes[i].content.clone();
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    // A note ending in a newline splits into a last empty piece; drop it and
+    // put the newline back when joining.
+    let trailing = lines.last() == Some(&"");
+    if trailing {
+        lines.pop();
+    }
+    let at = match section {
+        Some(section) => {
+            let (first, last) = section_lines(&lines, &unescape(section))?;
+            if position == "beginning" {
+                first + 1
+            } else {
+                (first + 1..last)
+                    .rev()
+                    .find(|j| !lines[*j].trim().is_empty())
+                    .map_or(first + 1, |j| j + 1)
+            }
+        }
+        None if position == "beginning" => {
+            // After the title line and any tag lines right under it.
+            let mut j = usize::from(!lines.is_empty());
+            while j < lines.len()
+                && lines[j].trim_start().starts_with('#')
+                && HEADING_RE.captures(lines[j]).is_none()
+            {
+                j += 1;
+            }
+            j
+        }
+        None => lines.len(),
+    };
+    let before = lines[..at].join("\n");
+    let after = lines[at..].join("\n");
+    let mut out = before;
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&addition);
+    out.push_str(&after);
+    if !after.is_empty() && trailing {
+        out.push('\n');
+    }
+    let note = &mut state.notes[i];
+    note.content = out;
+    if !no_update_modified {
+        note.modified = now_iso();
+    }
     save_state(state);
     Ok(())
 }
@@ -1251,6 +1421,21 @@ pub fn run(argv: Vec<String>) -> i32 {
         fmt: &cli.format,
         fields: cli.fields.as_deref(),
     };
+    // Failure injection for tests: while the file named by
+    // $BJORN_FAKE_BEAR_FAIL_READ exists, the next listing (a `list` that is
+    // not a `--count` probe, or a `search`) removes it and fails, so a test
+    // can break exactly one reload.
+    let listing = match &cmd {
+        Cmd::List { listing, .. } => !listing.count,
+        Cmd::Search { .. } => true,
+        _ => false,
+    };
+    if listing
+        && let Some(flag) = std::env::var_os("BJORN_FAKE_BEAR_FAIL_READ").filter(|v| !v.is_empty())
+        && std::fs::remove_file(&flag).is_ok()
+    {
+        return fail(ctx.fmt, "injected", "Injected failure");
+    }
     let mut state = load_state();
     let outcome = match cmd {
         Cmd::List { listing, tag } => cmd_list(&ctx, &state, &listing, tag.as_deref()),
@@ -1310,6 +1495,20 @@ pub fn run(argv: Vec<String>) -> i32 {
             replace.as_deref(),
             delete,
             all,
+        ),
+        Cmd::Append {
+            target,
+            content,
+            position,
+            section,
+            no_update_modified,
+        } => cmd_append(
+            &mut state,
+            &target,
+            content.as_deref(),
+            &position,
+            section.as_deref(),
+            no_update_modified,
         ),
         Cmd::Trash { target } => cmd_move(&mut state, &target, "trash"),
         Cmd::Archive { target } => cmd_move(&mut state, &target, "archive"),

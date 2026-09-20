@@ -1,0 +1,48 @@
+# Bjorn's config file. Copy it to ~/.config/bjorn/config.toml (or
+# $XDG_CONFIG_HOME/bjorn/config.toml), or point at it with --config PATH.
+# Every key is optional; the values shown are the defaults.
+
+# editor = "nvim"               # overrides $VISUAL / $EDITOR
+export_dir = "~/Downloads"      # where `x` proposes to write
+export_format = "md"            # preselected in the export picker: md | html | txt | rtf | textbundle
+poll_seconds = 5                # 0 disables the background refresh
+# workspace = "work"            # start scoped to this tag
+# bearcli = "/usr/local/bin/bearcli"  # default searches PATH, then Bear.app
+icon_style = "auto"             # auto | nerd | emoji | lucide | none
+
+# A built-in name (`bjorn --list-themes`), or the file name of a Bear
+# `.theme` file in ~/.config/bjorn/themes/ ("My Nord.theme" is "my-nord").
+theme = "red-graphite-dark"
+
+[icons]                         # top-level tag -> Lucide icon name, or emoji:<glyph>
+# tech = "terminal"
+# school = "emoji:🎓"
+
+[reminders]                     # triage can push todos to Apple Reminders
+enabled = false
+list = ""                       # target list, e.g. "Bear"; remctl's default when empty
+due = "today"                   # due date for new reminders; "" for none
+remctl = ""                     # path to remctl; default searches PATH
+
+# Shell commands for `!` and `a`; see docs/actions.md. The menu's
+# "+ New action" row writes these for you.
+#
+# [[actions]]
+# name = "Copy as plain text"
+# command = "pbcopy"
+# format = "txt"                # md | html | txt | rtf | textbundle
+# confirm = false               # ask before running
+# timeout = 300                 # seconds; a captured command that overruns is killed
+# default = true                # what `!` runs
+
+# The daily note: `D` opens today's, `bjorn capture "text"` adds a line to it.
+# `title` and `tag` are strftime formats (%-d is the day without a leading 0).
+[daily]
+title = "%B %-d, %Y (%A)"       # "September 19, 2026 (Saturday)"; the note is found by it
+tag = "log/%Y/%m/%d"            # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace
+template = "daily"              # templates/daily.md, else the built-in: ## title, tag, People, Topic, ---
+capture_section = ""            # a heading like "## Inbox" (made at the end when missing); "" = end of note
+capture_format = "* {{time}} {{text}}"
+
+[templates]                     # `N` makes a note from one; copy config/templates/*.md to start
+# dir = "~/.config/bjorn/templates"
