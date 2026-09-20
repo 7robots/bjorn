@@ -108,7 +108,7 @@ async fn bang_runs_the_default_action_without_the_palette() {
     h.load().await;
     h.press("!");
     assert!(h.app.overlay.is_none(), "no palette for a default action");
-    h.until(|_| fake.dir.path().join("Publish.receipt").exists())
+    h.until(|app| app.toast_messages().iter().any(|m| m == "sent"))
         .await;
     assert!(receipt(&fake, "Publish").starts_with("Publish\nSprint Planning\n"));
 }
@@ -138,7 +138,7 @@ async fn a_lone_action_is_the_default() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| fake.dir.path().join("Copy.receipt").exists())
+    h.until(|app| app.toast_messages().iter().any(|m| m == "sent"))
         .await;
 }
 
@@ -164,7 +164,7 @@ async fn a_confirm_action_asks_first_and_can_be_cancelled() {
 
     h.press("!");
     h.press("y");
-    h.until(|_| fake.dir.path().join("Publish.receipt").exists())
+    h.until(|app| app.toast_messages().iter().any(|m| m == "sent"))
         .await;
 }
 
@@ -208,7 +208,7 @@ async fn html_actions_get_the_rendered_note() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| fake.dir.path().join("Web.receipt").exists())
+    h.until(|app| app.toast_messages().iter().any(|m| m == "sent"))
         .await;
     let receipt = receipt(&fake, "Web");
     assert!(receipt.contains("Sprint Planning.html"), "{receipt}");

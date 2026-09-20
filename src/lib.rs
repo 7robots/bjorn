@@ -11,6 +11,7 @@ pub mod editor;
 pub mod export;
 pub mod fake;
 pub mod harness;
+pub mod hugo;
 pub mod icons;
 pub mod model;
 pub mod pty;

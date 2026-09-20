@@ -10,6 +10,7 @@ use anyhow::Context;
 use toml::Value;
 
 use crate::actions::{Action, DEFAULT_TIMEOUT_SECONDS};
+use crate::hugo::HugoConfig;
 use crate::util::{expand_tilde, home_dir, which};
 
 pub const APP_NAME: &str = "bjorn";
@@ -87,6 +88,8 @@ pub struct Config {
     /// Rust build never negotiates pixel mouse reporting, so it has no effect.
     pub mouse_pixels: bool,
     pub reminders: RemindersConfig,
+    /// `[hugo]`: where `P` publishes a note as a post.
+    pub hugo: HugoConfig,
     /// `[[actions]]` from the config file, in the order they are written.
     pub actions: Vec<Action>,
     pub path: Option<PathBuf>,
@@ -106,6 +109,7 @@ impl Default for Config {
             theme: crate::ui::theme::DEFAULT_THEME.into(),
             mouse_pixels: true,
             reminders: RemindersConfig::default(),
+            hugo: HugoConfig::default(),
             actions: Vec::new(),
             path: None,
         }
@@ -206,8 +210,36 @@ impl Config {
                 remctl: text(section.get("remctl"), "").trim().to_string(),
             };
         }
+        if let Some(Value::Table(section)) = data.get("hugo") {
+            cfg.hugo = parse_hugo(section);
+        }
         cfg.actions = parse_actions(data.get("actions"));
         Ok(cfg)
+    }
+}
+
+/// `[hugo]`: every key optional; an empty value means the default.
+fn parse_hugo(section: &toml::Table) -> HugoConfig {
+    let defaults = HugoConfig::default();
+    let value = |key: &str, default: &str| {
+        let v = text(section.get(key), "").trim().to_string();
+        if v.is_empty() { default.to_string() } else { v }
+    };
+    let media_dir = text(section.get("media_dir"), "").trim().to_string();
+    HugoConfig {
+        site: value("site", ""),
+        section: value("section", &defaults.section),
+        path: value("path", &defaults.path),
+        permalink: value("permalink", &defaults.permalink),
+        tag_prefix: value("tag_prefix", ""),
+        publish_tag: value("publish_tag", ""),
+        media_url: value("media_url", ""),
+        media_dir: if media_dir.is_empty() {
+            defaults.media_dir
+        } else {
+            expand_tilde(&media_dir)
+        },
+        summary_divider: truthy(section.get("summary_divider"), true),
     }
 }
 
@@ -389,6 +421,32 @@ mod tests {
             }
         );
         assert_eq!(Config::default().reminders.due, "today");
+    }
+
+    #[test]
+    fn hugo_section() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Config::default().hugo, HugoConfig::default());
+        assert!(!Config::default().hugo.configured());
+        let path = write(
+            &dir,
+            "[hugo]\nsite = \"~/site\"\ntag_prefix = \"#blog\"\npublish_tag = \"blog/published\"\n\
+             media_url = \"https://media.example.test/blog/\"\nmedia_dir = \"~/stage\"\nsection = \"\"\nsummary_divider = false\n",
+        );
+        let hugo = Config::load(Some(&path)).unwrap().hugo;
+        assert_eq!(hugo.site, "~/site");
+        assert_eq!(hugo.site_dir(), home_dir().join("site"));
+        assert_eq!(hugo.section, "posts", "empty means the default");
+        assert_eq!(hugo.path, "{year}/{month}/{slug}.md");
+        assert_eq!(hugo.tag_prefix, "#blog");
+        assert_eq!(hugo.publish_tag, "blog/published");
+        assert_eq!(hugo.media_url, "https://media.example.test/blog/");
+        assert_eq!(hugo.media_dir, home_dir().join("stage"));
+        assert!(!hugo.summary_divider);
+        assert_eq!(
+            HugoConfig::default().media_dir,
+            home_dir().join("Downloads/bjorn-media")
+        );
     }
 
     #[test]

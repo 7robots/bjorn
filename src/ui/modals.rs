@@ -16,6 +16,9 @@ pub enum Pending {
     /// Deleting an action from the config; cancelling goes back to the menu.
     DeleteAction(Action, Note),
     Tick(Vec<crate::ui::triage::TriageRow>),
+    /// Writing a Hugo post, as planned when the dialog opened. Shared, so
+    /// the overlay's clone per keystroke never copies the image bytes.
+    Publish(std::sync::Arc<crate::hugo::Plan>),
 }
 
 /// What a submitted text prompt goes on to do.
@@ -99,6 +102,7 @@ pub enum Overlay {
         scroll: usize,
     },
     /// Pick an export format: one key per format, or arrows and enter.
+    /// `index` runs one past `export::FORMATS`: the last choice is Hugo.
     Format {
         index: usize,
         note: Note,

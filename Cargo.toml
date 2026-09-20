@@ -28,8 +28,10 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "process", "sync", "time", "macros", "io-util", "fs"] }
 toml = "1.1.6"
 tui-term = "0.3.4"
+unicode-normalization = "0.1.25"
 unicode-width = "0.2.2"
 vt100 = "0.16.2"
+yaml-rust2 = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
