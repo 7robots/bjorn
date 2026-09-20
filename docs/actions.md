@@ -126,3 +126,74 @@ Bjorn does not sandbox it and does not parse it. Two habits are worth keeping:
 set `confirm = true` on anything that publishes, deletes or costs money, and
 quote `"$BJORN_NOTE_FILE"` and `"$BJORN_NOTE_TITLE"` — note titles carry
 spaces, quotes and slashes, and only the filename is sanitized.
+
+## Hugo recipes
+
+`P` writes a post into a Hugo site and stops there: Bjorn makes no network
+calls, so uploading images, previewing and committing are yours. These are
+examples to adapt, not built-ins; they assume `[hugo] site = "~/sites/blog"`
+and the default `media_dir`. See the README's
+[Publishing to Hugo](../README.md#publishing-to-hugo) for the `[hugo]` keys.
+
+Upload what `P` staged, with a site script that takes a key prefix (this one
+is shaped like an R2 upload script: `-p` sets the prefix, it wants absolute
+paths because it changes directory, and for each file it prints the public
+URL on success, `EXISTS ...` when the key is already there, or `FAILED`/`SKIP`,
+exiting 0 either way). Staged files sit in `media_dir/YYYY/MM/`, the tail of
+the URL `P` linked, so the prefix is the folder. A file that uploaded, or was
+already there, is moved out of staging, so running it again only retries
+what failed. Names are `<slug>-<name>`, so `EXISTS` means this post's image
+went up before; if you changed the image, upload it again with `-f` by hand:
+
+```toml
+[[actions]]
+name = "Upload staged images"
+command = '''
+staged=~/Downloads/bjorn-media; done_dir=~/Downloads/bjorn-media-uploaded
+cd "$staged" 2>/dev/null || { echo "Nothing staged."; exit 0; }
+ok=0; left=0
+for file in "$staged"/*/*/*; do
+  [ -f "$file" ] || continue
+  month=${file#"$staged"/}; month=${month%/*}
+  result=$(~/sites/blog/r2-upload.sh -p "blog/$month" "$file" 2>&1) || result="FAILED"
+  case "$result" in
+    https://*|EXISTS*) mkdir -p "$done_dir/$month" && mv "$file" "$done_dir/$month/" && ok=$((ok + 1)) ;;
+    *) left=$((left + 1)) ;;
+  esac
+done
+echo "Uploaded $ok; $left left in staging."
+'''
+confirm = true
+timeout = 300
+```
+
+Preview with drafts. `hugo server` runs until stopped, so it is started in
+the background with its output going to a file; otherwise the action would
+wait for it and be killed at the timeout:
+
+```toml
+[[actions]]
+name = "Preview the site"
+command = '''
+cd ~/sites/blog || exit 1
+pgrep -qf "hugo server" || nohup hugo server -D </dev/null >/tmp/hugo-preview.log 2>&1 &
+sleep 2 && open http://localhost:1313/ && echo "http://localhost:1313/ (log: /tmp/hugo-preview.log)"
+'''
+```
+
+Commit just this note's post. The ledger `P` keeps beside the config file
+maps the note's id to the file it wrote, and `plutil` (part of macOS) reads
+it; only that file (or a bundle's folder) is staged and committed. Pushing is
+left out on purpose, since a public site repository publishes whatever it is
+given:
+
+```toml
+[[actions]]
+name = "Commit the post"
+command = '''
+post=$(plutil -extract "posts.$BJORN_NOTE_ID.path" raw -o - ~/.config/bjorn/hugo-published.json) || { echo "Not published yet."; exit 1; }
+[ "${post##*/}" = index.md ] && post=${post%/index.md}
+cd ~/sites/blog && git add -- "$post" && git commit -q -m "Post: $BJORN_NOTE_TITLE" -- "$post" && git log -1 --format="%h %s"
+'''
+confirm = true
+```

@@ -26,6 +26,13 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
+- Hugo publishing: `P` (and `p` in the `x` picker) writes the note as a post
+  into a Hugo site from `[hugo]` in the config: front matter from the title
+  and tags, dated at publish time, an allow-list of the note's own front
+  matter keys; front matter read with a YAML parser and written as text, a
+  republish updating the same file with its URL and hand-added keys kept,
+  images staged for upload or placed in a page bundle. No network: upload,
+  preview and commit are action recipes (`docs/actions.md`).
 - Actions: `[[actions]]` in the config, `!` for the default one and `a` for a
   searchable palette. The note is rendered through the exporter, handed to a
   shell command as a temp file and on stdin, and the command's first line comes
