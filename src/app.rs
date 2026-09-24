@@ -35,7 +35,7 @@ use crate::search::{query_pattern, rewrite_subtags};
 use crate::todos::{TodoScan, scan_rows};
 use crate::ui::modals::{Field, Overlay, Pending, Severity, TextPurpose, Toast};
 use crate::ui::note_list::{NoteList, ROW_HEIGHT};
-use crate::ui::note_view::Reader;
+use crate::ui::note_view::{Reader, outline_filter};
 use crate::ui::sidebar::{Row, Sidebar};
 use crate::ui::triage::{Triage, TriageRow};
 
@@ -1117,6 +1117,40 @@ impl App {
         self.focus = Pane::Reader;
     }
 
+    /// `o`: the outline of the note in the reader, the current section
+    /// highlighted.
+    fn open_outline(&mut self) {
+        if self.reader.headings.is_empty() {
+            let message = if self.reader.note.is_none() {
+                "No note in the reader."
+            } else if self.reader.full_text.is_some() {
+                "This note has no headings."
+            } else {
+                "This note cannot be read, so it has no outline."
+            };
+            self.notify(message, Duration::from_secs(3));
+            return;
+        }
+        let index = self
+            .reader
+            .current_heading(self.reader_width, self.reader_height)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::Outline {
+            field: Field::default(),
+            index,
+        });
+    }
+
+    /// `}` / `{`: the next or previous heading in the reader.
+    fn jump_heading(&mut self, delta: i64) {
+        if self.reader.headings.is_empty() {
+            return;
+        }
+        self.reader
+            .jump_heading(delta, self.reader_width, self.reader_height);
+        self.focus = Pane::Reader;
+    }
+
     // -- columns and focus ----------------------------------------------------------
 
     pub fn set_columns(&mut self, count: u8) {
@@ -1256,7 +1290,7 @@ impl App {
         match action {
             Pending::Quit => self.running = false,
             Pending::Tick(rows) => self.tick_rows(rows),
-            Pending::RunAction(action, note) => self.spawn_action(action, note),
+            Pending::RunAction(action, note, input) => self.spawn_action(action, note, input),
             Pending::Publish(plan) => {
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
@@ -1856,20 +1890,43 @@ impl App {
         });
     }
 
-    /// Run `action` on `note`, asking first when it says `confirm = true`.
+    /// Run `action` on `note`. An action with a `prompt` asks for its line of
+    /// text first; `confirm = true` then asks to go ahead, in that order, so
+    /// the dialog can quote what was typed.
     fn start_action(&mut self, action: Action, note: Note) {
-        if action.confirm {
-            self.overlay = Some(Overlay::Confirm {
-                message: format!("Run “{}” on “{}”?", action.name, note.title),
-                confirm_label: "Run".into(),
-                action: Pending::RunAction(action, note),
+        if let Some(title) = action.prompt.clone() {
+            self.overlay = Some(Overlay::Text {
+                title,
+                field: Field::default(),
+                hint: "enter to run · esc to cancel".into(),
+                purpose: TextPurpose::ActionInput { action, note },
             });
         } else {
-            self.spawn_action(action, note);
+            self.confirm_action(action, note, String::new());
         }
     }
 
-    fn spawn_action(&mut self, action: Action, note: Note) {
+    /// The confirm dialog when the action asks for one, else straight to it.
+    fn confirm_action(&mut self, action: Action, note: Note, input: String) {
+        if action.confirm {
+            let target = match (input.is_empty(), action.prompt.is_some()) {
+                // A prompt action acts on the answer, not on the note, so an
+                // empty answer must not name the note the cursor happens to be on.
+                (true, true) => "no input".to_string(),
+                (true, false) => format!("“{}”", note.title),
+                _ => format!("“{input}”"),
+            };
+            self.overlay = Some(Overlay::Confirm {
+                message: format!("Run “{}” on {target}?", action.name),
+                confirm_label: "Run".into(),
+                action: Pending::RunAction(action, note, input),
+            });
+        } else {
+            self.spawn_action(action, note, input);
+        }
+    }
+
+    fn spawn_action(&mut self, action: Action, note: Note, input: String) {
         let client = self.client.clone();
         let tx = self.tx.clone();
         let name = action.name.clone();
@@ -1892,7 +1949,7 @@ impl App {
                         images.insert(name, bytes);
                     }
                 }
-                actions::run(&action, &note, &content.content, &images)
+                actions::run(&action, &note, &content.content, &images, &input)
                     .await
                     .map_err(|e| e.0)
             }
@@ -1955,6 +2012,9 @@ impl App {
             KeyCode::Char('F') => self.fold_all(),
             KeyCode::Char(']') => self.jump_match(1),
             KeyCode::Char('[') => self.jump_match(-1),
+            KeyCode::Char('}') => self.jump_heading(1),
+            KeyCode::Char('{') => self.jump_heading(-1),
+            KeyCode::Char('o') => self.open_outline(),
             KeyCode::Char('j') | KeyCode::Down => self.cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.cursor(-1),
             KeyCode::PageDown => {
@@ -2102,12 +2162,16 @@ impl App {
                 KeyCode::Enter => {
                     self.overlay = None;
                     let value = field.value.trim().to_string();
-                    if value.is_empty() {
-                        return;
-                    }
                     match purpose {
+                        // Nothing to export to; the prompt is simply cancelled.
+                        TextPurpose::ExportPath { .. } if value.is_empty() => {}
                         TextPurpose::ExportPath { format_id, note } => {
                             self.export_to(format_id, note, Path::new(&value))
+                        }
+                        // An empty answer is a real one: the command decides
+                        // what no input means.
+                        TextPurpose::ActionInput { action, note } => {
+                            self.confirm_action(action, note, value)
                         }
                     }
                 }
@@ -2222,6 +2286,50 @@ impl App {
                     }
                 }
             }
+            Overlay::Outline { mut field, index } => {
+                let shown = outline_filter(&self.reader.headings, &field.value);
+                // A refresh can shorten the note under the open outline.
+                let index = index.min(shown.len().saturating_sub(1));
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let delta = match key.code {
+                    KeyCode::Down | KeyCode::Tab => Some(1),
+                    KeyCode::Up | KeyCode::BackTab => Some(-1),
+                    KeyCode::Char('n') if ctrl => Some(1),
+                    KeyCode::Char('p') if ctrl => Some(-1),
+                    _ => None,
+                };
+                if let Some(delta) = delta {
+                    let index = if shown.is_empty() {
+                        0
+                    } else {
+                        (index as i32 + delta).rem_euclid(shown.len() as i32) as usize
+                    };
+                    self.overlay = Some(Overlay::Outline { field, index });
+                    return;
+                }
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Enter => {
+                        if let Some(&heading) = shown.get(index) {
+                            self.overlay = None;
+                            self.reader.scroll_to_heading(
+                                heading,
+                                self.reader_width,
+                                self.reader_height,
+                            );
+                            self.focus = Pane::Reader;
+                        }
+                    }
+                    _ => {
+                        // A changed filter sends the highlight back to the top;
+                        // moving the text cursor does not.
+                        let before = field.value.clone();
+                        Self::field_key(&mut field, &key);
+                        let index = if field.value != before { 0 } else { index };
+                        self.overlay = Some(Overlay::Outline { field, index });
+                    }
+                }
+            }
             Overlay::NewAction {
                 mut name,
                 mut command,
@@ -2252,7 +2360,8 @@ impl App {
                     KeyCode::Enter if name.value.trim().is_empty() => focus = 0,
                     KeyCode::Enter if command.value.trim().is_empty() => focus = 1,
                     KeyCode::Enter => {
-                        // An edit keeps what the form does not show, the timeout.
+                        // An edit keeps what the form does not show: the timeout
+                        // and the prompt. A test pins the prompt half of that.
                         let action = Action {
                             name: name.value.trim().to_string(),
                             command: command.value.trim().to_string(),
