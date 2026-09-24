@@ -334,6 +334,10 @@ fn quoted_line(line: &str) -> String {
         // list right under the tag line is swallowed into it.
         return format!("<p class=\"tags\">{spans}</p>\n");
     }
+    // A setext underline (`=====`) is a heading marker, not a highlight.
+    if line.trim().chars().all(|c| c == '=') && !line.trim().is_empty() {
+        return line.to_string();
+    }
     inline(line)
 }
 

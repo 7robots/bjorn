@@ -38,6 +38,16 @@ impl RLine {
     }
 }
 
+/// A heading as the reader drew it: its level (1-6), its text without the
+/// `#`s or inline markers, and the block it opens, which is how the reader
+/// finds the row it starts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heading {
+    pub level: u8,
+    pub text: String,
+    pub block: usize,
+}
+
 static MARK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^</?(mark|u|tags)>$").unwrap());
 
 /// Bear-only syntax rewritten into inline HTML the renderer understands, with
@@ -57,6 +67,11 @@ pub fn prepare(content: &str) -> String {
         }
         if is_tag_line(line) {
             out.push(format!("<tags>{}</tags>", tags_in_line(line).join(" ")));
+            continue;
+        }
+        // A setext underline (`=====`) is a heading marker, not a highlight.
+        if line.trim().chars().all(|c| c == '=') && !line.trim().is_empty() {
+            out.push(line.to_string());
             continue;
         }
         let line = HIGHLIGHT_RE.replace_all(line, "<mark>$1</mark>");
@@ -84,6 +99,9 @@ struct Renderer {
     image_alt: String,
     item_open: bool,
     table: Option<TableState>,
+    headings: Vec<Heading>,
+    /// The heading being read, while inside one.
+    heading: Option<Heading>,
 }
 
 struct TableState {
@@ -118,6 +136,8 @@ impl Renderer {
             image_alt: String::new(),
             item_open: false,
             table: None,
+            headings: Vec::new(),
+            heading: None,
         }
     }
 
@@ -193,6 +213,9 @@ impl Renderer {
         if self.in_image {
             self.image_alt.push_str(text);
             return;
+        }
+        if let Some(heading) = self.heading.as_mut() {
+            heading.text.push_str(text);
         }
         if self.table.is_some() {
             let style = self.style();
@@ -309,6 +332,14 @@ impl Renderer {
 
 /// Render Bear markdown into block-indexed lines.
 pub fn render(content: &str) -> Vec<RLine> {
+    render_with_headings(content).0
+}
+
+/// Render Bear markdown, and list its headings in document order. The
+/// headings come from the same parse that draws the note, so a `#` line in
+/// fenced code is not one, a setext heading is, and each maps to the block
+/// the reader shows it in.
+pub fn render_with_headings(content: &str) -> (Vec<RLine>, Vec<Heading>) {
     let prepared = prepare(content);
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
@@ -328,6 +359,11 @@ pub fn render(content: &str) -> Vec<RLine> {
                     r.blank();
                     r.new_block();
                     r.push(Renderer::heading_style(level));
+                    r.heading = Some(Heading {
+                        level: level as u8,
+                        text: String::new(),
+                        block: r.block,
+                    });
                 }
                 Tag::BlockQuote(_) => {
                     r.blank();
@@ -430,6 +466,13 @@ pub fn render(content: &str) -> Vec<RLine> {
                     r.item_open = false;
                 }
                 TagEnd::Heading(_) => {
+                    // An empty heading draws no row, so it could not be jumped to.
+                    if let Some(mut heading) = r.heading.take() {
+                        heading.text = heading.text.trim().to_string();
+                        if !heading.text.is_empty() {
+                            r.headings.push(heading);
+                        }
+                    }
                     r.pop();
                     r.flush();
                     r.blank();
@@ -508,6 +551,9 @@ pub fn render(content: &str) -> Vec<RLine> {
                 r.text(&text);
             }
             Event::Code(code) => {
+                if let Some(heading) = r.heading.as_mut() {
+                    heading.text.push_str(&code);
+                }
                 let style = r.style().patch(code_style());
                 if let Some(t) = r.table.as_mut() {
                     t.cell.push(Span::styled(code.to_string(), style));
@@ -549,7 +595,7 @@ pub fn render(content: &str) -> Vec<RLine> {
     while r.lines.last().is_some_and(RLine::is_blank) {
         r.lines.pop();
     }
-    r.lines
+    (r.lines, r.headings)
 }
 
 /// The image file names a note links to, percent-decoded, in order.
@@ -783,5 +829,51 @@ mod tests {
                 .join("\n")
         ));
         assert!(full.iter().any(|l| l.plain() == "• Book 120"));
+    }
+
+    fn outline(src: &str) -> Vec<(u8, String)> {
+        render_with_headings(src)
+            .1
+            .into_iter()
+            .map(|h| (h.level, h.text))
+            .collect()
+    }
+
+    #[test]
+    fn headings_skip_fenced_code_and_keep_duplicates() {
+        let src = "# Title\n#tag\n\n## Setup\ntext\n\n```sh\n# a shell comment\n## not a heading\n```\n\n~~~\n# tilde fence\n~~~\n\n### Notes\n\n## Setup\n\n#hashtag line\n\n####### seven is text\n";
+        assert_eq!(
+            outline(src),
+            vec![
+                (1, "Title".to_string()),
+                (2, "Setup".to_string()),
+                (3, "Notes".to_string()),
+                (2, "Setup".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn heading_text_drops_markup_and_keeps_code() {
+        let src = "## *Bold* ==mark== and `code`\n\nSetext\n------\n";
+        assert_eq!(
+            outline(src),
+            vec![
+                (2, "Bold mark and code".to_string()),
+                (2, "Setext".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_heading_names_the_block_it_is_drawn_in() {
+        let (lines, headings) = render_with_headings("# T\n\npara\n\n## A\n\n- item\n\n## B\n");
+        for heading in &headings {
+            let line = lines
+                .iter()
+                .find(|l| l.block == heading.block)
+                .expect("the heading's block is drawn");
+            assert_eq!(line.plain(), heading.text);
+        }
     }
 }
