@@ -367,8 +367,7 @@ fn code_spans(line: &str) -> Vec<&str> {
     let ticks: Vec<usize> = line.match_indices('`').map(|(at, _)| at).collect();
     let mut parts = Vec::new();
     let mut from = 0;
-    for pair in ticks.chunks_exact(2) {
-        let (open, close) = (pair[0], pair[1]);
+    for &[open, close] in ticks.as_chunks::<2>().0 {
         parts.push(&line[from..open]);
         parts.push(&line[open + 1..close]);
         from = close + 1;
