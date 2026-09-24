@@ -1212,7 +1212,7 @@ impl App {
         match action {
             Pending::Quit => self.running = false,
             Pending::Tick(rows) => self.tick_rows(rows),
-            Pending::RunAction(action, note) => self.spawn_action(action, note),
+            Pending::RunAction(action, note, input) => self.spawn_action(action, note, input),
             Pending::DeleteAction(action, note) => self.delete_action(action, note),
             Pending::Trash(note) => {
                 let client = self.client.clone();
@@ -1728,20 +1728,43 @@ impl App {
         });
     }
 
-    /// Run `action` on `note`, asking first when it says `confirm = true`.
+    /// Run `action` on `note`. An action with a `prompt` asks for its line of
+    /// text first; `confirm = true` then asks to go ahead, in that order, so
+    /// the dialog can quote what was typed.
     fn start_action(&mut self, action: Action, note: Note) {
-        if action.confirm {
-            self.overlay = Some(Overlay::Confirm {
-                message: format!("Run “{}” on “{}”?", action.name, note.title),
-                confirm_label: "Run".into(),
-                action: Pending::RunAction(action, note),
+        if let Some(title) = action.prompt.clone() {
+            self.overlay = Some(Overlay::Text {
+                title,
+                field: Field::default(),
+                hint: "enter to run · esc to cancel".into(),
+                purpose: TextPurpose::ActionInput { action, note },
             });
         } else {
-            self.spawn_action(action, note);
+            self.confirm_action(action, note, String::new());
         }
     }
 
-    fn spawn_action(&mut self, action: Action, note: Note) {
+    /// The confirm dialog when the action asks for one, else straight to it.
+    fn confirm_action(&mut self, action: Action, note: Note, input: String) {
+        if action.confirm {
+            let target = match (input.is_empty(), action.prompt.is_some()) {
+                // A prompt action acts on the answer, not on the note, so an
+                // empty answer must not name the note the cursor happens to be on.
+                (true, true) => "no input".to_string(),
+                (true, false) => format!("“{}”", note.title),
+                _ => format!("“{input}”"),
+            };
+            self.overlay = Some(Overlay::Confirm {
+                message: format!("Run “{}” on {target}?", action.name),
+                confirm_label: "Run".into(),
+                action: Pending::RunAction(action, note, input),
+            });
+        } else {
+            self.spawn_action(action, note, input);
+        }
+    }
+
+    fn spawn_action(&mut self, action: Action, note: Note, input: String) {
         let client = self.client.clone();
         let tx = self.tx.clone();
         let name = action.name.clone();
@@ -1764,7 +1787,7 @@ impl App {
                         images.insert(name, bytes);
                     }
                 }
-                actions::run(&action, &note, &content.content, &images)
+                actions::run(&action, &note, &content.content, &images, &input)
                     .await
                     .map_err(|e| e.0)
             }
@@ -1960,12 +1983,16 @@ impl App {
                 KeyCode::Enter => {
                     self.overlay = None;
                     let value = field.value.trim().to_string();
-                    if value.is_empty() {
-                        return;
-                    }
                     match purpose {
+                        // Nothing to export to; the prompt is simply cancelled.
+                        TextPurpose::ExportPath { .. } if value.is_empty() => {}
                         TextPurpose::ExportPath { format_id, note } => {
                             self.export_to(format_id, note, Path::new(&value))
+                        }
+                        // An empty answer is a real one: the command decides
+                        // what no input means.
+                        TextPurpose::ActionInput { action, note } => {
+                            self.confirm_action(action, note, value)
                         }
                     }
                 }
@@ -2110,7 +2137,8 @@ impl App {
                     KeyCode::Enter if name.value.trim().is_empty() => focus = 0,
                     KeyCode::Enter if command.value.trim().is_empty() => focus = 1,
                     KeyCode::Enter => {
-                        // An edit keeps what the form does not show, the timeout.
+                        // An edit keeps what the form does not show: the timeout
+                        // and the prompt. A test pins the prompt half of that.
                         let action = Action {
                             name: name.value.trim().to_string(),
                             command: command.value.trim().to_string(),

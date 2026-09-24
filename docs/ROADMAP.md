@@ -26,6 +26,10 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
+- An action can ask for one line of text before it runs (`prompt` in its
+  config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
+  used to need one entry per argument; with `confirm` as well the dialog
+  quotes the answer.
 - Actions: `[[actions]]` in the config, `!` for the default one and `a` for a
   searchable palette. The note is rendered through the exporter, handed to a
   shell command as a temp file and on stdin, and the command's first line comes
