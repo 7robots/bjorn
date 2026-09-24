@@ -6,7 +6,7 @@ use regex::Regex;
 
 use crate::bear::Note;
 use crate::ui::highlight::highlight_line;
-use crate::ui::markdown::{RLine, render, wrap};
+use crate::ui::markdown::{Heading, RLine, render_with_headings, wrap};
 
 /// Glyph per column count: a hollow block for each hidden column.
 pub fn column_glyph(count: u8) -> &'static str {
@@ -15,6 +15,19 @@ pub fn column_glyph(count: u8) -> &'static str {
         2 => "▯▮▮",
         _ => "▮▮▮",
     }
+}
+
+/// The headings the outline lists for `query`: their indices into
+/// `headings`, in document order. Case-insensitive substring match; an empty
+/// query lists them all.
+pub fn outline_filter(headings: &[Heading], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    headings
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| query.is_empty() || h.text.to_lowercase().contains(&query))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -31,6 +44,12 @@ pub struct Reader {
     /// Blocks holding a match, in document order, and the index last jumped to (-1: none yet).
     pub matches: Vec<usize>,
     pub match_index: i64,
+    /// The note's headings, in document order, from the same parse that drew it.
+    pub headings: Vec<Heading>,
+    /// The heading last jumped to and the scroll that jump set. It counts as
+    /// the current section until the reader scrolls (a heading near the end
+    /// cannot reach the top row).
+    heading_index: Option<(usize, usize)>,
     message: Option<String>,
     /// How many times a note was (re)rendered, for tests.
     pub renders: usize,
@@ -52,6 +71,8 @@ impl Reader {
         self.wrapped.clear();
         self.matches.clear();
         self.match_index = -1;
+        self.headings.clear();
+        self.heading_index = None;
         self.header.clear();
         self.meta.clear();
         self.scroll = 0;
@@ -66,7 +87,8 @@ impl Reader {
         self.renders += 1;
         self.note = Some(note.clone());
         self.full_text = Some(content.to_string());
-        self.lines = render(content);
+        (self.lines, self.headings) = render_with_headings(content);
+        self.heading_index = None;
         self.wrapped.clear();
         self.wrapped_width = 0;
         self.message = None;
@@ -82,6 +104,8 @@ impl Reader {
         self.wrapped.clear();
         self.matches.clear();
         self.match_index = -1;
+        self.headings.clear();
+        self.heading_index = None;
         self.scroll = 0;
         self.header = note.title.clone();
         self.meta.clear();
@@ -140,6 +164,92 @@ impl Reader {
         }
         self.set_header();
         true
+    }
+
+    /// The first wrapped row of heading `index`, at `width`.
+    pub fn heading_row(&mut self, index: usize, width: usize) -> Option<usize> {
+        let block = self.headings.get(index)?.block;
+        self.ensure_wrapped(width);
+        // Block ids only grow down the note, so the rows are sorted by block.
+        let row = self.wrapped.partition_point(|(_, b)| *b < block);
+        (self.wrapped.get(row).map(|(_, b)| *b) == Some(block)).then_some(row)
+    }
+
+    /// The section the viewport is in: the heading last jumped to while it
+    /// is still on screen, else the last heading at or above the top row.
+    /// None above the first heading.
+    pub fn current_heading(&mut self, width: usize, height: usize) -> Option<usize> {
+        if self.message.is_some() || self.headings.is_empty() {
+            return None;
+        }
+        let top = self.scroll.min(self.max_scroll(width, height));
+        if let Some((i, scroll)) = self.heading_index
+            && scroll == self.scroll
+            && let Some(row) = self.heading_row(i, width)
+            && (top..top + height.max(1)).contains(&row)
+        {
+            return Some(i);
+        }
+        let mut current = None;
+        for i in 0..self.headings.len() {
+            match self.heading_row(i, width) {
+                Some(row) if row <= top => current = Some(i),
+                Some(_) => break,
+                None => {}
+            }
+        }
+        current
+    }
+
+    /// The name of the section the viewport is in, for the reader's footer.
+    /// None above the first heading and in the note's own title: an H1 on
+    /// the first line, which is where Bear takes the title from.
+    pub fn section_name(&mut self, width: usize, height: usize) -> Option<String> {
+        let index = self.current_heading(width, height)?;
+        let heading = &self.headings[index];
+        let is_title = index == 0
+            && heading.level == 1
+            && self
+                .full_text
+                .as_deref()
+                .is_some_and(|text| text.trim_start().starts_with("# "));
+        (!is_title).then(|| heading.text.clone())
+    }
+
+    /// Scroll so heading `index` is the top row, or as near as the end of
+    /// the note allows. False when there is no such heading.
+    pub fn scroll_to_heading(&mut self, index: usize, width: usize, height: usize) -> bool {
+        let Some(row) = self.heading_row(index, width) else {
+            return false;
+        };
+        self.scroll = row.min(self.max_scroll(width, height));
+        self.heading_index = Some((index, self.scroll));
+        true
+    }
+
+    /// `}` (`delta` 1) or `{` (-1): the next heading below the current
+    /// section's, or the start of the current section, then the one before
+    /// it. No wrapping. False when there is nowhere to go.
+    pub fn jump_heading(&mut self, delta: i64, width: usize, height: usize) -> bool {
+        let current = self.current_heading(width, height);
+        let target = if delta > 0 {
+            current.map_or(0, |i| i + 1)
+        } else {
+            let Some(i) = current else { return false };
+            let top = self.scroll.min(self.max_scroll(width, height));
+            let above = self.heading_row(i, width).is_some_and(|row| row < top);
+            if above {
+                i
+            } else if i > 0 {
+                i - 1
+            } else {
+                return false;
+            }
+        };
+        if target >= self.headings.len() {
+            return false;
+        }
+        self.scroll_to_heading(target, width, height)
     }
 
     fn match_label(&self) -> String {

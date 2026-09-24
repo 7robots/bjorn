@@ -49,6 +49,7 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `f` | fold / unfold the highlighted tag's subtree | `F` | fold every tag, or unfold them all when all are folded |
 | `t` | triage the workspace's open todos | `c` / click `▮▮▮` | hide the tag column, then the note column too, then show all three |
 | `]` / `[` | next / previous match in the reader while searching | `r` | refresh now |
+| `o` | outline: the note's headings, indented by level; type to filter, `enter` scrolls there | `}` / `{` | next / previous heading in the reader |
 | `?` | help (`esc` `q` `?` close it) | `q` | quit, after a confirm |
 
 The **workspace** is a tag subtree that scopes the whole app: the tag tree
@@ -67,6 +68,13 @@ stays open with the query, dimmed until you press `/` or click it to edit
 again. While a search is active the reader highlights the terms, including
 inside fenced code and table cells, the header counts the matching blocks,
 `]` and `[` step through them, and `enter` on a note lands on its first match.
+
+`o` lists the headings of the note in the reader, indented by level, with the
+section you are reading highlighted; typing filters them and `enter` scrolls
+that heading to the top of the reader. `}` and `{` step to the next and
+previous heading without the list, and the line under the reader names the
+section at the top of the view. Headings come from the same parse that draws
+the note, so a `#` line inside fenced code is never one.
 
 Views are computed from one `bearcli list` snapshot, so the counts in the
 sidebar and the notes list always agree. **Pinned** means any pin, global or
