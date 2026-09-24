@@ -31,8 +31,6 @@ pub struct RLine {
     pub cont: Vec<Span<'static>>,
     /// Wiki links drawn on this line: the index of the span that shows each.
     pub links: Vec<(usize, WikiLink)>,
-    /// The heading level this line is, or 0 for body text.
-    pub heading: u8,
 }
 
 impl RLine {
@@ -43,6 +41,16 @@ impl RLine {
     pub fn is_blank(&self) -> bool {
         self.plain().trim().is_empty()
     }
+}
+
+/// A heading as the reader drew it: its level (1-6), its text without the
+/// `#`s or inline markers, and the block it opens, which is how the reader
+/// finds the row it starts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heading {
+    pub level: u8,
+    pub text: String,
+    pub block: usize,
 }
 
 static MARK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^</?(mark|u|tags)>$").unwrap());
@@ -66,6 +74,11 @@ pub fn prepare(content: &str) -> (String, LinkTable) {
         }
         if is_tag_line(line) {
             out.push(format!("<tags>{}</tags>", tags_in_line(line).join(" ")));
+            continue;
+        }
+        // A setext underline (`=====`) is a heading marker, not a highlight.
+        if line.trim().chars().all(|c| c == '=') && !line.trim().is_empty() {
+            out.push(line.to_string());
             continue;
         }
         let line = table.tokenize(line);
@@ -96,10 +109,11 @@ struct Renderer {
     table: Option<TableState>,
     /// Links on the line being built, by span index.
     line_links: Vec<(usize, WikiLink)>,
-    /// The level of the heading being built, or 0.
-    heading: u8,
     /// The note's wiki links, which its text refers to by token.
     wiki: LinkTable,
+    headings: Vec<Heading>,
+    /// The heading being read, while inside one.
+    heading: Option<Heading>,
 }
 
 /// One table cell: its spans, and the links among them by span index.
@@ -142,8 +156,9 @@ impl Renderer {
             item_open: false,
             table: None,
             line_links: Vec::new(),
-            heading: 0,
             wiki,
+            headings: Vec::new(),
+            heading: None,
         }
     }
 
@@ -200,7 +215,6 @@ impl Renderer {
             block: self.block,
             cont,
             links,
-            heading: self.heading,
         });
     }
 
@@ -224,6 +238,16 @@ impl Renderer {
             let alt = self.wiki.restore(text).into_owned();
             self.image_alt.push_str(&alt);
             return;
+        }
+        if let Some(heading) = self.heading.as_mut() {
+            // As drawn: a link by its label, so `[[Note/Heading]]` finds it
+            // by the text the reader shows.
+            for piece in self.wiki.split(text) {
+                match piece {
+                    Piece::Text(t) => heading.text.push_str(&t),
+                    Piece::Link(link) => heading.text.push_str(&link.label()),
+                }
+            }
         }
         if self.table.is_some() {
             let style = self.style();
@@ -411,6 +435,14 @@ pub fn wiki_links(content: &str) -> Vec<WikiLink> {
 
 /// Render Bear markdown into block-indexed lines.
 pub fn render(content: &str) -> Vec<RLine> {
+    render_with_headings(content).0
+}
+
+/// Render Bear markdown, and list its headings in document order. The
+/// headings come from the same parse that draws the note, so a `#` line in
+/// fenced code is not one, a setext heading is, and each maps to the block
+/// the reader shows it in.
+pub fn render_with_headings(content: &str) -> (Vec<RLine>, Vec<Heading>) {
     let (prepared, table) = prepare(content);
     let mut r = Renderer::new(table);
     // Merged, so a link token never arrives in two pieces.
@@ -428,8 +460,12 @@ pub fn render(content: &str) -> Vec<RLine> {
                 Tag::Heading { level, .. } => {
                     r.blank();
                     r.new_block();
-                    r.heading = level as u8;
                     r.push(Renderer::heading_style(level));
+                    r.heading = Some(Heading {
+                        level: level as u8,
+                        text: String::new(),
+                        block: r.block,
+                    });
                 }
                 Tag::BlockQuote(_) => {
                     r.blank();
@@ -532,9 +568,15 @@ pub fn render(content: &str) -> Vec<RLine> {
                     r.item_open = false;
                 }
                 TagEnd::Heading(_) => {
+                    // An empty heading draws no row, so it could not be jumped to.
+                    if let Some(mut heading) = r.heading.take() {
+                        heading.text = heading.text.trim().to_string();
+                        if !heading.text.is_empty() {
+                            r.headings.push(heading);
+                        }
+                    }
                     r.pop();
                     r.flush();
-                    r.heading = 0;
                     r.blank();
                 }
                 TagEnd::BlockQuote(_) => {
@@ -613,6 +655,9 @@ pub fn render(content: &str) -> Vec<RLine> {
             Event::Code(code) => {
                 let style = r.style().patch(code_style());
                 let code = r.wiki.restore(&code).into_owned();
+                if let Some(heading) = r.heading.as_mut() {
+                    heading.text.push_str(&code);
+                }
                 if let Some(t) = r.table.as_mut() {
                     t.cell.spans.push(Span::styled(code, style));
                 } else {
@@ -653,7 +698,7 @@ pub fn render(content: &str) -> Vec<RLine> {
     while r.lines.last().is_some_and(RLine::is_blank) {
         r.lines.pop();
     }
-    r.lines
+    (r.lines, r.headings)
 }
 
 /// The image file names a note links to, percent-decoded, in order.
@@ -934,8 +979,9 @@ mod tests {
         for (index, link) in &para.links {
             assert_eq!(para.spans[*index].content, link.label());
         }
-        assert_eq!(lines[0].heading, 1);
-        assert_eq!(para.heading, 0);
+        let (_, headings) = render_with_headings(src);
+        assert_eq!(headings.first().map(|h| h.block), Some(lines[0].block));
+        assert!(headings.iter().all(|h| h.block != para.block));
         assert_eq!(
             wiki_links(src)
                 .iter()
@@ -1059,5 +1105,51 @@ mod tests {
                 .join("\n")
         ));
         assert!(full.iter().any(|l| l.plain() == "• Book 120"));
+    }
+
+    fn outline(src: &str) -> Vec<(u8, String)> {
+        render_with_headings(src)
+            .1
+            .into_iter()
+            .map(|h| (h.level, h.text))
+            .collect()
+    }
+
+    #[test]
+    fn headings_skip_fenced_code_and_keep_duplicates() {
+        let src = "# Title\n#tag\n\n## Setup\ntext\n\n```sh\n# a shell comment\n## not a heading\n```\n\n~~~\n# tilde fence\n~~~\n\n### Notes\n\n## Setup\n\n#hashtag line\n\n####### seven is text\n";
+        assert_eq!(
+            outline(src),
+            vec![
+                (1, "Title".to_string()),
+                (2, "Setup".to_string()),
+                (3, "Notes".to_string()),
+                (2, "Setup".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn heading_text_drops_markup_and_keeps_code() {
+        let src = "## *Bold* ==mark== and `code`\n\nSetext\n------\n";
+        assert_eq!(
+            outline(src),
+            vec![
+                (2, "Bold mark and code".to_string()),
+                (2, "Setext".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_heading_names_the_block_it_is_drawn_in() {
+        let (lines, headings) = render_with_headings("# T\n\npara\n\n## A\n\n- item\n\n## B\n");
+        for heading in &headings {
+            let line = lines
+                .iter()
+                .find(|l| l.block == heading.block)
+                .expect("the heading's block is drawn");
+            assert_eq!(line.plain(), heading.text);
+        }
     }
 }

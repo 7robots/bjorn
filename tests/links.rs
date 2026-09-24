@@ -587,12 +587,15 @@ async fn links_in_tables_and_quoted_headings_work() {
     let note = bjorn::bear::Note::default();
     reader.show(
         &note,
-        "| a | b |\n|---|---|\n| [[One|uno]] | two |\n\n> ## Quoted heading\n",
+        "| a | b |\n|---|---|\n| [[One|uno]] | two |\n\n> ## Quoted heading\n\n## See [[Two|dos]]\n",
     );
     // Row 0 is the header, 1 the rule, 2 the first body row.
     let link = reader.link_at(0, 2, 40).expect("the cell's link");
     assert_eq!(link.title, "One");
-    assert!(reader.scroll_to_heading("quoted heading", 40));
+    assert!(reader.scroll_to_section("quoted heading", 40, 1));
+    // A heading holding a link is named by what the reader draws.
+    assert!(reader.scroll_to_section("see dos", 40, 1));
+    assert!(!reader.scroll_to_section("see [[two|dos]]", 40, 1));
 }
 
 #[tokio::test]
