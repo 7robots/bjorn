@@ -421,7 +421,18 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
             " {} · quit the editor to save back to Bear",
             editing.job.command[0]
         ),
-        None => format!(" {}", app.reader.meta),
+        None => {
+            let section = app
+                .reader
+                .section_name(inner.width as usize, inner.height as usize);
+            match section {
+                Some(section) => {
+                    let section = fit_cells(&section, (inner.width as usize / 3).max(8));
+                    format!(" § {} · {}", section.trim_end(), app.reader.meta)
+                }
+                None => format!(" {}", app.reader.meta),
+            }
+        }
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(meta_text, theme::muted()))),
@@ -988,6 +999,9 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                         ),
                         format!("stops after {} s", action.timeout.as_secs()),
                     ];
+                    if let Some(title) = &action.prompt {
+                        facts.push(format!("asks: {title}"));
+                    }
                     if action.confirm {
                         facts.push("asks before running".into());
                     }
@@ -1019,6 +1033,81 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             )));
             lines.push(Line::from(Span::styled(
                 "  type to search/filter · ↑/↓ pick · enter runs · ctrl+e edits · ctrl+d deletes · esc closes",
+                theme::muted(),
+            )));
+            frame.render_widget(Paragraph::new(lines), inner);
+            field_cursor(frame, field, inner.x + 2, inner.y, width as u16);
+        }
+        Overlay::Outline { field, index } => {
+            let headings = &app.reader.headings;
+            let shown = crate::ui::note_view::outline_filter(headings, &field.value);
+            let wide = area.width.saturating_sub(8).clamp(40, 80);
+            let width = wide.min(area.width).saturating_sub(6) as usize;
+            let no_match = shown.is_empty();
+            let rows = shown
+                .len()
+                .clamp(1, (area.height as usize).saturating_sub(6).max(1));
+            // Border, filter, gap, rows, gap, hint, border.
+            let height = (rows + 6) as u16;
+            let index = &(*index).min(shown.len().saturating_sub(1));
+            let title = match &app.reader.note {
+                Some(note) => format!("Outline · “{}”", fit_cells(&note.title, 40).trim_end()),
+                None => "Outline".to_string(),
+            };
+            let inner = dialog(frame, area, wide, height, Some(&title));
+
+            let mut lines = Vec::new();
+            if field.value.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        fit_cells("type to filter headings…", width),
+                        theme::cursor_focused().add_modifier(Modifier::DIM),
+                    ),
+                ]));
+            } else {
+                lines.push(field_line(field, true, width));
+            }
+            lines.push(Line::from(""));
+            if no_match {
+                lines.push(Line::from(Span::styled(
+                    "  no heading matches",
+                    theme::muted(),
+                )));
+            }
+            // The list scrolls under the highlight once it is past the window.
+            let top = index.saturating_sub(rows - 1);
+            for (i, &h) in shown.iter().enumerate().skip(top).take(rows) {
+                let heading = &headings[h];
+                let selected = i == *index;
+                let style = if selected {
+                    theme::match_style()
+                } else {
+                    Style::default()
+                };
+                let indent = "  ".repeat(heading.level.saturating_sub(1) as usize);
+                let text_style = if heading.level <= 2 {
+                    style.add_modifier(Modifier::BOLD)
+                } else {
+                    style
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(if selected { "  ▸ " } else { "    " }, style),
+                    Span::styled(indent.clone(), style),
+                    Span::styled(
+                        fit_cells(
+                            &heading.text,
+                            width.saturating_sub(4 + UnicodeWidthStr::width(indent.as_str())),
+                        )
+                        .trim_end()
+                        .to_string(),
+                        text_style,
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  type to filter · ↑/↓ pick · enter scrolls there · esc closes",
                 theme::muted(),
             )));
             frame.render_widget(Paragraph::new(lines), inner);

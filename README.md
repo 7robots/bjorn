@@ -50,6 +50,7 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `t` | triage the workspace's open todos | `c` / click `▮▮▮` | hide the tag column, then the note column too, then show all three |
 | `s` | add today's dated section to the note (see [Dated sections](#dated-sections)) | `T` | the day screen: every section written on one day |
 | `]` / `[` | next / previous match in the reader while searching | `r` | refresh now |
+| `o` | outline: the note's headings, indented by level; type to filter, `enter` scrolls there | `}` / `{` | next / previous heading in the reader |
 | `?` | help (`esc` `q` `?` close it) | `q` | quit, after a confirm |
 
 The **workspace** is a tag subtree that scopes the whole app: the tag tree
@@ -68,6 +69,13 @@ stays open with the query, dimmed until you press `/` or click it to edit
 again. While a search is active the reader highlights the terms, including
 inside fenced code and table cells, the header counts the matching blocks,
 `]` and `[` step through them, and `enter` on a note lands on its first match.
+
+`o` lists the headings of the note in the reader, indented by level, with the
+section you are reading highlighted; typing filters them and `enter` scrolls
+that heading to the top of the reader. `}` and `{` step to the next and
+previous heading without the list, and the line under the reader names the
+section at the top of the view. Headings come from the same parse that draws
+the note, so a `#` line inside fenced code is never one.
 
 Views are computed from one `bearcli list` snapshot, so the counts in the
 sidebar and the notes list always agree. **Pinned** means any pin, global or
@@ -316,19 +324,26 @@ default = true         # this is what `!` runs
 name = "Copy as plain text"
 command = "pbcopy"
 format = "txt"
+
+[[actions]]
+name = "Mail it to someone"
+command = 'mail -s "$BJORN_NOTE_TITLE" "$BJORN_ACTION_INPUT" < "$BJORN_NOTE_FILE"'
+prompt = "Send to which address"   # asks first, answer in $BJORN_ACTION_INPUT
 ```
 
 `a` opens the action menu — a search box over your actions, filtered as you
 type, with the default marked ★ and the highlighted command shown in full;
-`enter` runs. `!` skips the menu and runs the default straight away. The
-menu's last row, **+ New action**, adds one, `ctrl+e` edits the highlighted one
-and `ctrl+d` deletes it after asking; all three write the config for you,
-comments and all. The note is rendered the way
-export renders it, written to a temp file the command gets as
-`$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in the
-environment; the file goes away when the command ends. The first line the
-command prints comes back as a toast, and a non-zero exit is reported with its
-stderr. Full reference: [docs/actions.md](docs/actions.md).
+`enter` runs. An action with a `prompt` asks for one line of text first and
+passes it as `$BJORN_ACTION_INPUT`, which is one action rather than five
+when all that changes between them is an argument. `!` skips the menu and
+runs the default straight away. The menu's last row, **+ New action**, adds
+one, `ctrl+e` edits the highlighted one and `ctrl+d` deletes it after
+asking; all three write the config for you, comments and all. The note is
+rendered the way export renders it, written to a temp file the command gets
+as `$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in
+the environment; the file goes away when the command ends. The first line
+the command prints comes back as a toast, and a non-zero exit is reported
+with its stderr. Full reference: [docs/actions.md](docs/actions.md).
 
 ## Development
 

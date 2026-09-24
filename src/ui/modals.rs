@@ -11,8 +11,9 @@ use crate::bear::Note;
 pub enum Pending {
     Quit,
     Trash(Note),
-    /// An action whose config says `confirm = true`.
-    RunAction(Action, Note),
+    /// An action whose config says `confirm = true`. The string is what its
+    /// `prompt` collected, empty when it has none.
+    RunAction(Action, Note, String),
     /// Deleting an action from the config; cancelling goes back to the menu.
     DeleteAction(Action, Note),
     Tick(Vec<crate::ui::triage::TriageRow>),
@@ -21,7 +22,16 @@ pub enum Pending {
 /// What a submitted text prompt goes on to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TextPurpose {
-    ExportPath { format_id: &'static str, note: Note },
+    ExportPath {
+        format_id: &'static str,
+        note: Note,
+    },
+    /// The answer to an action's `prompt`, on its way to `$BJORN_ACTION_INPUT`.
+    /// Empty is allowed: a command can treat "no answer" as its default.
+    ActionInput {
+        action: Action,
+        note: Note,
+    },
 }
 
 /// A one-line text field with a cursor, shared by the prompts.
@@ -116,6 +126,12 @@ pub enum Overlay {
         index: usize,
         note: Note,
     },
+    /// The reader's headings under a search box. `index` is the highlighted
+    /// row among the ones the search leaves.
+    Outline {
+        field: Field,
+        index: usize,
+    },
     /// The form for a new action (the menu's last row) or for editing one
     /// (`ctrl+e`); saving writes the config.
     /// `focus` is the row: 0 name, 1 command, 2 format, 3 confirm, 4 default.
@@ -147,6 +163,7 @@ impl Overlay {
             Overlay::Format { .. } => "Format",
             Overlay::Text { .. } => "Text",
             Overlay::Actions { .. } => "Actions",
+            Overlay::Outline { .. } => "Outline",
             Overlay::NewAction { .. } => "NewAction",
             Overlay::NewNote { .. } => "NewNote",
         }

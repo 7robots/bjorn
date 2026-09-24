@@ -174,7 +174,6 @@ impl NoteList {
             spans,
             block: 0,
             cont: Vec::new(),
-            heading: false,
         };
         let mut rows = wrap(&preview, width);
         let clipped = rows.len() > PREVIEW_ROWS;

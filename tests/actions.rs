@@ -350,6 +350,7 @@ async fn the_menu_marks_the_default_and_shows_the_highlighted_command() {
                 command: "aws s3 cp \"$BJORN_NOTE_FILE\" s3://notes/".into(),
                 format: "html".into(),
                 confirm: true,
+                prompt: None,
                 default: true,
                 timeout: Duration::from_secs(300),
             },
@@ -526,7 +527,7 @@ async fn ctrl_e_edits_the_highlighted_action_in_place() {
     let (config, path) = file_config(
         &fake,
         "# my notes config\n[[actions]]\nname = \"Copy\"  # clipboard\ncommand = \"true\"\n\n\
-         [[actions]]\nname = \"Upload\"\ncommand = \"false\"\ntimeout = 300\n",
+         [[actions]]\nname = \"Upload\"\ncommand = \"false\"\ntimeout = 300\nprompt = \"Range\"\n",
     );
     let mut h = fake.harness_with(config, None);
     h.load().await;
@@ -569,7 +570,7 @@ async fn ctrl_e_edits_the_highlighted_action_in_place() {
     );
     assert!(body.contains("name = \"Upload v2\"\n"), "{body}");
     assert!(
-        body.contains("timeout = 300\n"),
+        body.contains("timeout = 300\n") && body.contains("prompt = \"Range\"\n"),
         "keys the form does not show survive: {body}"
     );
     let actions = Config::load(Some(&path)).unwrap().actions;
@@ -582,6 +583,9 @@ async fn ctrl_e_edits_the_highlighted_action_in_place() {
     h.press("escape");
     h.press("a");
     h.press("down");
+    h.press("enter");
+    // The entry kept its `prompt`, so running it asks before the command goes.
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Text"));
     h.press("enter");
     h.until(|_| receipt.exists()).await;
 }
@@ -633,4 +637,162 @@ async fn ctrl_d_deletes_an_action_after_asking() {
     );
     assert_eq!(h.app.config.actions.len(), 1);
     assert_eq!(h.app.config.actions[0].name, "Copy");
+}
+
+/// An action that records `$BJORN_ACTION_INPUT`, and nothing else, so an empty
+/// answer is visible as an empty file rather than a missing one.
+fn recording_input(dir: &std::path::Path, name: &str) -> Action {
+    let receipt = dir.join(format!("{name}.receipt"));
+    Action {
+        name: name.to_string(),
+        command: format!(
+            "printf '%s' \"$BJORN_ACTION_INPUT\" > {}; echo sent",
+            shell_quote(&receipt.to_string_lossy())
+        ),
+        ..Action::default()
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_action_asks_for_a_line_and_passes_it_to_the_command() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            default: true,
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Text"));
+    assert!(h.text().contains("Range"), "{}", h.text());
+    for key in ["l", "a", "s", "t", "-", "w", "e", "e", "k"] {
+        h.press(key);
+    }
+    h.press("enter");
+    h.until(|_| fake.dir.path().join("Sync.receipt").exists())
+        .await;
+    assert_eq!(receipt(&fake, "Sync"), "last-week");
+}
+
+#[tokio::test]
+async fn an_empty_answer_still_runs_and_escape_cancels() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            default: true,
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+
+    h.press("!");
+    h.press("escape");
+    h.settle().await;
+    assert!(h.app.overlay.is_none());
+    assert!(!fake.dir.path().join("Sync.receipt").exists());
+
+    // Enter on an empty field is an answer: the command decides what it means.
+    h.press("!");
+    h.press("enter");
+    h.until(|_| fake.dir.path().join("Sync.receipt").exists())
+        .await;
+    assert_eq!(receipt(&fake, "Sync"), "");
+}
+
+#[tokio::test]
+async fn a_prompt_action_that_confirms_quotes_the_answer() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            confirm: true,
+            default: true,
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    h.press("2");
+    h.press("w");
+    h.press("enter");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
+    assert!(h.text().contains("Run “Sync” on “2w”?"), "{}", h.text());
+    h.press("y");
+    h.until(|_| fake.dir.path().join("Sync.receipt").exists())
+        .await;
+    assert_eq!(receipt(&fake, "Sync"), "2w");
+}
+
+#[tokio::test]
+async fn an_action_without_a_prompt_still_gets_the_variable_set_and_empty() {
+    // Documented in docs/actions.md: `$BJORN_ACTION_INPUT` is always defined, so
+    // a command under `set -u` can read it without guarding.
+    let fake = Fake::new();
+    let receipt = fake.dir.path().join("Plain.receipt");
+    let config = config_with(
+        &fake,
+        vec![Action {
+            name: "Plain".into(),
+            command: format!(
+                "set -u; printf '[%s]' \"$BJORN_ACTION_INPUT\" > {}; echo sent",
+                shell_quote(&receipt.to_string_lossy())
+            ),
+            default: true,
+            ..Action::default()
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    h.until(|_| receipt.exists()).await;
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "[]");
+}
+
+#[tokio::test]
+async fn an_empty_answer_is_not_confirmed_as_the_note_title() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            confirm: true,
+            default: true,
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    h.press("enter");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
+    // The note under the cursor is "Sprint Planning"; naming it here would point
+    // at something this command never touches.
+    let text = h.text();
+    assert!(text.contains("Run “Sync” on no input?"), "{text}");
+    assert!(!text.contains("on “Sprint Planning”?"), "{text}");
+}
+
+#[tokio::test]
+async fn the_menu_says_an_action_asks_and_what_it_asks() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("a");
+    assert!(h.text().contains("asks: Range"), "{}", h.text());
 }

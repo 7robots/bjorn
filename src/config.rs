@@ -288,6 +288,12 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
             .unwrap_or(DEFAULT_TIMEOUT_SECONDS),
         Some(_) => DEFAULT_TIMEOUT_SECONDS,
     };
+    // An empty or non-string `prompt` is no prompt at all, so a half-written
+    // one never leaves an action unable to run.
+    let prompt = match entry.get("prompt") {
+        Some(Value::String(title)) if !title.trim().is_empty() => Some(title.trim().to_string()),
+        _ => None,
+    };
     Some(Action {
         name: if name.is_empty() {
             command.clone()
@@ -298,6 +304,7 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
         // An unknown format falls back to Markdown, as `export_format` does.
         format: crate::export::format_by_id(&format).id.to_string(),
         confirm: truthy(entry.get("confirm"), false),
+        prompt,
         timeout: std::time::Duration::from_secs(timeout),
         default: truthy(entry.get("default"), false),
     })
@@ -465,18 +472,23 @@ mod tests {
             &dir,
             "[[actions]]\nname = \"Publish to S3\"\ncommand = \"aws s3 cp \\\"$BJORN_NOTE_FILE\\\" s3://notes/\"\n\
              format = \"HTML\"\nconfirm = true\ntimeout = 300\ndefault = true\n\n\
-             [[actions]]\ncommand = \"pbcopy\"\nformat = \"nonsense\"\n\n\
+             prompt = \"Which bucket\"\n\n\
+             [[actions]]\ncommand = \"pbcopy\"\nformat = \"nonsense\"\nprompt = \"  \"\n\n\
+             [[actions]]\nname = \"Typo\"\ncommand = \"true\"\nprompt = 5\n\n\
              [[actions]]\nname = \"No command\"\n",
         );
         let actions = Config::load(Some(&path)).unwrap().actions;
-        assert_eq!(actions.len(), 2, "the entry without a command is dropped");
+        assert_eq!(actions.len(), 3, "the entry without a command is dropped");
         assert_eq!(actions[0].name, "Publish to S3");
         assert_eq!(actions[0].format, "html");
         assert!(actions[0].confirm && actions[0].default);
         assert_eq!(actions[0].timeout, std::time::Duration::from_secs(300));
+        assert_eq!(actions[0].prompt.as_deref(), Some("Which bucket"));
         assert_eq!(actions[1].name, "pbcopy", "the command names it");
         assert_eq!(actions[1].format, "md", "an unknown format falls back");
         assert!(!actions[1].confirm && !actions[1].default);
+        assert_eq!(actions[1].prompt, None, "a blank prompt is no prompt");
+        assert_eq!(actions[2].prompt, None, "a non-string prompt is no prompt");
         assert_eq!(
             actions[1].timeout,
             std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)

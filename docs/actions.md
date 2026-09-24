@@ -82,11 +82,36 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 | `command` | — | required; run through `sh -c`, so pipes, `&&` and redirection all work |
 | `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`. An unknown name falls back to `md` |
 | `confirm` | `false` | ask before running. Worth setting on anything that publishes or deletes |
+| `prompt` | — | ask for one line of text first and pass it as `$BJORN_ACTION_INPUT`. The value is the prompt's title (`prompt = "Which bucket"`). A blank one is no prompt at all |
 | `timeout` | `60` | seconds; a command that overruns is killed and reported |
 | `default` | `false` | the action `!` runs. With exactly one action configured, that one is the default whether or not it says so |
 
 An entry without a `command` is skipped rather than raised, so a half-written
 action never stops the app.
+
+## Asking for something first
+
+An action with a `prompt` asks for one line of text before it runs, and hands
+it to the command as `$BJORN_ACTION_INPUT`. It is one action instead of five
+when the only difference between them is an argument:
+
+```toml
+[[actions]]
+name = "Sync my notes"
+command = 'notes-sync "$BJORN_ACTION_INPUT"'
+prompt = "Range: today, week, last-week, 2w, or a date"
+```
+
+The menu's detail line says `asks: <title>` for an action that has one. The
+add and edit form does not show `prompt`, so set it by hand in the config;
+editing an action through the form keeps the prompt it already has, the way it
+keeps a `timeout`.
+
+`enter` runs it, `esc` cancels. An empty answer still runs: a command that has
+a sensible default ("today", here) can treat "nothing typed" as asking for it,
+so the quick path stays two keys. With `confirm = true` as well the prompt comes
+first and the dialog quotes the answer — *Run "Sync my notes" on "last-week"?* —
+so a fat-fingered range is caught before the command sees it.
 
 ## What the command gets
 
@@ -98,6 +123,8 @@ ends.
 - **stdin** — the note's text in the chosen format. A TextBundle is a folder, so
   stdin gets its `text.md`.
 - `BJORN_NOTE_FILE` — the full path to that file. Quote it; titles have spaces.
+- `BJORN_ACTION_INPUT` — what `prompt` collected; empty when the action has no
+  prompt, and empty when the prompt was answered with nothing.
 - `BJORN_NOTE_TITLE`, `BJORN_NOTE_ID`, `BJORN_NOTE_TAGS` (comma-separated),
   `BJORN_NOTE_CREATED`, `BJORN_NOTE_MODIFIED` (RFC 3339), `BJORN_NOTE_PINNED`
   (`0`/`1`), `BJORN_NOTE_FORMAT`, `BJORN_ACTION`.
@@ -122,7 +149,18 @@ it up.
 ## Safety
 
 An action is a shell command you wrote, run with your credentials, on demand.
-Bjorn does not sandbox it and does not parse it. Two habits are worth keeping:
-set `confirm = true` on anything that publishes, deletes or costs money, and
-quote `"$BJORN_NOTE_FILE"` and `"$BJORN_NOTE_TITLE"` — note titles carry
-spaces, quotes and slashes, and only the filename is sanitized.
+Bjorn does not sandbox it and does not parse it. Three habits are worth keeping:
+set `confirm = true` on anything that publishes, deletes or costs money; quote
+`"$BJORN_NOTE_FILE"` and `"$BJORN_NOTE_TITLE"` — note titles carry spaces,
+quotes and slashes, and only the filename is sanitized; and quote
+`"$BJORN_ACTION_INPUT"` as well.
+
+The variables reach the command through its environment, never spliced into the
+command text, so a `;` or a `$(…)` inside one is inert. Two things undo that.
+Leaving a variable unquoted lets the shell split it into words, so a typed
+`--force` arrives as an *option* rather than as text and a `*` is expanded
+against the working directory. And handing one to something that evaluates its
+input — `eval`, `sh -c "$VAR"`, an arithmetic context like `$(( VAR ))` or
+`[[ $VAR -eq 1 ]]` — turns the text back into code. An action that cannot avoid
+that should carry `confirm = true`, which shows the answer back to you, quoted,
+before the command sees it.
