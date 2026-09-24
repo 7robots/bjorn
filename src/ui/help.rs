@@ -53,6 +53,20 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Sections",
+        &[
+            (
+                "o",
+                "outline: the note's headings, indented by level, the current one highlighted",
+            ),
+            (
+                "",
+                "in the outline: type to filter · ↑ ↓ tab ctrl+n/p pick · enter scrolls there · esc closes",
+            ),
+            ("} / {", "next / previous heading in the reader"),
+        ],
+    ),
+    (
         "Notes",
         &[
             ("n", "new note (title, tags), then edit"),
