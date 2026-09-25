@@ -273,6 +273,15 @@ failed command never write. An action marked `interactive` instead takes the win
 keyboard in a pseudo-terminal until its command exits, for the ones that ask
 their own questions. Full reference: [docs/actions.md](docs/actions.md).
 
+A PDF is one of those commands. The HTML export carries a print stylesheet —
+A4, a light page whatever the theme is, the theme's own colors on the links
+and the list markers — so `weasyprint` or headless Chrome turns an exported
+note into a PDF that reads like Bear's own: [recipe](docs/actions.md#a-pdf).
+The page is the note as written, inline HTML included; a policy in the page
+stops it running in a browser or in Chrome, but WeasyPrint ignores that and
+fetches the files and URLs the note's HTML points at, so keep WeasyPrint to
+notes you wrote yourself.
+
 ## Development
 
 ```sh

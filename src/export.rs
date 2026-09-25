@@ -1,9 +1,10 @@
 //! Exporting a note to disk in one of several formats.
 //!
 //! `FORMATS` is what the picker offers; `export_note` dispatches to a writer
-//! per format. Writers are pure: they take the note's text, title and any
-//! attachment bytes and write files. Fetching content and attachments is the
-//! app's job.
+//! per format. Writers take the note's text, title and any attachment bytes
+//! and write files; the two that go through HTML also take the theme, whose
+//! link and list-marker colors the document carries. Fetching content and
+//! attachments is the app's job.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use regex::Regex;
 
 use crate::render::{percent_decode, to_text};
 use crate::render_html;
+use crate::ui::theme;
 use crate::util::expand_tilde;
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -185,7 +187,7 @@ pub fn export_html(
     let destination = prepare(destination)?;
     write(
         &destination,
-        &render_html::render(content, title, images, &HashMap::new()),
+        &render_html::render(content, title, images, &HashMap::new(), theme::current()),
     )?;
     Ok(destination)
 }
@@ -224,6 +226,7 @@ pub fn export_rtf(
         title,
         if kind == "rtfd" { images } else { &empty },
         &HashMap::new(),
+        theme::current(),
     );
     write(&source, &html)?;
     let result = std::process::Command::new("textutil")
