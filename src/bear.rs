@@ -7,7 +7,7 @@
 //! stderr when they fail. Both shapes become `BearError`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -522,6 +522,34 @@ pub struct BearClient {
     preview_cache_written: Mutex<Option<u64>>,
 }
 
+/// Write `body` to `path`, readable by this user only: the previews are the
+/// opening lines of every note. A missing directory is created 0700.
+///
+/// The file is written to a fresh temporary beside the target and renamed, so
+/// a killed process never leaves half a cache behind and two Bjorns never
+/// rename each other's half-written file into place. The temporary is created
+/// 0600 with `O_EXCL`, so nothing already sitting at its name, a symlink
+/// included, is written through.
+fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".previews-")
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    temp.write_all(body)?;
+    temp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 impl BearClient {
     pub fn new(command: Vec<String>) -> BearClient {
         Self::from_runner(Box::new(ProcessRunner {
@@ -633,14 +661,7 @@ impl BearClient {
         let Ok(body) = serde_json::to_vec(&doc) else {
             return;
         };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        // Written beside the target and renamed, so a killed process never
-        // leaves half a cache behind. The pid keeps two Bjorns (or the Python
-        // one) from renaming each other's half-written file into place.
-        let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        if std::fs::write(&temp, &body).is_ok() && std::fs::rename(&temp, path).is_ok() {
+        if write_private(path, &body).is_ok() {
             *self.preview_cache_written.lock().unwrap() = Some(signature);
         }
     }
@@ -1517,6 +1538,38 @@ mod tests {
         let broken = client(&rec).with_preview_cache(path);
         broken.snapshot().await.unwrap();
         assert_eq!(rec.kinds(), vec!["list+content"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_preview_cache_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("cache").join("bjorn");
+        let path = dir.join("previews.json");
+        let rec = Recorder::new((0..3).map(|i| row(i, "2026-09-01T00:00:00Z")).collect());
+        let client = client(&rec).with_preview_cache(path.clone());
+        client.snapshot().await.unwrap();
+        client.save_preview_cache();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+
+        // A cache an older build left world-readable is replaced, not reused.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        rec.rows.lock().unwrap()[0] = row(0, "2026-09-02T00:00:00Z");
+        client.snapshot().await.unwrap();
+        client.save_preview_cache();
+        assert_eq!(mode(&path), 0o600);
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from("previews.json")],
+            "no temporary left behind"
+        );
     }
 
     #[tokio::test]
