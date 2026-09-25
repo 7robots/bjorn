@@ -956,8 +956,11 @@ mod tests {
         );
         let html = render_html::render(&note, "N", &HashMap::new(), &HashMap::new());
         let out = only_embedded(&html);
+        // Only the note's body: Bjorn's own stylesheet may carry an SVG of its
+        // own (a checkbox's tick), which fetches nothing.
+        let body = &out[out.find("<body>").expect("a body")..];
         for gone in ["svg+xml", "md.test", "/etc/hosts"] {
-            assert!(!out.contains(gone), "{gone} survived\n{out}");
+            assert!(!body.contains(gone), "{gone} survived\n{out}");
         }
     }
 
