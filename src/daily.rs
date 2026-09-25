@@ -103,7 +103,8 @@ pub fn today(config: &Config, now: &DateTime<Local>) -> Result<Daily, String> {
 /// The years do not mix: `%G` is not the calendar year in the days around New
 /// Year, so `%G-%m-%d` and `%Y-W%V-%u` each give two days the same title. A
 /// two-digit year (`%y`, `%g`) is accepted; it repeats only after a century.
-/// Any time-of-day or time-zone field is refused, `%c` and `%+` included.
+/// Any time-of-day or time-zone field is refused, `%c` and `%+` included, and
+/// so is a newline or a tab (`%n`, `%t`), which no one-line title can carry.
 pub fn check_title_format(format: &str) -> Result<(), String> {
     use chrono::format::{Fixed, Item, Numeric, StrftimeItems};
 
@@ -122,6 +123,16 @@ pub fn check_title_format(format: &str) -> Result<(), String> {
                 return Err(format!(
                     "[daily] title {format:?} is not a date format chrono can read"
                 ));
+            }
+            // `%n` and `%t` are spaces to chrono, but a newline or a tab has
+            // no place in a title: the title would never match the note.
+            Item::Literal(text) | Item::Space(text) if text.chars().any(char::is_control) => {
+                return Err(control_in_title(format));
+            }
+            Item::OwnedLiteral(ref text) | Item::OwnedSpace(ref text)
+                if text.chars().any(char::is_control) =>
+            {
+                return Err(control_in_title(format));
             }
             Item::Literal(_) | Item::OwnedLiteral(_) | Item::Space(_) | Item::OwnedSpace(_) => {}
             Item::Numeric(numeric, _) => match numeric {
@@ -171,6 +182,13 @@ pub fn check_title_format(format: &str) -> Result<(), String> {
     ))
 }
 
+fn control_in_title(format: &str) -> String {
+    format!(
+        "[daily] title {format:?} holds a control character (%n, %t or a typed one); \
+         a title is one line of text"
+    )
+}
+
 /// The id of today's note, made now if Bear has none by that title. A tag the
 /// template does not write is passed to bearcli, which puts it where Bear's
 /// settings say. A trashed or archived note with today's title is never
@@ -215,15 +233,16 @@ pub fn valid_section(section: &str) -> bool {
         && !section[level..].trim().is_empty()
 }
 
-/// Captured text without C0 control characters, tabs and newlines excepted:
-/// an escape sequence has no business in a note. A carriage return is a line
-/// break, whether alone or before `\n`, so a CRLF or old-Mac paste keeps its
-/// lines instead of running them together.
+/// Captured text without control characters (C0, DEL and C1), tabs and
+/// newlines excepted: an escape sequence has no business in a note, and a C1
+/// CSI (U+009B) is one a terminal honors as surely as `ESC [`. A carriage
+/// return is a line break, whether alone or before `\n`, so a CRLF or
+/// old-Mac paste keeps its lines instead of running them together.
 pub fn clean(text: &str) -> String {
     text.replace("\r\n", "\n")
         .replace('\r', "\n")
         .chars()
-        .filter(|c| *c == '\t' || *c == '\n' || (*c as u32) >= 0x20)
+        .filter(|c| *c == '\t' || *c == '\n' || !c.is_control())
         .collect()
 }
 
@@ -443,6 +462,29 @@ mod tests {
         );
         assert_eq!(clean("a\x1b[31mb\tc\r\nd\x07"), "a[31mb\tc\nd");
         assert_eq!(clean("old\rmac\r\r\nend"), "old\nmac\n\nend");
+    }
+
+    #[test]
+    fn captures_lose_del_and_c1_controls_too() {
+        assert_eq!(clean("a\x7fb\u{9b}31mc\u{85}d\u{9f}"), "ab31mcd");
+        assert_eq!(
+            clean("tab\tand\nline, é and — stay"),
+            "tab\tand\nline, é and — stay"
+        );
+    }
+
+    #[test]
+    fn a_title_format_with_a_newline_or_tab_is_refused_when_loaded() {
+        for bad in ["%Y-%m-%d%n", "%F%t(%A)", "%F\u{7}", "%F\n"] {
+            let err = check_title_format(bad).unwrap_err();
+            assert!(err.contains("control character"), "{bad:?}: {err}");
+            assert!(err.starts_with(&format!("[daily] title {bad:?} ")), "{err}");
+        }
+        assert_eq!(
+            check_title_format("%F %%n %%t"),
+            Ok(()),
+            "escaped, not fields"
+        );
     }
 
     #[test]
