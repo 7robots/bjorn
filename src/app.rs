@@ -103,7 +103,9 @@ pub enum Msg {
         result: Result<(), BearError>,
     },
     /// An interactive action is ready to start, or could not be prepared.
+    /// `generation` is the start it answers; see `App::session_gen`.
     SessionReady {
+        generation: u64,
         action: Box<Action>,
         payload: Result<Box<crate::actions::Payload>, String>,
     },
@@ -258,8 +260,14 @@ pub struct App {
     pub editing: Option<Editing>,
     pub session: Option<Session>,
     /// An interactive action whose note is still being rendered: its name.
-    /// Keys wait (`esc` cancels) so nothing opens underneath the session.
+    /// Keys are dropped meanwhile (`esc` cancels) so nothing opens underneath
+    /// the session.
     session_starting: Option<String>,
+    /// Counts interactive starts. A start that was called off can still have
+    /// its note rendering; when it finishes, its `SessionReady` must not be
+    /// taken for the start that is pending now, which may be for another
+    /// note, so each start is numbered and only the latest may run.
+    session_gen: u64,
     /// A note just created, to open in the editor once the reload shows it.
     pending_edit: Option<String>,
     /// The triage screen while it is up; it covers the three columns.
@@ -340,6 +348,7 @@ impl App {
             editing: None,
             session: None,
             session_starting: None,
+            session_gen: 0,
             pending_edit: None,
             triage: None,
             remctl,
@@ -652,7 +661,11 @@ impl App {
                 Err(err) => self.error("Read failed", &err),
             },
             Msg::Written { job, result } => self.on_written(job, result),
-            Msg::SessionReady { action, payload } => self.start_session(*action, payload),
+            Msg::SessionReady {
+                generation,
+                action,
+                payload,
+            } => self.start_session(generation, *action, payload),
             Msg::SessionOutput => {}
             Msg::SessionExited(status) => self.session_exited(status),
             Msg::EditorOutput => {}
@@ -1476,12 +1489,14 @@ impl App {
     /// Give an `interactive = true` action the window and the keyboard.
     fn start_session(
         &mut self,
+        generation: u64,
         action: Action,
         payload: Result<Box<crate::actions::Payload>, String>,
     ) {
-        // Cancelled with `esc` while the note was being rendered: dropping the
-        // payload removes its temp directory.
-        if self.session_starting.take().is_none() {
+        // Cancelled with `esc` while the note was being rendered, or cancelled
+        // and then replaced by a newer start: dropping the payload removes its
+        // temp directory, and the pending start, if any, stays pending.
+        if generation != self.session_gen || self.session_starting.take().is_none() {
             return;
         }
         if let Some(running) = self.running_session() {
@@ -2038,6 +2053,8 @@ impl App {
                 return;
             }
             self.session_starting = Some(name.clone());
+            self.session_gen += 1;
+            let generation = self.session_gen;
             self.notify(
                 &format!("Starting “{name}”… (esc cancels)"),
                 Duration::from_secs(3),
@@ -2045,6 +2062,7 @@ impl App {
             tokio::spawn(async move {
                 let payload = Self::action_payload(&client, &action, &note, &input).await;
                 let _ = tx.send(Msg::SessionReady {
+                    generation,
                     action: Box::new(action),
                     payload: payload.map(Box::new),
                 });
@@ -2334,7 +2352,9 @@ impl App {
         }
         // The session is about to take the keyboard; a key now would act on
         // Bjorn behind it (a quit dialog nobody can see), so only `esc`, to
-        // call it off, counts.
+        // call it off, counts. The rest are dropped, not saved for the
+        // command: they were typed before it drew anything, so a replayed `y`
+        // could answer a question nobody has read yet.
         if let Some(name) = &self.session_starting {
             if key.code == KeyCode::Esc {
                 let name = name.clone();

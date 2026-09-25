@@ -153,7 +153,8 @@ differ:
   is killed.
 
 One interactive action runs at a time. Between pressing the key and the
-command starting, while the note is rendered, keys wait and `esc` calls it off.
+command starting, while the note is rendered, `esc` calls it off and every other
+key is ignored: it is not passed on to the command once it starts.
 
 The editor fills the reader pane so the note list stays beside it; an
 interactive action fills the window, because its program owns its own screen and

@@ -261,8 +261,8 @@ async fn the_payload_is_removed_when_the_command_ends() {
         vec![Action {
             default: true,
             command: format!(
-                "printf '%s' \"$BJORN_NOTE_FILE\" > {}",
-                shell_quote(&fake.dir.path().join("path").to_string_lossy())
+                "printf '%s' \"$BJORN_NOTE_FILE\" > {path}.tmp && mv {path}.tmp {path}",
+                path = shell_quote(&fake.dir.path().join("path").to_string_lossy())
             ),
             name: "Where".into(),
             ..Action::default()
@@ -312,8 +312,8 @@ async fn actions_come_from_the_config_file() {
         &path,
         format!(
             "[[actions]]\nname = \"Save it\"\ndefault = true\nformat = \"txt\"\n\
-             command = \"cp \\\"$BJORN_NOTE_FILE\\\" {}\"\n",
-            shell_quote(&receipt.to_string_lossy())
+             command = \"cp \\\"$BJORN_NOTE_FILE\\\" {r}.tmp && mv {r}.tmp {r}\"\n",
+            r = shell_quote(&receipt.to_string_lossy())
         ),
     )
     .unwrap();
@@ -649,8 +649,8 @@ fn recording_input(dir: &std::path::Path, name: &str) -> Action {
     Action {
         name: name.to_string(),
         command: format!(
-            "printf '%s' \"$BJORN_ACTION_INPUT\" > {}; echo sent",
-            shell_quote(&receipt.to_string_lossy())
+            "printf '%s' \"$BJORN_ACTION_INPUT\" > {r}.tmp && mv {r}.tmp {r}; echo sent",
+            r = shell_quote(&receipt.to_string_lossy())
         ),
         ..Action::default()
     }
@@ -746,8 +746,8 @@ async fn an_action_without_a_prompt_still_gets_the_variable_set_and_empty() {
         vec![Action {
             name: "Plain".into(),
             command: format!(
-                "set -u; printf '[%s]' \"$BJORN_ACTION_INPUT\" > {}; echo sent",
-                shell_quote(&receipt.to_string_lossy())
+                "set -u; printf '[%s]' \"$BJORN_ACTION_INPUT\" > {r}.tmp && mv {r}.tmp {r}; echo sent",
+                r = shell_quote(&receipt.to_string_lossy())
             ),
             default: true,
             ..Action::default()
@@ -872,7 +872,7 @@ fn interactive(fake: &Fake, command: &str) -> Config {
 }
 
 #[tokio::test]
-async fn keys_wait_while_an_interactive_action_starts() {
+async fn keys_are_dropped_while_an_interactive_action_starts() {
     let fake = Fake::new();
     let mut h = fake.harness_with(
         interactive(&fake, "printf 'SESSION UP'; read -r line"),
@@ -900,6 +900,10 @@ async fn keys_wait_while_an_interactive_action_starts() {
     .await;
     h.settle().await;
     assert!(h.app.overlay.is_none());
+    // Nor is the `q` passed on: the command echoes what it reads, and it
+    // read nothing.
+    let contents = h.app.session.as_ref().unwrap().pty.contents();
+    assert!(!contents.contains('q'), "{contents}");
     assert!(
         !h.app
             .toast_messages()
@@ -937,6 +941,68 @@ async fn esc_calls_off_an_interactive_action_that_has_not_started() {
     // Nothing is left holding the keyboard.
     h.press("q");
     assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
+}
+
+/// A start called off with `esc` can still be rendering its note when the
+/// next one begins. Its note arriving then must not start it in place of the
+/// newer one.
+#[tokio::test]
+async fn a_cancelled_start_does_not_run_in_place_of_the_next_one() {
+    let fake = Fake::new();
+    let mut h = fake.harness_with(
+        interactive(
+            &fake,
+            "printf 'SESSION ON %s' \"$BJORN_NOTE_TITLE\"; read -r line",
+        ),
+        None,
+    );
+    h.load().await;
+    let hold = |id: &str| std::path::PathBuf::from(format!("{}.hold-{id}", fake.state().display()));
+
+    // `!` on A, whose note is slow to render, then `esc`.
+    let a = h.app.current_note().unwrap().clone();
+    std::fs::write(hold(&a.id), "").unwrap();
+    h.press("!");
+    h.press("escape");
+
+    // Move to B and press `!` again while A's note is still being read.
+    h.press("j");
+    h.until(|app| app.reader.note.as_ref().is_some_and(|n| n.id != a.id))
+        .await;
+    let b = h.app.current_note().unwrap().clone();
+    assert_ne!(a.id, b.id);
+    std::fs::write(hold(&b.id), "").unwrap();
+    h.press("!");
+
+    // A's note arrives first, while B's start is pending: it is dropped.
+    std::fs::remove_file(hold(&a.id)).unwrap();
+    // Its `cat` returns within milliseconds of the release; half a second
+    // is the window in which it would have started.
+    let _ = h
+        .wait_until(|app| app.session.is_some(), Duration::from_millis(500))
+        .await;
+    assert!(
+        h.app.session.is_none(),
+        "{:?}",
+        h.app.session.as_ref().map(|s| s.pty.contents())
+    );
+
+    // B's arrives and B starts, on B's note.
+    std::fs::remove_file(hold(&b.id)).unwrap();
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("SESSION ON"))
+    })
+    .await;
+    let contents = h.app.session.as_ref().unwrap().pty.contents();
+    assert!(
+        contents.contains(&format!("SESSION ON {}", b.title)),
+        "{contents}"
+    );
+
+    h.press("enter");
+    h.until(|app| app.session.is_none()).await;
 }
 
 #[tokio::test]

@@ -6,7 +6,8 @@
 //! (exit 1) when they fail. State lives in a JSON file at
 //! $BJORN_FAKE_BEAR_STATE (default ~/.cache/bjorn/demo-bear.json), seeded with
 //! sample notes on first run. Every `app open` call is appended to
-//! `<state>.opened` so tests can assert on it.
+//! `<state>.opened` so tests can assert on it, and a `<state>.hold-<id>` file
+//! holds back a `cat` of that note until the test removes it.
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -783,11 +784,23 @@ fn cmd_search(
     Ok(())
 }
 
+/// While `<state>.hold-<id>` exists, a `cat` of that note does not return, so a
+/// test can decide which of two reads finishes first. Gives up after ten
+/// seconds, so a test that forgets to remove it fails instead of hanging.
+fn hold(id: &str) {
+    let gate = PathBuf::from(format!("{}.hold-{id}", state_path().display()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while gate.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn cmd_cat(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
     let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
         return Err(fail(ctx.fmt, "not_found", "Note not found"));
     };
     let note = &state.notes[i];
+    hold(&note.id);
     if note.locked {
         return Err(fail(
             ctx.fmt,
