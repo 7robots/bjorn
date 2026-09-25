@@ -15,7 +15,7 @@ use regex::Regex;
 use unicode_width::UnicodeWidthStr;
 
 use crate::render::{
-    DONE_BOX, HIGHLIGHT_RE, OPEN_BOX, UNDERLINE_RE, is_fence, is_tag_line, tags_in_line,
+    DONE_BOX, HIGHLIGHT_RE, OPEN_BOX, is_fence, is_tag_line, tags_in_line, underline_spans,
 };
 use crate::ui::theme;
 
@@ -75,7 +75,7 @@ pub fn prepare(content: &str) -> String {
             continue;
         }
         let line = HIGHLIGHT_RE.replace_all(line, "<mark>$1</mark>");
-        let line = UNDERLINE_RE.replace_all(&line, "<u>$1</u>");
+        let line = underline_spans(&line, "<u>", "</u>");
         out.push(line.into_owned());
     }
     out.join("\n")
@@ -795,6 +795,18 @@ mod tests {
             ],
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn a_long_line_with_or_without_marks_renders() {
+        // Both used to panic inside fancy-regex's `replace_all`.
+        let stutter = "==a ".repeat(1000);
+        assert_eq!(
+            plain(&render(&stutter)),
+            vec![stutter.trim_end().to_string()]
+        );
+        let long = "x".repeat(1 << 20);
+        assert_eq!(plain(&render(&long)), vec![long]);
     }
 
     #[test]

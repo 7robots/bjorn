@@ -14,8 +14,8 @@ use pulldown_cmark::{Event, Options, Parser, Tag};
 use regex::Regex;
 
 use crate::render::{
-    HIGHLIGHT_RE, TASK_DONE_RE, TASK_OPEN_RE, UNDERLINE_RE, is_fence, is_tag_line, percent_decode,
-    tags_in_line,
+    HIGHLIGHT_RE, TASK_DONE_RE, TASK_OPEN_RE, is_fence, is_tag_line, percent_decode, tags_in_line,
+    underline_spans,
 };
 
 pub const STYLESHEET: &str = r#":root { color-scheme: light dark; }
@@ -113,7 +113,7 @@ pub fn prepare(content: &str) -> String {
         }
         let line = task_inputs(line);
         let line = HIGHLIGHT_RE.replace_all(&line, "<mark>$1</mark>");
-        let line = UNDERLINE_RE.replace_all(&line, "<u>$1</u>");
+        let line = underline_spans(&line, "<u>", "</u>");
         out.push(line.into_owned());
     }
     format!("{}\n", out.join("\n"))
@@ -216,6 +216,15 @@ mod tests {
 | Panel | Qty |\n|---|---|\n| Roof | 6 |\n\n\
 > a quote with `code`\n\n```\n- [ ] not a task ==nor a highlight==\n```\n\n\
 See [REV](https://www.revrobotics.com) and ![the frame](Front%20bed.png).\n";
+
+    #[test]
+    fn a_long_line_exports_without_panicking() {
+        // fancy-regex's `replace_all` panicked on both.
+        let stutter = "==a ".repeat(1000);
+        assert_eq!(prepare(&stutter), format!("{stutter}\n"));
+        let long = "x".repeat(1 << 20);
+        assert!(render_body(&long, &HashMap::new(), &HashMap::new()).contains(&long));
+    }
 
     #[test]
     fn prepare_turns_bear_marks_into_inline_html_outside_fences() {
