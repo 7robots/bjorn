@@ -20,8 +20,9 @@
 //! fence hides every section below it — the same blind spot the todo parser
 //! has, and the note reads as one long code block in Bear too.
 //!
-//! **What a write normalizes**: the note is rejoined with its own dominant line
-//! ending (a CRLF note stays CRLF) and keeps its final newline, or its lack of
+//! **What a write normalizes**: every line of the note is rejoined with its
+//! dominant line ending, so a CRLF note stays CRLF but a note that mixes CRLF
+//! and LF comes back all one kind; it keeps its final newline, or its lack of
 //! one. Blank lines directly around the insert point are collapsed to exactly
 //! one; nothing else in the note is touched.
 
@@ -427,10 +428,69 @@ fn insert_index(config: &SectionsConfig, lines: &[&str], sections: &[Section]) -
             None => bottom_index(lines),
         },
     };
-    // Bear takes a note's title from its first heading. A section written at
-    // the very top of a note that has anything in it would make the date the
-    // title and silently rename the note, so the first line always stays first.
-    if at == 0 && !lines.is_empty() { 1 } else { at }
+    at.max(title_floor(lines, sections))
+}
+
+/// The first line a new section may go at: nothing is ever written above or
+/// inside the note's title.
+///
+/// Bear takes a note's title from its first line. A section written at the
+/// very top of a note that has anything in it would make the date the title
+/// and silently rename the note, so the first line always stays first. When
+/// that first line is itself a dated heading — a daily note, whose title *is*
+/// the day — the title owns its whole section, not just the heading: the
+/// section goes after it ends, or the new heading would land between the old
+/// one and its tag line and carry the old day's body away under the new date.
+/// The result is out of date order (the title's day stays on top), which is
+/// the price of never renaming the note.
+fn title_floor(lines: &[&str], sections: &[Section]) -> usize {
+    if lines.is_empty() {
+        return 0;
+    }
+    match sections.first() {
+        Some(title) if title.line == 0 => section_end(lines, title, sections),
+        _ => 1,
+    }
+}
+
+/// The line after a section ends: the next heading at its own level or above,
+/// or the next dated section, whichever comes first. A section that runs to
+/// the end of the note stops above the tag line Bear keeps at the bottom, but
+/// never above its own first line — the day tag under its heading.
+fn section_end(lines: &[&str], section: &Section, sections: &[Section]) -> usize {
+    let level = section.level();
+    let mut in_fence = false;
+    let mut next_heading = None;
+    for (index, raw) in lines.iter().enumerate().skip(section.line + 1) {
+        if is_fence(raw) {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence || !HEADING_RE.is_match(raw) {
+            continue;
+        }
+        if raw.len() - raw.trim_start_matches('#').len() <= level {
+            next_heading = Some(index);
+            break;
+        }
+    }
+    let next_dated = sections
+        .iter()
+        .map(|s| s.line)
+        .find(|&line| line > section.line);
+    match (next_heading, next_dated) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => {
+            let own = lines
+                .iter()
+                .enumerate()
+                .skip(section.line + 1)
+                .find(|(_, l)| !l.trim().is_empty())
+                .map_or(section.line + 1, |(i, _)| i + 1);
+            bottom_index(lines).max(own)
+        }
+    }
 }
 
 /// The end of the note, above the blank lines and the tag line Bear keeps at
@@ -502,59 +562,6 @@ fn splice(lines: &[&str], at: usize, block: &str, eol: &str, trailing: bool) -> 
         text.push_str(eol);
     }
     text
-}
-
-/// Append `line` to the end of the section for `when`'s date, creating that
-/// section first when the note has none. The line lands above the section's
-/// closing rule and blank lines, so the shape of the template survives.
-///
-/// Nothing calls this yet: `bjorn capture -- "text"` will, once the two
-/// branches carrying a `capture` subcommand agree on one (see docs/ROADMAP.md).
-/// The day screen and `s` use the pieces above.
-pub fn append_to_section(
-    config: &SectionsConfig,
-    content: &str,
-    when: NaiveDateTime,
-    note_title: &str,
-    line: &str,
-) -> String {
-    let body = match insert_section(config, content, when, note_title) {
-        Insertion::Added { content, .. } => content,
-        Insertion::Exists { .. } | Insertion::Unrecognized { .. } => content.to_string(),
-    };
-    let sections = find_sections(config, &body);
-    let Some(section) = sections.iter().find(|s| s.date == when.date()) else {
-        return body;
-    };
-    let lines: Vec<&str> = body.lines().collect();
-    let level = section.level();
-    let mut end = lines.len();
-    for (i, raw) in lines.iter().enumerate().skip(section.line + 1) {
-        if HEADING_RE.is_match(raw) && heading_level(raw) <= level {
-            end = i;
-            break;
-        }
-    }
-    // Above the closing rule and any blank lines under it.
-    while end > section.line + 1
-        && (lines[end - 1].trim().is_empty() || RULE_RE.is_match(lines[end - 1]))
-    {
-        end -= 1;
-    }
-    let mut out: Vec<String> = lines[..end].iter().map(|l| l.to_string()).collect();
-    out.push(line.to_string());
-    out.extend(lines[end..].iter().map(|l| l.to_string()));
-    let (eol, trailing) = line_style(&body);
-    let mut text = out.join(eol);
-    if trailing {
-        text.push_str(eol);
-    }
-    text
-}
-
-fn heading_level(line: &str) -> usize {
-    let trimmed = line.trim_start();
-    trimmed.len() - trimmed.trim_start_matches('#').len()
 }
 
 /// One section on the day screen: which note it is in, and what it says.
@@ -814,22 +821,6 @@ mod tests {
     }
 
     #[test]
-    fn append_lands_inside_todays_section_above_the_rule() {
-        let config = SectionsConfig::default();
-        let grown = append_to_section(&config, NOTE, noon(2026, 9, 12), "Topic", "* Note: added");
-        assert!(
-            grown.contains("* Topic: the rollout\n* Note: added\n\n---"),
-            "{grown}"
-        );
-        // A day with no section yet gets one, then the line.
-        let fresh = append_to_section(&config, NOTE, noon(2026, 9, 19), "Topic", "* Note: fresh");
-        assert!(
-            fresh.contains("## September 19, 2026 (Saturday)\n#log/2026/09/19\n* People:\n* Topic:\n* Note: fresh\n\n---"),
-            "{fresh}"
-        );
-    }
-
-    #[test]
     fn day_rows_keep_only_that_days_sections() {
         let config = SectionsConfig::default();
         let rows = vec![
@@ -999,9 +990,11 @@ mod tests {
             else {
                 panic!("expected an insertion for {insert:?}");
             };
-            assert!(
-                content.starts_with("## September 12, 2026 (Saturday)"),
-                "{insert:?}: {content}"
+            assert_eq!(
+                content,
+                "## September 12, 2026 (Saturday)\n#log/2026/09/12\nold\n\n\
+## September 19, 2026 (Saturday)\n#log/2026/09/19\n* People:\n* Topic:\n\n---\n",
+                "{insert:?}: the title keeps its whole section"
             );
         }
         // An empty note has no first line to protect.
@@ -1013,6 +1006,124 @@ mod tests {
         assert!(
             content.starts_with("## September 19, 2026 (Saturday)"),
             "{content}"
+        );
+    }
+
+    const DAILY: &str = "## September 20, 2026 (Sunday)\n#log/2026/09/20\n* People: Ada\n* Topic: the rollout\n\n---\n";
+    const TODAY_BLOCK: &str =
+        "## September 23, 2026 (Wednesday)\n#log/2026/09/23\n* People:\n* Topic:\n\n---\n";
+
+    fn added(config: &SectionsConfig, body: &str, when: NaiveDateTime) -> String {
+        match insert_section(config, body, when, "T") {
+            Insertion::Added { content, .. } => content,
+            other => panic!("expected an insertion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_daily_notes_title_section_is_not_split() {
+        // The review's example: a note that is one day, titled by its date.
+        let config = SectionsConfig::default();
+        let body = "## September 20, 2026 (Sunday)\n#log/2026/09/20\n* …\n";
+        assert_eq!(
+            added(&config, body, noon(2026, 9, 23)),
+            format!("## September 20, 2026 (Sunday)\n#log/2026/09/20\n* …\n\n{TODAY_BLOCK}"),
+        );
+        // The same with the rule the template closes on.
+        assert_eq!(
+            added(&config, DAILY, noon(2026, 9, 23)),
+            format!("{DAILY}\n{TODAY_BLOCK}"),
+        );
+        // Every position agrees: the title owns its section.
+        for insert in [InsertPosition::Top, InsertPosition::Bottom] {
+            let config = SectionsConfig {
+                insert,
+                ..SectionsConfig::default()
+            };
+            assert_eq!(
+                added(&config, DAILY, noon(2026, 9, 23)),
+                format!("{DAILY}\n{TODAY_BLOCK}"),
+                "{insert:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dated_title_keeps_its_tag_line_even_after_a_blank_line() {
+        // A lone tag line after a blank line reads like the note's bottom
+        // tags, but under a dated title it is that day's tag.
+        let config = SectionsConfig::default();
+        let body = "## September 20, 2026 (Sunday)\n\n#log/2026/09/20\n";
+        assert_eq!(
+            added(&config, body, noon(2026, 9, 23)),
+            format!("## September 20, 2026 (Sunday)\n\n#log/2026/09/20\n\n{TODAY_BLOCK}"),
+        );
+        // The note's own tags at the bottom, after a body, still stay last.
+        let body = format!("{DAILY}\n#daily\n");
+        assert_eq!(
+            added(&config, &body, noon(2026, 9, 23)),
+            format!("{DAILY}\n{TODAY_BLOCK}\n#daily\n"),
+        );
+    }
+
+    #[test]
+    fn a_dated_title_followed_by_older_sections_takes_the_new_one_below_itself() {
+        // The title cannot move, so today's goes after it, above the rest:
+        // newest first everywhere but the title.
+        let config = SectionsConfig::default();
+        let older = "## September 19, 2026 (Saturday)\n#log/2026/09/19\n* Topic: before\n\n---\n";
+        let body = format!("{DAILY}\n{older}");
+        let content = added(&config, &body, noon(2026, 9, 23));
+        assert_eq!(content, format!("{DAILY}\n{TODAY_BLOCK}\n{older}"));
+        assert_eq!(
+            find_sections(&config, &content)
+                .iter()
+                .map(|s| s.date)
+                .collect::<Vec<_>>(),
+            vec![date(2026, 9, 20), date(2026, 9, 23), date(2026, 9, 19)]
+        );
+        // A subheading inside the title's section is part of it; the next
+        // heading at the title's own level ends it.
+        let body = "## September 20, 2026 (Sunday)\n#log/2026/09/20\n\n### Notes\nfirst\n\n## Loose ends\nstuff\n";
+        assert_eq!(
+            added(&config, body, noon(2026, 9, 23)),
+            format!(
+                "## September 20, 2026 (Sunday)\n#log/2026/09/20\n\n### Notes\nfirst\n\n{TODAY_BLOCK}\n## Loose ends\nstuff\n"
+            ),
+        );
+        // A heading inside fenced code does not end it.
+        let body = "## September 20, 2026 (Sunday)\n#log/2026/09/20\n```\n## not a heading\n```\n";
+        assert!(
+            added(&config, body, noon(2026, 9, 23))
+                .starts_with(&format!("{body}\n## September 23")),
+        );
+    }
+
+    #[test]
+    fn a_plain_title_still_takes_the_newest_section_straight_under_it() {
+        // No preamble: the first dated section sits right under the title, and
+        // today's goes between them, as before.
+        let config = SectionsConfig::default();
+        let body = format!("# Topic\n#topic\n\n{DAILY}");
+        assert_eq!(
+            added(&config, &body, noon(2026, 9, 23)),
+            format!("# Topic\n#topic\n\n{TODAY_BLOCK}\n{DAILY}"),
+        );
+    }
+
+    #[test]
+    fn a_daily_note_with_crlf_or_mixed_endings_is_not_split() {
+        let config = SectionsConfig::default();
+        let crlf = DAILY.replace('\n', "\r\n");
+        assert_eq!(
+            added(&config, &crlf, noon(2026, 9, 23)),
+            format!("{DAILY}\n{TODAY_BLOCK}").replace('\n', "\r\n"),
+        );
+        // Mostly LF with one CRLF line: rewritten all LF, still whole.
+        let mixed = DAILY.replacen('\n', "\r\n", 1);
+        assert_eq!(
+            added(&config, &mixed, noon(2026, 9, 23)),
+            format!("{DAILY}\n{TODAY_BLOCK}"),
         );
     }
 

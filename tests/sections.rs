@@ -524,6 +524,79 @@ async fn s_refuses_a_locked_note() {
     );
 }
 
+/// Put a note with exactly this body into the fake's library and reload.
+async fn add_note(
+    fake: &Fake,
+    h: &mut Harness,
+    id: &str,
+    title: &str,
+    location: &str,
+    content: &str,
+) {
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fake.state()).unwrap()).unwrap();
+    state["notes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": id,
+            "title": title,
+            "tags": ["survey"],
+            "location": location,
+            "created": "2026-08-01T09:00:00Z",
+            "modified": "2026-08-01T09:00:00Z",
+            "content": content,
+        }));
+    std::fs::write(fake.state(), serde_json::to_string(&state).unwrap()).unwrap();
+    h.press("r");
+    let owned = id.to_string();
+    h.until(move |app| app.snapshot.by_id(&owned).is_some())
+        .await;
+}
+
+#[tokio::test]
+async fn s_on_a_daily_note_goes_after_the_whole_title_section() {
+    // A daily note's title is its own dated heading. Today's section must not
+    // land between that heading and its tag line, or the old day's tag and
+    // body would move under today's date.
+    let fake = Fake::new();
+    let config = SectionsConfig::default();
+    let mut h = fake.harness();
+    h.load().await;
+    let day = fake.days_ago(3);
+    let original = format!(
+        "{}\n{}\n* People: Ada\n* Topic: the rollout\n\n---\n",
+        heading_of(&config, day),
+        config.day_tag_display(day)
+    );
+    let title = config.heading_text(day);
+    add_note(&fake, &mut h, "NOTE-DAILY", &title, "notes", &original).await;
+    open_note(&mut h, "NOTE-DAILY").await;
+    h.press("s");
+    h.until(|app| {
+        app.toast_messages()
+            .iter()
+            .any(|m| m.starts_with("Added “"))
+    })
+    .await;
+    let content = body(&fake, "NOTE-DAILY").await;
+    assert_eq!(
+        content,
+        format!(
+            "{original}\n{}\n{}\n* People:\n* Topic:\n\n---\n",
+            heading_of(&config, fake.today),
+            config.day_tag_display(fake.today)
+        ),
+        "the old day stays whole and first, today's follows it"
+    );
+    let found = bjorn::sections::find_sections(&config, &content);
+    assert_eq!(
+        found.iter().map(|s| s.date).collect::<Vec<_>>(),
+        vec![day, fake.today]
+    );
+    assert_eq!(found[0].snippet, "People: Ada · Topic: the rollout");
+}
+
 #[tokio::test]
 async fn s_works_on_an_empty_note() {
     let fake = Fake::new();

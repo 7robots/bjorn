@@ -113,8 +113,10 @@ It goes **above the first dated section**, so the newest stays on top, and at
 the end of the note when there is none yet (`insert` changes that; see
 below). It never goes first in a note that has anything in it: Bear takes a
 note's title from its first heading, so a section written above the title would
-rename the note. If today already has a section, nothing is written: the reader
-jumps to the one that is there and says so. The note is read first and written
+rename the note. When the title is itself a dated heading (a daily note), the
+whole of that day's section stays with it and today's goes after it ends. If
+today already has a section, nothing is written: the reader jumps to the one
+that is there and says so. The note is read first and written
 back with `bearcli overwrite --base`, so a change made in Bear while Bjorn was
 reading is refused rather than overwritten, and a read that comes back without
 a hash stops the write instead of writing unguarded.
@@ -123,8 +125,10 @@ Before anything is written, the result is read back with the same parser the
 day screen uses and must hold exactly one section for today; a template that
 does not produce one Bjorn can find again is refused with a message, because
 otherwise every `s` would add another section. Apart from the blank lines
-immediately around the insert point, the note is left alone: it keeps its own
-line endings (a CRLF note stays CRLF) and its final newline, or its lack of one.
+immediately around the insert point and its line endings, the note is left
+alone. A note written with one kind of line ending keeps it (a CRLF note stays
+CRLF); a note that mixes them is rewritten with whichever it uses most, since
+the write rejoins every line. The final newline, or its lack, is kept either way.
 
 A **dated section** is a heading, outside fenced code, that is either
 

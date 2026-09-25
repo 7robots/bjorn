@@ -7,10 +7,9 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
   or the two keep coexisting (gate passed 2026-09-11; numbers in the README).
 - `bjorn capture -- "text"` appending a line into today's section of a
-  configured note. The primitive is in place (`sections::append_to_section`);
-  the CLI surface is left out here because a `capture` subcommand is landing on
+  configured note. Left out here because a `capture` subcommand is landing on
   another branch, and the two must agree on one command rather than fight over
-  it.
+  it; the append helper comes back with its first caller.
 - Search-box completion candidates could be shown as a popup list now that
   the box is drawn by hand; the Python version was limited to one ghost line.
 - A theme that follows the terminal's own palette, for people who dress their
