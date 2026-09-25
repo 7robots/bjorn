@@ -250,32 +250,7 @@ pub fn export_rtf(
     Ok(destination)
 }
 
-/// Attributes a browser or WeasyPrint fetches on its own: an image, a frame,
-/// a stylesheet. `href` is here for `<link>` only — an anchor's href is
-/// followed by a reader, not by the converter.
-static FETCHED_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)\s(src|srcset|poster|background)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#).unwrap()
-});
-static LINK_TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<link\b[^>]*>").unwrap());
-static HREF_OR_DATA_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?is)\s(href|data)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#).unwrap());
-static OBJECT_TAG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<object\b[^>]*>").unwrap());
-static CSS_URL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?is)url\(\s*([^)]*?)\s*\)"#).unwrap());
-static CSS_IMPORT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)@import\b[^;]*;").unwrap());
-
-fn is_embedded(value: &str) -> bool {
-    value
-        .trim()
-        .trim_matches(['"', '\''])
-        .trim_start()
-        .to_ascii_lowercase()
-        .starts_with("data:")
-}
-
-/// Everything the note's own text points at, taken out.
+/// The note's body with everything a converter would fetch taken out.
 ///
 /// A converter fetches what the page it is given points at: WeasyPrint has no
 /// flag to stop it, and Chrome's `--host-resolver-rules` cannot help with
@@ -285,57 +260,55 @@ fn is_embedded(value: &str) -> bool {
 /// note telling somebody it was printed, and a local one bakes a file off the
 /// disk into a PDF that is usually about to be sent on.
 ///
+/// So the body is parsed as a browser would parse it and rebuilt from an
+/// allowlist: no `<script>`, `<style>`, `<link>`, `<svg>`, frame or object
+/// survives, no `style` attribute, no `srcset`, and an image keeps its `src`
+/// only when it is a `data:` URI. Parsing is what closes the gaps a pattern
+/// over the text leaves (`<img/src=…>`, `alt=""src=…`, CSS escapes), and it
+/// is also why the note's words come through untouched: "url(" in a sentence
+/// or `<img>` in a code block is text, never markup.
+///
 /// Nothing is lost that was going to print: an attachment is already a
-/// `data:` URI by the time the HTML is written, and a `data:` URI is what
-/// this keeps. Anything else is dropped: the image leaves an empty frame, the
-/// stylesheet does not apply.
+/// `data:` URI by the time the HTML is written. The page around the body —
+/// the stylesheet and `@page` rules — is Bjorn's own and is left as it is.
 pub fn only_embedded(html: &str) -> String {
-    let html = FETCHED_ATTR_RE.replace_all(html, |caps: &regex::Captures| {
-        if is_embedded(&caps[2]) {
-            caps[0].to_string()
-        } else {
-            String::new()
-        }
-    });
-    let html = LINK_TAG_RE.replace_all(&html, |caps: &regex::Captures| {
-        HREF_OR_DATA_RE
-            .replace_all(&caps[0], |inner: &regex::Captures| {
-                if is_embedded(&inner[2]) {
-                    inner[0].to_string()
-                } else {
-                    String::new()
-                }
-            })
-            .into_owned()
-    });
-    let html = OBJECT_TAG_RE.replace_all(&html, |caps: &regex::Captures| {
-        HREF_OR_DATA_RE
-            .replace_all(&caps[0], |inner: &regex::Captures| {
-                if is_embedded(&inner[2]) {
-                    inner[0].to_string()
-                } else {
-                    String::new()
-                }
-            })
-            .into_owned()
-    });
-    let html = CSS_IMPORT_RE.replace_all(&html, |caps: &regex::Captures| {
-        if caps[0].to_ascii_lowercase().contains("data:") {
-            caps[0].to_string()
-        } else {
-            String::new()
-        }
-    });
-    CSS_URL_RE
-        .replace_all(&html, |caps: &regex::Captures| {
-            if is_embedded(&caps[1]) {
-                caps[0].to_string()
-            } else {
-                "url(about:blank)".to_string()
-            }
-        })
-        .into_owned()
+    let (Some(open), Some(close)) = (html.find("<body>\n"), html.rfind("</body>")) else {
+        return html.to_string();
+    };
+    let body_at = open + "<body>\n".len();
+    if close < body_at {
+        return html.to_string();
+    }
+    format!(
+        "{}{}{}",
+        &html[..body_at],
+        SANITIZER.clean(&html[body_at..close]),
+        &html[close..]
+    )
 }
+
+static SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
+    let mut builder = ammonia::Builder::default();
+    builder
+        // Bjorn's own marks: task boxes, tag pills, highlights.
+        .add_tags(["input", "mark", "u"])
+        .add_tag_attributes("input", ["type", "disabled", "checked"])
+        .add_generic_attributes(["class"])
+        // A link is followed by a reader, never fetched by the converter, so
+        // Bear's own scheme may stay; `data:` is allowed here for images and
+        // the filter below keeps it off everything else that loads.
+        .add_url_schemes(["bear", "data"])
+        .link_rel(None)
+        .attribute_filter(|element, attribute, value| {
+            let data = value.trim_start().to_ascii_lowercase().starts_with("data:");
+            match (element, attribute) {
+                ("img", "src") if !data => None,
+                ("a", "href") if data => None,
+                _ => Some(value.into()),
+            }
+        });
+    builder
+});
 
 /// What turns the HTML rendering into a PDF. macOS ships nothing that can:
 /// `textutil` stops at RTF, and `cupsfilter` refuses HTML outright ("No filter
@@ -411,14 +384,13 @@ impl Converter {
                     // Its own profile: the render never sees your cookies, and
                     // the print does not fail because Chrome is already open.
                     .arg(format!("--user-data-dir={}", profile.display()))
-                    // A note can carry inline HTML and a browser renders it, so
-                    // this one is given nothing to run and nowhere to send
-                    // anything: no hostname resolves, and a bare IP address —
-                    // which never reaches the resolver — meets a dead proxy.
-                    // (`--blink-settings=scriptEnabled=false` would be tidier,
-                    // but it breaks --print-to-pdf outright: empty file, and
-                    // the exit code still says 0.)
-                    .arg("--disable-javascript")
+                    // Nowhere to send anything, behind `only_embedded`: no
+                    // hostname resolves, and a bare IP address — which never
+                    // reaches the resolver — meets a dead proxy. Scripts are
+                    // kept out by `only_embedded` alone. Chromium has no
+                    // `--disable-javascript` (a page's script still ran with
+                    // it), and `--blink-settings=scriptEnabled=false` breaks
+                    // --print-to-pdf outright: empty file, exit code 0.
                     .arg("--host-resolver-rules=MAP * ~NOTFOUND")
                     .arg("--proxy-server=127.0.0.1:1")
                     .arg("--proxy-bypass-list=<-loopback>")
@@ -490,11 +462,15 @@ pub fn export_pdf(
     Ok(destination)
 }
 
-/// Wait for the PDF, not for the converter. WeasyPrint prints and exits;
-/// headless Chrome has been seen to print in under a second and then spin
-/// forever (looping `CVDisplayLinkCreateWithCGDisplay failed` on stderr), so
-/// a finished file that has stopped growing is success even while the browser
-/// is still running — and the group is killed on the way out either way.
+/// Wait for the PDF, not for the converter. WeasyPrint prints and exits, and
+/// is waited for; it writes as it goes, so a pause in its output means
+/// nothing. Headless Chrome has been seen to print in under a second and then
+/// spin forever (looping `CVDisplayLinkCreateWithCGDisplay failed` on
+/// stderr), so for Chrome alone a file that has stopped growing is taken as
+/// done while the browser still runs. Either way the file has to be a whole
+/// PDF (`whole_pdf`) before it counts, and the group is killed on the way
+/// out, whether the converter exited on its own or not: a browser's helpers
+/// can outlive it.
 fn wait_for_pdf(
     child: &mut std::process::Child,
     converter: &Converter,
@@ -503,33 +479,34 @@ fn wait_for_pdf(
 ) -> Result<(), ExportError> {
     let started = Instant::now();
     let mut settled: Option<(u64, Instant)> = None;
+    let failed = |why: String| Err(ExportError(format!("{}: {why}", converter.name())));
     loop {
         match child.try_wait() {
             // It exited on its own: the file is the only honest signal, since
             // Chrome exits 0 after printing its own error page.
             Ok(Some(status)) => {
-                return if status.success() && printed.exists() {
+                kill_group(child);
+                return if status.success() && whole_pdf(printed) {
                     Ok(())
+                } else if status.success() && printed.exists() {
+                    failed("wrote an incomplete PDF".into())
                 } else {
-                    Err(ExportError(format!(
-                        "{}: {}",
-                        converter.name(),
-                        first_complaint(log)
-                    )))
+                    failed(first_complaint(log))
                 };
             }
             Ok(None) => {}
             Err(e) => {
                 kill_group(child);
-                return Err(ExportError(format!("{}: {e}", converter.name())));
+                return failed(e.to_string());
             }
         }
-        if let Ok(size) = std::fs::metadata(printed).map(|m| m.len())
+        if matches!(converter, Converter::Chrome(_))
+            && let Ok(size) = std::fs::metadata(printed).map(|m| m.len())
             && size > 0
         {
             match settled {
                 Some((seen, at)) if seen == size => {
-                    if at.elapsed() >= SETTLE {
+                    if at.elapsed() >= SETTLE && whole_pdf(printed) {
                         kill_group(child);
                         return Ok(());
                     }
@@ -547,6 +524,17 @@ fn wait_for_pdf(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A PDF that was finished: `%PDF-` at the front and `%%EOF` in its last
+/// kilobyte (the spec allows a little trailing whitespace, and some writers
+/// add more). An empty file, or one cut off mid-write, has no trailer.
+fn whole_pdf(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let tail = &bytes[bytes.len().saturating_sub(1024)..];
+    bytes.starts_with(b"%PDF-") && tail.windows(5).any(|w| w == b"%%EOF")
 }
 
 /// How long the PDF has to stop growing before a converter that has not
@@ -679,20 +667,24 @@ pub fn export_note(
 mod tests {
     use super::*;
 
+    fn page(body: &str) -> String {
+        format!("<html><head><style>a {{ color: red; }}</style></head><body>\n{body}</body></html>")
+    }
+
     #[test]
     fn only_embedded_keeps_the_note_and_drops_what_it_points_at() {
-        let html = concat!(
-            r#"<img src="data:image/png;base64,iVBOR"> "#,
+        let html = page(concat!(
+            r#"<p><img src="data:image/png;base64,iVBOR"> "#,
             r#"<img src="https://tracker.test/p.png"> "#,
             r#"<img src="http://127.0.0.1:8080/x" srcset="http://a.test/2x 2x"> "#,
             r#"<img src="file:///Users/you/.ssh/id_rsa"> "#,
+            r#"<a href="https://example.test/read">a link</a></p>"#,
             r#"<iframe src="file:///etc/passwd"></iframe> "#,
             r#"<object data="https://b.test/x.pdf"></object> "#,
             r#"<link rel="stylesheet" href="https://c.test/x.css"> "#,
-            r#"<a href="https://example.test/read">a link</a> "#,
             r#"<style>@import url("https://d.test/x.css"); body { background: url('https://bg-host.test/bg.png'); }</style>"#,
-        );
-        let out = only_embedded(html);
+        ));
+        let out = only_embedded(&html);
         assert!(
             out.contains(r#"<img src="data:image/png;base64,iVBOR">"#),
             "an attachment is already embedded and stays\n{out}"
@@ -714,10 +706,74 @@ mod tests {
             out.contains(r#"<a href="https://example.test/read">a link</a>"#),
             "a reader's link is not something the converter fetches\n{out}"
         );
-        assert!(out.contains("url(about:blank)"), "{out}");
-        // The elements themselves stay; only the reaching stops.
+        // The images stay as empty frames; only the reaching stops.
         assert_eq!(out.matches("<img").count(), 4, "{out}");
-        assert!(out.contains("<iframe") && out.contains("<object"), "{out}");
+        assert!(
+            out.starts_with("<html><head><style>a { color: red; }</style></head><body>\n"),
+            "the page around the body is Bjorn's own and is left alone\n{out}"
+        );
+    }
+
+    #[test]
+    fn only_embedded_parses_rather_than_pattern_matches() {
+        // Each of these got past the patterns this used to be.
+        let html = page(concat!(
+            r#"<img alt=""src="https://one.test/p.png">"#,
+            r#"<img/src="https://two.test/p.png">"#,
+            r#"<svg><image href="https://three.test/i.png"/></svg>"#,
+            r#"<svg><image xlink:href="file:///four/secret"/></svg>"#,
+            r#"<p style="background: \75 rl(https://five.test/bg)">styled</p>"#,
+            r#"<div style="background-image: url(https://six.test/bg)">x</div>"#,
+            r#"<script>fetch("https://seven.test/")</script>"#,
+            r#"<video poster="https://eight.test/p.png"></video>"#,
+            r#"<a href="data:text/html,hi">nine</a>"#,
+            r#"<img src=" data:image/png;base64,AA" onerror="fetch('https://ten.test')">"#,
+        ));
+        let out = only_embedded(&html);
+        for gone in [
+            "one.test",
+            "two.test",
+            "three.test",
+            "four",
+            "five.test",
+            "six.test",
+            "seven.test",
+            "eight.test",
+            "data:text",
+            "ten.test",
+            "<script",
+            "<svg",
+            "style=",
+        ] {
+            assert!(!out.contains(gone), "{gone} survived\n{out}");
+        }
+        assert!(out.contains("styled") && out.contains("nine"), "{out}");
+    }
+
+    #[test]
+    fn only_embedded_leaves_the_notes_own_words_alone() {
+        let note = "Some url(s) here.\n\nAlso @import foo; bar.\n\n\
+                    ```\n<img src=\"a.png\">\n```\n\n\
+                    #tag\n\n- [x] done ==marked== ~under~\n";
+        let html = render_html::render(note, "Words", &HashMap::new(), &HashMap::new());
+        let out = only_embedded(&html);
+        assert!(out.contains("Some url(s) here."), "{out}");
+        assert!(out.contains("Also @import foo; bar."), "{out}");
+        assert!(out.contains("&lt;img src=\"a.png\"&gt;"), "{out}");
+        assert!(
+            out.contains(r#"<input type="checkbox" disabled="" checked="">"#),
+            "{out}"
+        );
+        assert!(
+            out.contains("<mark>marked</mark>") && out.contains("<u>under</u>"),
+            "{out}"
+        );
+        assert!(out.contains(r#"<span class="tag">"#), "{out}");
+        assert_eq!(
+            out.split("</style>").next(),
+            html.split("</style>").next(),
+            "the stylesheet is not the note's and is not filtered"
+        );
     }
 
     #[test]
@@ -737,6 +793,25 @@ mod tests {
             !String::from_utf8_lossy(&bytes).contains("tracker.test"),
             "the tracker's URL is in the PDF"
         );
+    }
+
+    #[test]
+    fn only_a_whole_pdf_counts_as_printed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        assert!(whole_pdf(&file("whole.pdf", b"%PDF-1.7\n1 0 obj\n%%EOF\n")));
+        assert!(!whole_pdf(&file("empty.pdf", b"")));
+        assert!(!whole_pdf(&file("cut.pdf", b"%PDF-1.7\n1 0 obj\n<< /Ty")));
+        assert!(!whole_pdf(&file("page.pdf", b"<html>%%EOF")));
+        assert!(!whole_pdf(&dir.path().join("missing.pdf")));
+        // A trailer the size of a kilobyte after %%EOF is not one it wrote.
+        let mut padded = b"%PDF-1.7\n%%EOF".to_vec();
+        padded.extend(std::iter::repeat_n(b'\n', 2048));
+        assert!(!whole_pdf(&file("padded.pdf", &padded)));
     }
 
     #[test]

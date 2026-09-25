@@ -31,12 +31,15 @@ plan lives in `docs/plans/bjorn-rust.md`.
   or Chrome, the way RTF is handed to `textutil`. macOS ships neither (its own
   `cupsfilter` refuses HTML), so a machine without one gets a plain error
   naming both rather than a format that fails blankly. A browser is given a
-  throwaway profile, no scripting and no network, and the page handed to
-  either converter keeps only what is already embedded in it: a note's inline
-  HTML reaches the converter as written, and a remote image in one is a note
-  telling somebody it was printed, while a local one bakes a file off the disk
-  into a PDF that is usually about to be sent on. Attachments are `data:` URIs
-  by then, so nothing that was going to print is lost.
+  throwaway profile and no network, and the note's body handed to either
+  converter is parsed and rebuilt from an allowlist (`ammonia`): no scripts,
+  styles, frames or SVG, and an image only when it is already a `data:` URI.
+  A note's inline HTML would otherwise reach the converter as written, and a
+  remote image in one is a note telling somebody it was printed, while a local
+  one bakes a file off the disk into a PDF that is usually about to be sent
+  on. Attachments are `data:` URIs by then, so nothing that was going to print
+  is lost, and the note's own words (a `url(` in a sentence, `<img>` in a code
+  block) are text to the parser and come through untouched.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog
