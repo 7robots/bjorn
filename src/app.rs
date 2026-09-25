@@ -23,7 +23,7 @@ use crate::bear::{
 use crate::config::{Config, editor_available, resolve_editor};
 use crate::editor::{self, EditorJob};
 use crate::export::{
-    FORMATS, Format, HUGO_KEY, default_export_path, export_note, extension_for, format_by_id,
+    FORMATS, Format, default_export_path, export_note, extension_for, format_by_id,
 };
 use crate::icons::IconSet;
 use crate::model::{Selection, View, duplicate_titles, select_notes, today};
@@ -120,10 +120,6 @@ pub enum Msg {
     },
     Opened(Result<(), BearError>),
     Exported(Result<PathBuf, String>),
-    /// A Hugo post worked out, ready for the confirm dialog.
-    HugoPlanned(Result<Arc<crate::hugo::Plan>, String>),
-    /// A Hugo post written: the toast's text, or why not.
-    Published(Result<String, String>),
     /// An action finished: the name it ran under, and what it said.
     ActionDone {
         name: String,
@@ -653,46 +649,6 @@ impl App {
                 ),
                 Err(message) => self.notify_titled(
                     &format!("{name} failed"),
-                    &message,
-                    Severity::Error,
-                    Duration::from_secs(10),
-                ),
-            },
-            Msg::HugoPlanned(result) => match result {
-                Ok(plan) if self.overlay.is_none() => {
-                    self.overlay = Some(Overlay::Confirm {
-                        message: plan.question(),
-                        confirm_label: "Publish".into(),
-                        action: Pending::Publish(plan),
-                    })
-                }
-                // Something else took the screen meanwhile; asking now would
-                // land a stray keystroke on the wrong dialog.
-                Ok(plan) => self.notify_titled(
-                    "Publish not asked",
-                    &format!(
-                        "Another dialog was open when “{}” was ready; press P again.",
-                        crate::hugo::clean_display(&plan.title, 60)
-                    ),
-                    Severity::Warning,
-                    Duration::from_secs(8),
-                ),
-                Err(message) => self.notify_titled(
-                    "Cannot publish",
-                    &message,
-                    Severity::Error,
-                    Duration::from_secs(10),
-                ),
-            },
-            Msg::Published(result) => match result {
-                Ok(report) => self.notify_titled(
-                    "Published to Hugo",
-                    &report,
-                    Severity::Information,
-                    Duration::from_secs(10),
-                ),
-                Err(message) => self.notify_titled(
-                    "Publish failed",
                     &message,
                     Severity::Error,
                     Duration::from_secs(10),
@@ -1291,17 +1247,6 @@ impl App {
             Pending::Quit => self.running = false,
             Pending::Tick(rows) => self.tick_rows(rows),
             Pending::RunAction(action, note, input) => self.spawn_action(action, note, input),
-            Pending::Publish(plan) => {
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        crate::hugo::write(&plan).map_err(|e| e.0)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                    let _ = tx.send(Msg::Published(result));
-                });
-            }
             Pending::DeleteAction(action, note) => self.delete_action(action, note),
             Pending::Trash(note) => {
                 let client = self.client.clone();
@@ -1675,79 +1620,6 @@ impl App {
         });
     }
 
-    // -- hugo ----------------------------------------------------------------------
-
-    /// `P`: publish the note as a Hugo post, through the confirm dialog.
-    fn publish_note_action(&mut self) {
-        let Some(note) = self.current_note().cloned() else {
-            self.notify("No note selected.", Duration::from_secs(3));
-            return;
-        };
-        self.publish_note(note);
-    }
-
-    /// Read the note and its attachments, work out the post, then ask. The
-    /// dialog names the file; nothing is written until it is confirmed.
-    fn publish_note(&mut self, note: Note) {
-        if note.locked {
-            self.notify_titled(
-                "",
-                "Locked notes cannot be published.",
-                Severity::Warning,
-                Duration::from_secs(5),
-            );
-            return;
-        }
-        let hugo = self.config.hugo.clone();
-        if !hugo.configured() {
-            self.notify_titled(
-                "Hugo is not set up",
-                "Add a [hugo] section with site = \"~/path/to/site\" to the config.",
-                Severity::Warning,
-                Duration::from_secs(8),
-            );
-            return;
-        }
-        let ledger = crate::hugo::ledger_path(&self.config_path());
-        let client = self.client.clone();
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let outcome: Result<Arc<crate::hugo::Plan>, String> = async {
-                let content = client.cat(&note.id).await.map_err(|e| e.to_string())?;
-                let mut files: HashMap<String, Vec<u8>> = HashMap::new();
-                if note.attachments > 0 {
-                    for name in client
-                        .attachments(&note.id)
-                        .await
-                        .map_err(|e| e.to_string())?
-                    {
-                        let bytes = client
-                            .attachment(&note.id, &name)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        files.insert(name, bytes);
-                    }
-                }
-                tokio::task::spawn_blocking(move || {
-                    crate::hugo::plan(
-                        &hugo,
-                        &ledger,
-                        &note,
-                        &content.content,
-                        &files,
-                        chrono::Utc::now(),
-                    )
-                    .map(Arc::new)
-                    .map_err(|e| e.0)
-                })
-                .await
-                .map_err(|e| e.to_string())?
-            }
-            .await;
-            let _ = tx.send(Msg::HugoPlanned(outcome));
-        });
-    }
-
     // -- actions -------------------------------------------------------------------
 
     /// The note an action would run on, or a toast saying why there is none.
@@ -1996,7 +1868,6 @@ impl App {
             KeyCode::Char('u') => self.restore_note(),
             KeyCode::Char('p') => self.toggle_pin(),
             KeyCode::Char('x') => self.export_note_action(),
-            KeyCode::Char('P') => self.publish_note_action(),
             KeyCode::Char('!') => self.run_default_action(),
             KeyCode::Char('a') => self.open_actions(),
             KeyCode::Char('b') => self.open_in_bear(),
@@ -2114,13 +1985,6 @@ impl App {
                 _ => {}
             },
             Overlay::Format { index, note } => {
-                // The formats, then Hugo.
-                let choices = FORMATS.len() + 1;
-                if key.code == KeyCode::Char(HUGO_KEY) {
-                    self.overlay = None;
-                    self.publish_note(note);
-                    return;
-                }
                 // A format's letter wins over h/l movement (h is HTML).
                 if let KeyCode::Char(c) = key.code
                     && let Some(fmt) = FORMATS.iter().copied().find(|f| f.key == c)
@@ -2130,22 +1994,16 @@ impl App {
                 }
                 match key.code {
                     KeyCode::Esc => self.overlay = None,
-                    KeyCode::Enter => match FORMATS.get(index) {
-                        Some(fmt) => self.choose_format(*fmt, note),
-                        None => {
-                            self.overlay = None;
-                            self.publish_note(note);
-                        }
-                    },
+                    KeyCode::Enter => self.choose_format(FORMATS[index], note),
                     KeyCode::Left | KeyCode::Char('h') => {
                         self.overlay = Some(Overlay::Format {
-                            index: (index + choices - 1) % choices,
+                            index: (index + FORMATS.len() - 1) % FORMATS.len(),
                             note,
                         })
                     }
                     KeyCode::Right | KeyCode::Char('l') => {
                         self.overlay = Some(Overlay::Format {
-                            index: (index + 1) % choices,
+                            index: (index + 1) % FORMATS.len(),
                             note,
                         })
                     }

@@ -660,19 +660,10 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             confirm_label,
             ..
         } => {
-            // A publish shows several lines and a path; the dialog widens,
-            // then wraps each line, to show them.
-            let widest = message.lines().map(|l| l.width()).max().unwrap_or(0);
-            let width = (widest as u16 + 6).clamp(60, 100);
-            let text = width.min(area.width).saturating_sub(6).max(1) as usize;
-            let rows: Vec<String> = message
-                .lines()
-                .flat_map(|line| help::wrap(line, text))
-                .collect();
-            let inner = dialog(frame, area, width, 6 + rows.len() as u16, None);
-            let mut lines = vec![Line::from("")];
-            lines.extend(rows.into_iter().map(|r| Line::from(format!("  {r}"))));
-            lines.extend([
+            let inner = dialog(frame, area, 60, 7, None);
+            let lines = vec![
+                Line::from(""),
+                Line::from(format!("  {message}")),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  Cancel (n / esc)  ", theme::muted()),
@@ -685,19 +676,15 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     ),
                 ])
                 .alignment(Alignment::Right),
-            ]);
+            ];
             frame.render_widget(Paragraph::new(lines), inner);
         }
         Overlay::Format { index, .. } => {
             let inner = dialog(frame, area, 70, 7, None);
-            let mut choices: Vec<Span<'static>> = vec![Span::raw(" ")];
-            let entries = FORMATS
-                .iter()
-                .map(|f| (f.key, f.label))
-                .chain([(crate::export::HUGO_KEY, crate::export::HUGO_LABEL)]);
-            for (i, (key, label)) in entries.enumerate() {
+            let mut choices: Vec<Span<'static>> = vec![Span::raw("  ")];
+            for (i, fmt) in FORMATS.iter().enumerate() {
                 if i > 0 {
-                    choices.push(Span::raw("  "));
+                    choices.push(Span::raw("   "));
                 }
                 let selected = i == *index;
                 let style = if selected {
@@ -706,10 +693,10 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     Style::default()
                 };
                 choices.push(Span::styled(
-                    format!(" {key} "),
+                    format!(" {} ", fmt.key),
                     if selected { style } else { theme::bold() },
                 ));
-                choices.push(Span::styled(format!("{label} "), style));
+                choices.push(Span::styled(format!("{} ", fmt.label), style));
             }
             let lines = vec![
                 Line::from("  Export as"),

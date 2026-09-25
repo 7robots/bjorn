@@ -80,11 +80,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("b", "open the note in Bear.app"),
             (
                 "x",
-                "export as Markdown, HTML, plain text, RTF or TextBundle, or publish to Hugo (g); ← → pick, export_format in the config sets the default",
-            ),
-            (
-                "P",
-                "publish the note as a Hugo post under [hugo] site. Asks first, showing the file, URL, draft state and tags; a republish updates the same post and keeps its URL. Images are staged for upload (media_url) or put beside a bundle",
+                "export as Markdown, HTML, plain text, RTF or TextBundle; ← → pick, export_format in the config sets the default",
             ),
         ],
     ),
@@ -244,7 +240,7 @@ fn theme_rows(current: &str, width: usize) -> Vec<Line<'static>> {
 
 /// Greedy word wrap on display width; a word longer than the width gets a
 /// line of its own rather than being split.
-pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
+fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut rows = Vec::new();
     let mut current = String::new();
