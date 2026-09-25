@@ -14,8 +14,9 @@
 
 use chrono::{DateTime, Local};
 
-use crate::bear::{BearClient, BearError, Location};
+use crate::bear::{BearClient, BearError, Location, normalize_tag};
 use crate::config::{Config, DEFAULT_DAILY_TEMPLATE};
+use crate::render;
 use crate::templates::{self, DAILY_TEMPLATE, LoadError, Template};
 
 /// Today's note as it would be made: its title, its tag and its content.
@@ -197,8 +198,7 @@ fn control_in_title(format: &str) -> String {
 /// changes: a match outside Notes is refused, not used, and restoring it is
 /// left to the user.
 pub async fn ensure(client: &BearClient, daily: &Daily) -> Result<String, BearError> {
-    let hashtag = templates::hashtag(&daily.tag);
-    let tags = if hashtag.is_empty() || daily.content.contains(&hashtag) {
+    let tags = if normalize_tag(&daily.tag).is_empty() || writes_tag(&daily.content, &daily.tag) {
         Vec::new()
     } else {
         vec![daily.tag.clone()]
@@ -223,6 +223,25 @@ pub async fn ensure(client: &BearClient, daily: &Daily) -> Result<String, BearEr
             "not_in_notes",
         )),
     }
+}
+
+/// Does `content` carry `tag` as a whole tag? Each tag is read the way the
+/// reader reads one (`#nested/tag`, `#two words#`) and compared entire, so a
+/// longer tag that starts with the same text (`#log/2026/09/25` for
+/// `log/2026/09/2`) does not count. A fenced code block holds no tags.
+fn writes_tag(content: &str, tag: &str) -> bool {
+    let wanted = normalize_tag(tag);
+    let mut fenced = false;
+    content.lines().any(|line| {
+        if render::is_fence(line) {
+            fenced = !fenced;
+            return false;
+        }
+        !fenced
+            && render::tags_in_line(line)
+                .iter()
+                .any(|found| normalize_tag(found) == wanted)
+    })
 }
 
 /// Is `section` a heading line bearcli can address (`## Inbox`)?
@@ -485,6 +504,18 @@ mod tests {
             Ok(()),
             "escaped, not fields"
         );
+    }
+
+    #[test]
+    fn a_tag_counts_as_written_only_whole() {
+        let content = "## Day\n#log/2026/09/25 #two words#\n```\n#log/2026/09/2\n```\n";
+        assert!(!writes_tag(content, "log/2026/09/2"));
+        assert!(!writes_tag(content, "log/2026/09"));
+        assert!(!writes_tag(content, "two"));
+        assert!(writes_tag(content, "log/2026/09/25"));
+        assert!(writes_tag(content, "#two words#"));
+        assert!(writes_tag("text #log/2026/09/2 here", "log/2026/09/2"));
+        assert!(!writes_tag("## log/2026/09/2", "log/2026/09/2"));
     }
 
     #[test]

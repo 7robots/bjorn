@@ -857,3 +857,17 @@ async fn d_names_todays_note_once_it_is_shown() {
     .await;
     assert_eq!(h.app.notes.current().unwrap().title, TITLE);
 }
+
+#[tokio::test]
+async fn ensure_adds_a_tag_that_only_a_longer_tag_in_the_template_starts_with() {
+    let fake = Fake::new();
+    write_template(&fake, "daily.md", "## {{title}}\n#log/2026/09/25\n");
+    let mut config = steady(&fake);
+    config.daily.tag = "log/2026/09/2".into();
+    let today = daily::today(&config, &at()).unwrap();
+    daily::ensure(&fake.client(), &today).await.unwrap();
+    let snap = fake.client().snapshot().await.unwrap();
+    let note = snap.notes.iter().find(|n| n.title == TITLE).unwrap();
+    assert!(note.has_tag("log/2026/09/2"), "{:?}", note.tags);
+    assert!(note.has_tag("log/2026/09/25"), "{:?}", note.tags);
+}
