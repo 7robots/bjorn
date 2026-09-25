@@ -30,7 +30,7 @@ cd bjorn
 bjorn                 # or: cargo run --release --bin bjorn
 bjorn --tag work      # start scoped to a tag subtree
 bjorn --demo          # sample notes through the built-in fake bearcli, no Bear needed
-bjorn capture "call Ana"   # add a line to today's daily note, no TUI
+bjorn capture "call Ana"   # add a line to today's daily note, no TUI (needs [daily])
 ```
 
 `git pull && ./install.sh` is the update path.
@@ -43,7 +43,7 @@ bjorn capture "call Ana"   # add a line to today's daily note, no TUI
 | `j` `k` `↑` `↓` | move within a pane; in the sidebar the cursor runs from the views into the tags; in the reader they scroll | `esc` | clear the search and its highlights |
 | `enter` | move into the reader for the highlighted note, at the first match while searching | `1`–`7` | Notes, Untagged, Todo, Today, Pinned, Archive, Trash |
 | `n` | new note (title, tags), then edit | `d` | move the note to the trash, after a confirm |
-| `D` | today's daily note, made from the daily template the first time (see [Daily notes and templates](#daily-notes-and-templates)) | `N` | new note from a template: pick one, then title and tags as for `n` |
+| `D` | today's daily note, made from the daily template the first time; off until the config has `[daily]` (see [Daily notes and templates](#daily-notes-and-templates)) | `N` | new note from a template: pick one, then title and tags as for `n` |
 | `e` | edit in `$VISUAL` / `$EDITOR` | `u` | restore from Trash or Archive |
 | `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle, PDF (`←` `→` pick, `enter` confirms) |
 | `b` | open in Bear.app | `!` / `a` | run the default action / open the action menu (see [Actions](#actions)) |
@@ -155,6 +155,19 @@ a reminder is added.
 
 ## Daily notes and templates
 
+Daily notes are off until the config has a `[daily]` table. Bear has no
+daily notes of its own (its Today view is notes modified today), so Bjorn
+does not make any unless asked. An empty table turns them on with the
+defaults:
+
+```toml
+[daily]
+```
+
+Without it, `D` shows a hint instead of making a note, and `bjorn capture`
+and `bjorn today` refuse with the same message and a non-zero exit, without
+calling bearcli. Templates (`N`) work either way.
+
 `D` opens today's note, making it the first time. By default it is titled
 with the date as a second-level heading and tagged with a dated nested tag:
 
@@ -182,7 +195,8 @@ Because the title is the only link, `[daily] title` must name exactly one
 day: a year with a month and day (`%Y-%m-%d`), a year and day of the year
 (`%Y-%j`), or an ISO week date (`%G-W%V-%u`), and no time of day. A title
 that repeats (`%A`, `%B %-d`) would quietly reuse last week's or last year's
-note, so Bjorn refuses it at start with an error naming the key.
+note, so Bjorn refuses it at start with an error naming the key. The check
+runs only while `[daily]` is on; a commented-out table is never read.
 
 Capture from anywhere without opening the app:
 
@@ -265,12 +279,12 @@ remctl = ""                   # path to remctl; default searches PATH
 
 [[actions]]                   # shell commands for `!` and `a`, output to a toast or back into Bear; see Actions below
 
-[daily]                       # `D` and `bjorn capture`; title and tag are strftime formats
-title = "%B %-d, %Y (%A)"     # the note is found by this title, so it must name one day
-tag = "log/%Y/%m/%d"          # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace
-template = "daily"            # templates/daily.md, else the built-in layout
-capture_section = ""          # a heading line, e.g. "## Inbox"; "" adds at the end of the note
-capture_format = "* {{time}} {{text}}"
+# [daily]                     # turns on `D` and `bjorn capture` (off without it); strftime formats
+# title = "%B %-d, %Y (%A)"   # the note is found by this title, so it must name one day
+# tag = "log/%Y/%m/%d"        # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace
+# template = "daily"          # templates/daily.md, else the built-in layout
+# capture_section = ""        # a heading line, e.g. "## Inbox"; "" adds at the end of the note
+# capture_format = "* {{time}} {{text}}"
 
 [templates]
 dir = "~/.config/bjorn/templates"

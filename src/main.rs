@@ -50,12 +50,14 @@ enum Command {
     /// comes from the arguments, or from stdin when there are none. Flags go
     /// before `capture`; a word starting with `-` after it is an error, so
     /// write `bjorn capture -- "$text"` for text that might start with one.
+    /// Needs a `[daily]` table in the config.
     #[command(disable_help_flag = true)]
     Capture {
         /// what to capture; the words are joined with spaces
         text: Vec<String>,
     },
     /// Print today's daily note as `id<TAB>title`, making it if needed.
+    /// Needs a `[daily]` table in the config.
     Today,
 }
 
@@ -143,6 +145,12 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut config = Config::load(cli.config.as_deref())?;
     if let Some(command) = cli.command {
+        // Both subcommands are daily-note commands. Without `[daily]` they
+        // stop here: nothing is read from stdin and bearcli is never called.
+        if let Err(message) = bjorn::daily::settings(&config) {
+            eprintln!("bjorn: {message}");
+            std::process::exit(1);
+        }
         let bearcli = if cli.demo {
             sibling("fake-bearcli")?.to_string_lossy().into_owned()
         } else {

@@ -79,7 +79,9 @@ plan lives in `docs/plans/bjorn-rust.md`.
   from `[daily]`, found or made with `create --if-not-exists`), `N` makes a
   note from a template in `~/.config/bjorn/templates/` with `{{date}}`-style
   placeholders, and `bjorn capture` / `bjorn today` reach the daily note from
-  the shell. Example templates ship in `config/templates/`.
+  the shell. Example templates ship in `config/templates/`. Daily notes are
+  opt-in (the maintainer's call in the #10 review): off until the config has
+  a `[daily]` table, since Bear itself has none; templates are always on.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog

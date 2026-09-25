@@ -73,7 +73,8 @@ impl Default for RemindersConfig {
 /// `[daily]`: the note `D` opens and `bjorn capture` writes to. `title` and
 /// `tag` are strftime formats for the day; `template` names a file in the
 /// templates directory (`daily` falls back to the built-in layout when there
-/// is no `daily.md`).
+/// is no `daily.md`). These are the values a `[daily]` table starts from;
+/// without the table there are no daily notes at all (`Config::daily`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DailyConfig {
     pub title: String,
@@ -124,7 +125,10 @@ pub struct Config {
     pub reminders: RemindersConfig,
     /// `[[actions]]` from the config file, in the order they are written.
     pub actions: Vec<Action>,
-    pub daily: DailyConfig,
+    /// `None` unless the file has a `[daily]` table. Daily notes go beyond
+    /// what Bear itself has, so they are opt-in: an empty table turns them on
+    /// with the defaults.
+    pub daily: Option<DailyConfig>,
     pub templates_dir: PathBuf,
     pub path: Option<PathBuf>,
 }
@@ -144,7 +148,7 @@ impl Default for Config {
             mouse_pixels: true,
             reminders: RemindersConfig::default(),
             actions: Vec::new(),
-            daily: DailyConfig::default(),
+            daily: None,
             templates_dir: default_templates_dir(),
             path: None,
         }
@@ -258,7 +262,7 @@ impl Config {
                     value
                 }
             };
-            cfg.daily = DailyConfig {
+            let daily = DailyConfig {
                 title: or_default("title", &defaults.title),
                 tag: match section.get("tag") {
                     None => defaults.tag,
@@ -269,10 +273,13 @@ impl Config {
                 capture_format: or_default("capture_format", &defaults.capture_format),
             };
             // A title that repeats or drifts during the day finds the wrong
-            // note without any error, so it stops the load instead.
-            if let Err(why) = crate::daily::check_title_format(&cfg.daily.title) {
+            // note without any error, so it stops the load instead. Only
+            // here, where the table turns the feature on: a feature nobody
+            // enabled never stops Bjorn from starting.
+            if let Err(why) = crate::daily::check_title_format(&daily.title) {
                 anyhow::bail!("{}: {why}", target.display());
             }
+            cfg.daily = Some(daily);
         }
         if let Some(Value::Table(section)) = data.get("templates") {
             let dir = text(section.get("dir"), "").trim().to_string();
@@ -612,10 +619,14 @@ mod tests {
     fn daily_and_templates_sections() {
         let dir = tempfile::tempdir().unwrap();
         let defaults = Config::load(Some(&dir.path().join("nope.toml"))).unwrap();
-        assert_eq!(defaults.daily, DailyConfig::default());
-        assert_eq!(defaults.daily.title, "%B %-d, %Y (%A)");
-        assert_eq!(defaults.daily.tag, "log/%Y/%m/%d");
+        assert_eq!(defaults.daily, None, "daily notes are off without [daily]");
         assert!(defaults.templates_dir.ends_with("bjorn/templates"));
+        // An empty table turns them on with the defaults.
+        let path = write(&dir, "[daily]\n");
+        let on = Config::load(Some(&path)).unwrap().daily.unwrap();
+        assert_eq!(on, DailyConfig::default());
+        assert_eq!(on.title, "%B %-d, %Y (%A)");
+        assert_eq!(on.tag, "log/%Y/%m/%d");
         let path = write(
             &dir,
             "[daily]\ntitle = \"%Y-%m-%d\"\ntag = \"#daily\"\ntemplate = \"\"\n\
@@ -624,7 +635,7 @@ mod tests {
         );
         let cfg = Config::load(Some(&path)).unwrap();
         assert_eq!(
-            cfg.daily,
+            cfg.daily.unwrap(),
             DailyConfig {
                 title: "%Y-%m-%d".into(),
                 tag: "daily".into(),
@@ -635,7 +646,10 @@ mod tests {
         );
         assert_eq!(cfg.templates_dir, home_dir().join("tpl"));
         let path = write(&dir, "[daily]\ntag = \"\"\n");
-        assert_eq!(Config::load(Some(&path)).unwrap().daily.tag, "");
+        assert_eq!(Config::load(Some(&path)).unwrap().daily.unwrap().tag, "");
+        // Only a table turns them on.
+        let path = write(&dir, "daily = true\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().daily, None);
     }
 
     #[test]
@@ -653,9 +667,21 @@ mod tests {
         // An empty title falls back to the default, which names a day.
         let path = write(&dir, "[daily]\ntitle = \" \"\n");
         assert_eq!(
-            Config::load(Some(&path)).unwrap().daily.title,
+            Config::load(Some(&path)).unwrap().daily.unwrap().title,
             DailyConfig::default().title
         );
+    }
+
+    /// The one-day check belongs to the feature: with `[daily]` left
+    /// commented out, as the example config has it, the same title is never
+    /// read and Bjorn starts.
+    #[test]
+    fn a_daily_title_is_only_checked_when_daily_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "# [daily]\n# title = \"%A\"\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().daily, None);
+        let path = write(&dir, "[daily]\ntitle = \"%A\"\n");
+        assert!(Config::load(Some(&path)).is_err());
     }
 
     /// `config/config.toml.example` shows the defaults; loading it must give

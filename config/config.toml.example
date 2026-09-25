@@ -40,15 +40,17 @@ remctl = ""                     # path to remctl; default searches PATH
 # output = "toast"              # toast | append | new-note | replace: where stdout goes
 # section = "## Summary"        # with output = "append": the heading to add under
 
-# The daily note: `D` opens today's, `bjorn capture "text"` adds a line to it.
-# `title` and `tag` are strftime formats (%-d is the day without a leading 0).
-# `title` must name one day (a year and a day, no time), or Bjorn will not start.
-[daily]
-title = "%B %-d, %Y (%A)"       # "September 19, 2026 (Saturday)"; the note is found by it
-tag = "log/%Y/%m/%d"            # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace
-template = "daily"              # templates/daily.md, else the built-in: ## title, tag, People, Topic, ---
-capture_section = ""            # a heading like "## Inbox" (made at the end when missing); "" = end of note
-capture_format = "* {{time}} {{text}}"
+# Daily notes are off by default. Uncomment [daily] to turn them on: then `D`
+# opens today's note and `bjorn capture "text"` adds a line to it. An empty
+# [daily] uses the defaults shown. `title` and `tag` are strftime formats (%-d
+# is the day without a leading 0). `title` must name one day (a year and a
+# day, no time), or Bjorn will not start while [daily] is on.
+# [daily]
+# title = "%B %-d, %Y (%A)"     # "September 19, 2026 (Saturday)"; the note is found by it
+# tag = "log/%Y/%m/%d"          # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace
+# template = "daily"            # templates/daily.md, else the built-in: ## title, tag, People, Topic, ---
+# capture_section = ""          # a heading like "## Inbox" (made at the end when missing); "" = end of note
+# capture_format = "* {{time}} {{text}}"
 
 [templates]                     # `N` makes a note from one; copy config/templates/*.md to start
 # dir = "~/.config/bjorn/templates"

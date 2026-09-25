@@ -1,5 +1,7 @@
 //! Work notes: the daily note (`D`), templates (`N`) and `bjorn capture`.
 //!
+//! Daily notes are off unless the config has a `[daily]` table, and the
+//! fake's own config has none, so a daily test starts from `daily_on`.
 //! Tests that go through the clock use a daily title with no date in it, so a
 //! run that crosses midnight still finds the note it made. A config file
 //! refuses such a title, so the tests that run the binary use `DATED`.
@@ -10,7 +12,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use bjorn::config::Config;
+use bjorn::config::{Config, DailyConfig};
 use bjorn::daily;
 use bjorn::ui::modals::Overlay;
 use chrono::{DateTime, Local, TimeZone};
@@ -22,11 +24,25 @@ fn at() -> DateTime<Local> {
     Local.with_ymd_and_hms(2026, 9, 19, 14, 5, 0).unwrap()
 }
 
-/// The fake's config with a daily title that does not change at midnight.
+/// The fake's config with daily notes turned on, as an empty `[daily]`
+/// table does: every setting at its default.
+fn daily_on(fake: &Fake) -> Config {
+    Config {
+        daily: Some(DailyConfig::default()),
+        ..fake.config()
+    }
+}
+
+/// The `[daily]` settings of a config made by `daily_on`, to change one.
+fn daily_mut(config: &mut Config) -> &mut DailyConfig {
+    config.daily.as_mut().expect("daily notes are on")
+}
+
+/// Daily notes on, with a title that does not change at midnight.
 fn steady(fake: &Fake) -> Config {
-    let mut config = fake.config();
-    config.daily.title = TITLE.into();
-    config.daily.tag = "log".into();
+    let mut config = daily_on(fake);
+    daily_mut(&mut config).title = TITLE.into();
+    daily_mut(&mut config).tag = "log".into();
     config
 }
 
@@ -197,8 +213,8 @@ async fn ensure_refuses_a_match_outside_notes() {
 #[tokio::test]
 async fn d_reports_a_bad_format_instead_of_writing() {
     let fake = Fake::new();
-    let mut config = fake.config();
-    config.daily.title = "%Q".into();
+    let mut config = daily_on(&fake);
+    daily_mut(&mut config).title = "%Q".into();
     let mut h = fake.harness_with(config, None);
     h.load().await;
     let before = fake.client().snapshot().await.unwrap().notes.len();
@@ -233,6 +249,54 @@ async fn d_reports_an_unusable_daily_template() {
     );
     h.settle().await;
     assert_eq!(count_titled(&fake, TITLE).await, 0);
+}
+
+#[tokio::test]
+async fn d_without_daily_says_how_to_turn_it_on_and_makes_nothing() {
+    let fake = Fake::new();
+    let mut h = fake.harness();
+    assert_eq!(h.app.config.daily, None, "the fixture has no [daily]");
+    h.load().await;
+    let before = fake.client().snapshot().await.unwrap().notes.len();
+    h.press("D");
+    assert!(
+        h.app.toast_messages().iter().any(|m| m == daily::DAILY_OFF),
+        "{:?}",
+        h.app.toast_messages()
+    );
+    assert!(h.app.overlay.is_none());
+    h.settle().await;
+    assert_eq!(fake.client().snapshot().await.unwrap().notes.len(), before);
+}
+
+#[tokio::test]
+async fn an_empty_daily_table_turns_d_on_with_the_defaults() {
+    let fake = Fake::new();
+    let file = fake.dir.path().join("empty-daily.toml");
+    std::fs::write(&file, "[daily]\n").unwrap();
+    let loaded = Config::load(Some(&file)).unwrap();
+    assert_eq!(loaded.daily, Some(DailyConfig::default()));
+    let config = Config {
+        daily: loaded.daily,
+        ..fake.config()
+    };
+    let before = Local::now().format("%B %-d, %Y (%A)").to_string();
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("D");
+    h.until(|app| {
+        app.notes.current().is_some_and(|n| {
+            // Either side of midnight, should the test straddle it.
+            n.title == before || n.title == Local::now().format("%B %-d, %Y (%A)").to_string()
+        })
+    })
+    .await;
+    let title = h.app.notes.current().unwrap().title.clone();
+    assert!(
+        body_of(&fake, &title)
+            .await
+            .starts_with(&format!("## {title}\n#log/"))
+    );
 }
 
 #[tokio::test]
@@ -363,7 +427,7 @@ async fn n_says_when_no_template_is_usable() {
 #[tokio::test]
 async fn capture_makes_the_note_then_adds_at_the_end() {
     let fake = Fake::new();
-    let config = fake.config();
+    let config = daily_on(&fake);
     let client = fake.client();
     daily::capture(&client, &config, "call Ana\n", &at())
         .await
@@ -384,8 +448,8 @@ async fn capture_makes_the_note_then_adds_at_the_end() {
 async fn capture_starts_a_missing_section_then_grows_it() {
     let fake = Fake::new();
     let mut config = steady(&fake);
-    config.daily.capture_section = "## Inbox".into();
-    config.daily.capture_format = "- {{text}}".into();
+    daily_mut(&mut config).capture_section = "## Inbox".into();
+    daily_mut(&mut config).capture_format = "- {{text}}".into();
     let client = fake.client();
     daily::capture(&client, &config, "one", &at())
         .await
@@ -405,7 +469,7 @@ async fn capture_starts_a_missing_section_then_grows_it() {
         "{body:?}"
     );
     // The heading is matched ignoring case, so no second section appears.
-    config.daily.capture_section = "## INBOX".into();
+    daily_mut(&mut config).capture_section = "## INBOX".into();
     daily::capture(&client, &config, "three", &at())
         .await
         .unwrap();
@@ -418,8 +482,8 @@ async fn capture_starts_a_missing_section_then_grows_it() {
 async fn a_multi_line_capture_stays_one_entry_in_its_section() {
     let fake = Fake::new();
     let mut config = steady(&fake);
-    config.daily.capture_section = "## Inbox".into();
-    config.daily.capture_format = "- {{text}}".into();
+    daily_mut(&mut config).capture_section = "## Inbox".into();
+    daily_mut(&mut config).capture_format = "- {{text}}".into();
     let client = fake.client();
     daily::capture(&client, &config, "one\r\n## Foo\r\n\r\n---\r\n", &at())
         .await
@@ -447,7 +511,7 @@ async fn capture_refuses_blank_text_and_a_section_that_is_not_a_heading() {
         .await
         .unwrap_err();
     assert!(err.contains("nothing to capture"));
-    config.daily.capture_section = "Inbox".into();
+    daily_mut(&mut config).capture_section = "Inbox".into();
     let err = daily::capture(&fake.client(), &config, "x", &at())
         .await
         .unwrap_err();
@@ -670,6 +734,76 @@ async fn the_binary_refuses_a_daily_title_that_names_no_day() {
 }
 
 #[tokio::test]
+async fn capture_and_today_refuse_without_daily_and_never_call_bearcli() {
+    let fake = Fake::new();
+    // `[daily]` left commented out, as the example config ships it. The title
+    // under it would stop the load if the table were on; off, it is not read.
+    let config = fake.dir.path().join("off.toml");
+    std::fs::write(&config, "# [daily]\n# title = \"%A\"\n").unwrap();
+    let path = config.to_string_lossy().into_owned();
+    for (command, stdin) in [
+        (&["capture", "hi"][..], &b""[..]),
+        (&["capture"], b"from a pipe\n"),
+        (&["today"], b""),
+    ] {
+        let args: Vec<&str> = ["--demo", "--config", &path]
+            .into_iter()
+            .chain(command.iter().copied())
+            .collect();
+        let out = bjorn(&fake, &args, stdin);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        assert_eq!(
+            stderr(&out),
+            format!("bjorn: {}\n", daily::DAILY_OFF),
+            "{args:?}"
+        );
+    }
+    // Any fake bearcli call, a read included, would have seeded its state.
+    assert!(!fake.state().exists(), "bearcli was called");
+
+    // The library refuses the same way, before touching the client, which
+    // here points at nothing.
+    let nowhere =
+        bjorn::bear::BearClient::with_env(vec!["/nonexistent/bearcli".into()], Vec::new());
+    let off = fake.config();
+    assert_eq!(
+        daily::capture(&nowhere, &off, "hi", &at()).await,
+        Err(daily::DAILY_OFF.to_string())
+    );
+    assert_eq!(daily::today(&off, &at()), Err(daily::DAILY_OFF.to_string()));
+}
+
+#[tokio::test]
+async fn an_empty_daily_table_turns_capture_on_with_the_defaults() {
+    let fake = Fake::new();
+    let config = fake.dir.path().join("empty-daily.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[daily]\n[templates]\ndir = \"{}\"\n",
+            fake.templates().display()
+        ),
+    )
+    .unwrap();
+    let path = config.to_string_lossy().into_owned();
+    let before = Local::now().format("%B %-d, %Y (%A)").to_string();
+    let out = bjorn(&fake, &["--demo", "--config", &path, "capture", "hi"], b"");
+    assert!(out.status.success(), "{out:?}");
+    let out = bjorn(&fake, &["--demo", "--config", &path, "today"], b"");
+    assert!(out.status.success(), "{out:?}");
+    let line = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+    let (id, title) = line.split_once('\t').unwrap();
+    let after = Local::now().format("%B %-d, %Y (%A)").to_string();
+    assert!(title == before || title == after, "{line:?}");
+    let body = fake.client().cat(id).await.unwrap().content;
+    assert!(body.starts_with(&format!("## {title}\n#log/")), "{body:?}");
+    if before == after {
+        assert!(body.ends_with(" hi\n"), "{body:?}");
+    }
+}
+
+#[tokio::test]
 async fn capture_honors_tag_before_the_subcommand_for_workspace() {
     let fake = Fake::new();
     let config = fake.dir.path().join("ws.toml");
@@ -870,7 +1004,7 @@ async fn ensure_adds_a_tag_that_only_a_longer_tag_in_the_template_starts_with() 
     let fake = Fake::new();
     write_template(&fake, "daily.md", "## {{title}}\n#log/2026/09/25\n");
     let mut config = steady(&fake);
-    config.daily.tag = "log/2026/09/2".into();
+    daily_mut(&mut config).tag = "log/2026/09/2".into();
     let today = daily::today(&config, &at()).unwrap();
     daily::ensure(&fake.client(), &today).await.unwrap();
     let snap = fake.client().snapshot().await.unwrap();

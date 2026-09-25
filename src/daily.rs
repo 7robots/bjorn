@@ -11,13 +11,25 @@
 //! warning then points out. The template's first line is the title as a
 //! heading (`## September 19, 2026 (Saturday)` by default); Bear reads that
 //! line as the title and keeps it as it is.
+//!
+//! All of it is off until the config has a `[daily]` table: Bear has no daily
+//! notes of its own, so Bjorn does not make any unless asked to.
 
 use chrono::{DateTime, Local};
 
 use crate::bear::{BearClient, BearError, Location, normalize_tag};
-use crate::config::{Config, DEFAULT_DAILY_TEMPLATE};
+use crate::config::{Config, DEFAULT_DAILY_TEMPLATE, DailyConfig};
 use crate::render;
 use crate::templates::{self, DAILY_TEMPLATE, LoadError, Template};
+
+/// What `D`, `bjorn capture` and `bjorn today` say when the config has no
+/// `[daily]` table.
+pub const DAILY_OFF: &str = "Daily notes are off — add a [daily] section to config.toml";
+
+/// The `[daily]` settings, or `DAILY_OFF` when daily notes are not turned on.
+pub fn settings(config: &Config) -> Result<&DailyConfig, String> {
+    config.daily.as_ref().ok_or_else(|| DAILY_OFF.to_string())
+}
 
 /// Today's note as it would be made: its title, its tag and its content.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,13 +40,14 @@ pub struct Daily {
     pub content: String,
 }
 
-/// Work out today's note from the `[daily]` config. Fails on a format chrono
-/// cannot read, a title or tag holding control characters, or a named
-/// template that is missing or cannot be used, with a message fit for a toast
-/// or stderr. Whether the title names one day is checked when the config is
-/// loaded (`check_title_format`), not here.
+/// Work out today's note from the `[daily]` config. Fails without one
+/// (`DAILY_OFF`), on a format chrono cannot read, a title or tag holding
+/// control characters, or a named template that is missing or cannot be
+/// used, with a message fit for a toast or stderr. Whether the title names
+/// one day is checked when the config is loaded (`check_title_format`), not
+/// here.
 pub fn today(config: &Config, now: &DateTime<Local>) -> Result<Daily, String> {
-    let daily = &config.daily;
+    let daily = settings(config)?;
     let title = templates::strftime(now, &daily.title)
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
@@ -265,7 +278,8 @@ pub fn clean(text: &str) -> String {
         .collect()
 }
 
-/// What one capture adds: `capture_format` with `{{text}}` filled in.
+/// What one capture adds: `format` (`[daily] capture_format`) with
+/// `{{text}}` filled in, and `{{workspace}}` with `workspace`.
 ///
 /// A multi-line capture (`pbpaste | bjorn capture`) stays one entry. Its
 /// blank lines are dropped and every line after the first is indented four
@@ -278,13 +292,13 @@ pub fn clean(text: &str) -> String {
 /// so each such line is only more text of the entry's paragraph. A blank
 /// line would end that paragraph and make what follows a code block, which
 /// is why blank lines go.
-pub fn capture_line(config: &Config, text: &str, now: &DateTime<Local>) -> String {
+pub fn capture_line(format: &str, workspace: &str, text: &str, now: &DateTime<Local>) -> String {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let text = match lines.as_slice() {
         [] => String::new(),
         [only] => (*only).to_string(),
         [first, rest @ ..] => {
-            let pad = " ".repeat(content_column(&text_prefix(config, now)) + 4);
+            let pad = " ".repeat(content_column(&text_prefix(format, workspace, now)) + 4);
             let mut joined = (*first).to_string();
             for line in rest {
                 joined.push('\n');
@@ -294,21 +308,13 @@ pub fn capture_line(config: &Config, text: &str, now: &DateTime<Local>) -> Strin
             joined
         }
     };
-    templates::render(
-        &config.daily.capture_format,
-        now,
-        &[("text", &text), ("workspace", &config.workspace)],
-    )
+    templates::render(format, now, &[("text", &text), ("workspace", workspace)])
 }
 
 /// What `capture_format` puts before `{{text}}` on the text's own line. NUL
 /// stands in for the text: `clean` removes it from anything captured.
-fn text_prefix(config: &Config, now: &DateTime<Local>) -> String {
-    let probe = templates::render(
-        &config.daily.capture_format,
-        now,
-        &[("text", "\0"), ("workspace", &config.workspace)],
-    );
+fn text_prefix(format: &str, workspace: &str, now: &DateTime<Local>) -> String {
+    let probe = templates::render(format, now, &[("text", "\0"), ("workspace", workspace)]);
     let before = probe.split('\0').next().unwrap_or_default();
     before.rsplit('\n').next().unwrap_or_default().to_string()
 }
@@ -368,18 +374,20 @@ fn find_section(content: &str, section: &str) -> Option<String> {
 }
 
 /// Add `text` to today's note, making the note (and the capture section) when
-/// missing. `text` must not be blank.
+/// missing. `text` must not be blank. Refused, before anything reaches
+/// bearcli, when daily notes are off.
 pub async fn capture(
     client: &BearClient,
     config: &Config,
     text: &str,
     now: &DateTime<Local>,
 ) -> Result<(), String> {
+    let daily_cfg = settings(config)?;
     let text = clean(text);
     if text.trim().is_empty() {
         return Err("nothing to capture".into());
     }
-    let section = config.daily.capture_section.trim();
+    let section = daily_cfg.capture_section.trim();
     if !section.is_empty() && !valid_section(section) {
         return Err(format!(
             "[daily] capture_section {section:?} is not a heading line like \"## Inbox\""
@@ -387,7 +395,7 @@ pub async fn capture(
     }
     let daily = today(config, now)?;
     let id = ensure(client, &daily).await.map_err(|e| e.message)?;
-    let line = capture_line(config, &text, now);
+    let line = capture_line(&daily_cfg.capture_format, &config.workspace, &text, now);
     if section.is_empty() {
         return client.append(&id, &line, None).await.map_err(|e| e.message);
     }
@@ -414,11 +422,28 @@ mod tests {
         Local.with_ymd_and_hms(2026, 9, 19, 14, 5, 0).unwrap()
     }
 
+    /// Daily notes on, as an empty `[daily]` table turns them on.
     fn config(dir: &std::path::Path) -> Config {
         Config {
             templates_dir: dir.to_path_buf(),
+            daily: Some(DailyConfig::default()),
             ..Config::default()
         }
+    }
+
+    fn daily_mut(cfg: &mut Config) -> &mut DailyConfig {
+        cfg.daily.as_mut().expect("daily notes are on")
+    }
+
+    #[test]
+    fn nothing_is_worked_out_while_daily_notes_are_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let off = Config {
+            daily: None,
+            ..config(dir.path())
+        };
+        assert_eq!(today(&off, &at()).unwrap_err(), DAILY_OFF);
+        assert_eq!(settings(&off).unwrap_err(), DAILY_OFF);
     }
 
     #[test]
@@ -442,11 +467,11 @@ mod tests {
         )
         .unwrap();
         let mut cfg = config(dir.path());
-        cfg.daily.title = "%Y-%m-%d".into();
-        cfg.daily.tag = String::new();
+        daily_mut(&mut cfg).title = "%Y-%m-%d".into();
+        daily_mut(&mut cfg).tag = String::new();
         let daily = today(&cfg, &at()).unwrap();
         assert_eq!(daily.content, "# 2026-09-19\nSaturday\n");
-        cfg.daily.template = "standup".into();
+        daily_mut(&mut cfg).template = "standup".into();
         let err = today(&cfg, &at()).unwrap_err();
         assert!(err.contains("\"standup\" not found"), "{err}");
     }
@@ -455,10 +480,10 @@ mod tests {
     fn bad_formats_are_reported_not_panicked_on() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = config(dir.path());
-        cfg.daily.title = "%Q".into();
+        daily_mut(&mut cfg).title = "%Q".into();
         assert!(today(&cfg, &at()).unwrap_err().contains("title"));
-        cfg.daily.title = "%Y".into();
-        cfg.daily.tag = "log/%Q".into();
+        daily_mut(&mut cfg).title = "%Y".into();
+        daily_mut(&mut cfg).tag = "log/%Q".into();
         assert!(today(&cfg, &at()).unwrap_err().contains("tag"));
     }
 
@@ -466,14 +491,14 @@ mod tests {
     fn control_characters_are_refused_in_titles_and_stripped_from_captures() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = config(dir.path());
-        cfg.daily.title = "%Y%n%m".into();
+        daily_mut(&mut cfg).title = "%Y%n%m".into();
         assert!(
             today(&cfg, &at())
                 .unwrap_err()
                 .contains("control character")
         );
-        cfg.daily.title = "%Y".into();
-        cfg.daily.tag = "log%t%Y".into();
+        daily_mut(&mut cfg).title = "%Y".into();
+        daily_mut(&mut cfg).tag = "log%t%Y".into();
         assert!(
             today(&cfg, &at())
                 .unwrap_err()
@@ -549,14 +574,14 @@ mod tests {
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/day.md"), "day {{title}}\n").unwrap();
         let mut cfg = config(dir.path());
-        cfg.daily.template = "sub/day".into();
+        daily_mut(&mut cfg).template = "sub/day".into();
         assert!(
             today(&cfg, &at())
                 .unwrap()
                 .content
                 .starts_with("day September")
         );
-        cfg.daily.template = "sub/day.md".into();
+        daily_mut(&mut cfg).template = "sub/day.md".into();
         assert!(today(&cfg, &at()).is_ok());
     }
 
@@ -615,16 +640,15 @@ mod tests {
 
     #[test]
     fn multi_line_captures_are_indented_past_the_bullet() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg = config(dir.path());
+        let default = DailyConfig::default().capture_format;
         let paste = clean("first\r\n## Foo\r\n---\r\n\r\n  \r\n  kept indent\r\n");
         assert_eq!(
-            capture_line(&cfg, &paste, &at()),
+            capture_line(&default, "", &paste, &at()),
             "* 14:05 first\n      ## Foo\n      ---\n        kept indent"
         );
         // Blank lines around a one-line capture go; its own spacing stays.
         assert_eq!(
-            capture_line(&cfg, "\n\n call Ana\n\n", &at()),
+            capture_line(&default, "", "\n\n call Ana\n\n", &at()),
             "* 14:05  call Ana"
         );
         for (format, pad) in [
@@ -637,29 +661,24 @@ mod tests {
             ("{{text}}", 4),
             ("{{time}}\n* {{text}}", 6),
         ] {
-            cfg.daily.capture_format = format.into();
-            let line = capture_line(&cfg, "a\n## b", &at());
+            let line = capture_line(format, "", "a\n## b", &at());
             assert!(
                 line.ends_with(&format!("a\n{}## b", " ".repeat(pad))),
                 "{format:?}: {line:?}"
             );
         }
         // Captured placeholders are still left alone.
-        cfg.daily.capture_format = "* {{text}}".into();
         assert_eq!(
-            capture_line(&cfg, "{{date}}\n{{text}}", &at()),
+            capture_line("* {{text}}", "", "{{date}}\n{{text}}", &at()),
             "* {{date}}\n      {{text}}"
         );
     }
 
     #[test]
     fn indented_multi_line_captures_render_as_text_not_structure() {
-        let dir = tempfile::tempdir().unwrap();
         let paste = "first\n## Foo\n---\n===\n> quote\n- item\n```\n| a |\n|---|";
         for format in ["* {{time}} {{text}}", "1. {{text}}", "{{text}}"] {
-            let mut cfg = config(dir.path());
-            cfg.daily.capture_format = format.into();
-            let line = capture_line(&cfg, paste, &at());
+            let line = capture_line(format, "", paste, &at());
             let note = format!("## Day\n{line}\n\n## Inbox\n");
             let (_, headings) = crate::ui::markdown::render_with_headings(&note);
             let names: Vec<&str> = headings.iter().map(|h| h.text.as_str()).collect();
@@ -687,10 +706,18 @@ mod tests {
 
     #[test]
     fn capture_lines_follow_the_format() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg = config(dir.path());
-        assert_eq!(capture_line(&cfg, "call Ana", &at()), "* 14:05 call Ana");
-        cfg.daily.capture_format = "- [ ] {{text}}".into();
-        assert_eq!(capture_line(&cfg, "call Ana", &at()), "- [ ] call Ana");
+        let default = DailyConfig::default().capture_format;
+        assert_eq!(
+            capture_line(&default, "", "call Ana", &at()),
+            "* 14:05 call Ana"
+        );
+        assert_eq!(
+            capture_line("- [ ] {{text}}", "", "call Ana", &at()),
+            "- [ ] call Ana"
+        );
+        assert_eq!(
+            capture_line("{{workspace}}: {{text}}", "work", "call Ana", &at()),
+            "work: call Ana"
+        );
     }
 }

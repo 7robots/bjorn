@@ -21,7 +21,7 @@ use crate::bear::{
     BearClient, BearError, Location, Note, NoteContent, Probe, Snapshot, display_tag,
     normalize_tag, recently_modified,
 };
-use crate::config::{Config, editor_available, resolve_editor};
+use crate::config::{Config, DEFAULT_DAILY_TEMPLATE, editor_available, resolve_editor};
 use crate::daily;
 use crate::editor::{self, EditorJob};
 use crate::export::{
@@ -1569,9 +1569,16 @@ impl App {
     /// `N`: pick a template from the templates directory, then the same
     /// title and tags prompt as `n`.
     /// The daily template is left out: it is `D`'s, and its title is the date.
+    /// With daily notes off that is still `daily.md`, whose `{{title}}`
+    /// heading would make an untitled note from `N`.
     fn open_templates(&mut self) {
         let dir = &self.config.templates_dir;
-        let daily = templates::path_for(dir, &self.config.daily.template);
+        let name = self
+            .config
+            .daily
+            .as_ref()
+            .map_or(DEFAULT_DAILY_TEMPLATE, |d| d.template.as_str());
+        let daily = templates::path_for(dir, name);
         let mut listing = templates::list(dir);
         listing
             .templates
@@ -1586,8 +1593,13 @@ impl App {
 
     /// `D`: today's note, made from the daily template the first time. One
     /// already in the snapshot is shown without asking bearcli; otherwise
-    /// `create --if-not-exists` finds or makes it.
+    /// `create --if-not-exists` finds or makes it. Without a `[daily]` table
+    /// it only says how to turn daily notes on.
     fn open_daily(&mut self) {
+        if self.config.daily.is_none() {
+            self.notify(daily::DAILY_OFF, Duration::from_secs(8));
+            return;
+        }
         let daily = match daily::today(&self.config, &Local::now()) {
             Ok(daily) => daily,
             Err(message) => {

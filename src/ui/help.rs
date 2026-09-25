@@ -76,7 +76,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "D",
-                "today's daily note, made from the daily template the first time; bjorn capture -- \"text\" adds to it from the shell",
+                "today's daily note, made from the daily template the first time; bjorn capture -- \"text\" adds to it from the shell. Off until the config has a [daily] table",
             ),
             (
                 "e",
