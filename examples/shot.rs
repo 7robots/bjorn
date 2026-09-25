@@ -65,6 +65,9 @@ async fn main() {
                 ..bjorn::actions::Action::default()
             })
             .collect(),
+        // Dated sections are off without `[sections]`; on here so the day
+        // screen can be drawn.
+        sections: Some(bjorn::sections::SectionsConfig::default()),
         ..Config::default()
     };
     let mut h = Harness::new(config, Arc::new(client), None, (width, height));

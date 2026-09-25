@@ -52,8 +52,10 @@ remctl = ""                     # path to remctl; default searches PATH
 # capture_section = ""          # a heading like "## Inbox" (made at the end when missing); "" = end of note
 # capture_format = "* {{time}} {{text}}"
 
-# Dated sections: `s` adds today's section to the note under the cursor, `T`
-# lists every section written on one day. The values shown are the defaults.
+# Dated sections are off by default. Uncomment [sections] to turn them on:
+# then `s` adds today's section to the note under the cursor and `T` lists
+# every section written on one day. An empty [sections] uses the defaults
+# shown; without it these keys are never read or checked.
 # [sections]
 # day_tag = "log/%Y/%m/%d"      # the day tag, a strftime format; defaults to [daily] tag when that names a day
 # heading_format = "%B %-d, %Y (%A)"  # the date heading; also how an existing section is recognized

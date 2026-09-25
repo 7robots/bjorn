@@ -45,6 +45,8 @@ pub const DEFAULT_HEADING_FORMAT: &str = "%B %-d, %Y (%A)";
 /// copied into the templates directory: this is a fragment of a note, and a
 /// copy of that directory would offer it as a note of its own.
 pub const DEFAULT_TEMPLATE: &str = include_str!("../config/sections/section.md");
+/// What `s` and `T` say when the config has no `[sections]` table.
+pub const SECTIONS_OFF: &str = "Dated sections are off — add a [sections] section to config.toml";
 /// How much of a section's body the day view shows.
 pub const SNIPPET_LIMIT: usize = 90;
 /// Shorter than this, a date heading is too common a string to search for.

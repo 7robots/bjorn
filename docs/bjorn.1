@@ -352,11 +352,19 @@ add today's section to the note under the cursor, from the
 .B [sections]
 template: a date heading, the day tag, and whatever prompts you keep in it. It
 goes above the first dated section, so the newest stays on top; if today
-already has one, nothing is written and the reader jumps to it
+already has one, nothing is written and the reader jumps to it. Off until the
+config has a
+.B [sections]
+table; without one,
+.B s
+shows how to turn it on and changes nothing
 .TP
 .B T
 the day screen: every section written on one day, across your notes and your
-archive (archived ones are marked), grouped by note
+archive (archived ones are marked), grouped by note. Off, like
+.BR s ,
+without
+.B [sections]
 .TP
 .B ← → / [ ]
 a day back / forward;
@@ -571,6 +579,15 @@ edits the query instead.
 .B enter
 in triage or on the day screen counts as a jump too.
 .SH DATED SECTIONS AND THE DAY VIEW
+Bjorn writes and lists dated sections only when the config has a
+.B [sections]
+table, and an empty one turns them on with the defaults. Without it,
+.B s
+and
+.B T
+say how to turn them on and do nothing else, and the table's patterns are
+never read, so they can neither stop Bjorn from starting nor warn.
+.PP
 Some notes are a running log: a title, a preamble, then one section per day,
 newest first. Each section's heading is the date and the line under it carries
 a day tag, which makes Bear's tag view a time axis \(em except that the tag
@@ -1388,6 +1405,9 @@ and
 are filled in. Default:
 .BR "* {{time}} {{text}}" .
 .SS [sections]
+Present, even empty, turns dated sections on; absent, they are off. See
+.BR "DATED SECTIONS AND THE DAY VIEW" .
+The patterns are checked at start only while the table is present.
 .TP
 .I template
 What
@@ -1637,7 +1657,14 @@ bjorn capture \-\- "$text" </dev/null   # in a git hook
 bjorn today
 .EE
 .PP
-A dated\-section template of your own, so
+Turn on dated sections with the defaults:
+.PP
+.EX
+# ~/.config/bjorn/config.toml
+[sections]
+.EE
+.PP
+Or with a template of your own, so
 .B s
 writes the shape you keep:
 .PP

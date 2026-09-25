@@ -52,7 +52,7 @@ its source is [docs/bjorn.1](docs/bjorn.1) if you would rather read it here.
 | `w` | make the highlighted tag the workspace; again on it to leave | `W` | clear the workspace |
 | `f` | fold / unfold the highlighted tag's subtree | `F` | fold every tag, or unfold them all when all are folded |
 | `t` | triage the workspace's open todos | `c` / click `▮▮▮` | hide the tag column, then the note column too, then show all three |
-| `s` | add today's dated section to the note (see [Dated sections](#dated-sections)) | `T` | the day screen: every section written on one day |
+| `s` | add today's dated section to the note; off until the config has `[sections]` (see [Dated sections](#dated-sections)) | `T` | the day screen: every section written on one day; off until the config has `[sections]` |
 | `]` / `[` | next / previous match in the reader while searching | `r` | refresh now |
 | `o` | outline: the note's headings, indented by level; type to filter, `enter` scrolls there | `}` / `{` | next / previous heading in the reader |
 | `L` | the note's wiki links and backlinks; `enter` follows (see [Wiki links](#wiki-links)) | `backspace` / `alt+→` | back to the note a link was followed from / forward again (`ctrl+o`, `alt+←`, `alt+b` go back; `alt+f` goes forward) |
@@ -139,6 +139,15 @@ search box is open, `backspace` edits the query instead. `enter` in triage
 counts as a jump too.
 
 ## Dated sections
+
+Dated sections are off until the config has a `[sections]` table; an empty one
+turns them on with the defaults below. `s` rewrites the note under the cursor
+and `T` goes beyond anything Bear shows, so without the table both only say
+how to turn them on, and the table's patterns are never read or checked:
+
+```toml
+[sections]
+```
 
 Some notes are a running log: a title, a preamble, then one section per day,
 newest first. Each section's heading is the date and the line under it carries
@@ -361,19 +370,19 @@ theme = "red-graphite-dark"   # see Themes below; `bjorn --list-themes` prints t
 tech = "terminal"
 school = "emoji:🎓"
 
-[sections]                    # dated sections: `s` writes one, `T` lists a day
-day_tag = "log/%Y/%m/%d"      # the day tag, as a strftime pattern; defaults to [daily] tag when that names a day
-heading_format = "%B %-d, %Y (%A)"   # the date heading, as a strftime pattern; also how one is recognized
-insert = "before-first-dated-section"  # top | bottom | before-first-dated-section; anything else warns at start-up
+# [sections]                  # turns on `s` and `T` (off without it); an empty table uses these defaults
+# day_tag = "log/%Y/%m/%d"    # the day tag, a strftime pattern; defaults to [daily] tag when that names a day
+# heading_format = "%B %-d, %Y (%A)"  # the date heading; also how an existing one is recognized
+# insert = "before-first-dated-section"  # top | bottom | before-first-dated-section; anything else warns at start-up
 # what `s` writes; the placeholders are listed under Dated sections
-template = """
-## {{heading}}
-{{tag}}
-* People:
-* Topic:
-
----
-"""
+# template = """
+# ## {{heading}}
+# {{tag}}
+# * People:
+# * Topic:
+#
+# ---
+# """
 
 [reminders]                   # triage can push todos to Apple Reminders
 enabled = false               # off by default

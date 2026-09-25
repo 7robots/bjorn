@@ -125,7 +125,11 @@ pub struct Config {
     pub mouse_pixels: bool,
     pub reminders: RemindersConfig,
     /// `[sections]`: the dated-section template and the day-tag time axis.
-    pub sections: SectionsConfig,
+    /// `None` unless the file has a `[sections]` table: `s` rewrites the note
+    /// under the cursor and `T` goes beyond what Bear itself shows, so both
+    /// are opt-in the way daily notes are, and an empty table turns them on
+    /// with the defaults.
+    pub sections: Option<SectionsConfig>,
     /// `[[actions]]` from the config file, in the order they are written.
     pub actions: Vec<Action>,
     /// `None` unless the file has a `[daily]` table. Daily notes go beyond
@@ -150,7 +154,7 @@ impl Default for Config {
             theme: crate::ui::theme::DEFAULT_THEME.into(),
             mouse_pixels: true,
             reminders: RemindersConfig::default(),
-            sections: SectionsConfig::default(),
+            sections: None,
             actions: Vec::new(),
             daily: None,
             templates_dir: default_templates_dir(),
@@ -285,12 +289,12 @@ impl Config {
             }
             cfg.daily = Some(daily);
         }
-        // After `[daily]`, whose tag is the day tag's default.
-        let day_tag = inherited_day_tag(cfg.daily.as_ref());
+        // After `[daily]`, whose tag is the day tag's default. Only a
+        // `[sections]` table turns dated sections on; without one its keys
+        // are never read, so an unused feature cannot warn at start-up.
         if let Some(Value::Table(section)) = data.get("sections") {
-            cfg.sections = parse_sections(section, &day_tag);
-        } else {
-            cfg.sections.day_tag = day_tag;
+            let day_tag = inherited_day_tag(cfg.daily.as_ref());
+            cfg.sections = Some(parse_sections(section, &day_tag));
         }
         if let Some(Value::Table(section)) = data.get("templates") {
             let dir = text(section.get("dir"), "").trim().to_string();
@@ -355,7 +359,8 @@ fn parse_sections(section: &toml::Table, day_tag: &str) -> SectionsConfig {
         // The template keeps its own leading and trailing whitespace trimmed
         // but nothing inside it: the blank line before the rule is the shape.
         template: {
-            let raw = text(section.get("template"), &defaults.template);
+            // Missing and empty alike keep the default exactly as shipped.
+            let raw = text(section.get("template"), "");
             if raw.trim().is_empty() {
                 defaults.template.clone()
             } else {
@@ -604,7 +609,7 @@ mod tests {
             "[sections]\ntemplate = \"\"\"\n## {{date}}\n{{tag}}\n\"\"\"\nday_tag = \" journal/%Y-%m-%d \"\n\
              heading_format = \"%Y-%m-%d\"\ninsert = \"Top\"\n",
         );
-        let cfg = Config::load(Some(&path)).unwrap().sections;
+        let cfg = Config::load(Some(&path)).unwrap().sections.unwrap();
         assert_eq!(cfg.template, "## {{date}}\n{{tag}}");
         assert_eq!(cfg.day_tag, "journal/%Y-%m-%d");
         assert_eq!(cfg.heading_format, "%Y-%m-%d");
@@ -617,7 +622,7 @@ mod tests {
 
         // A misspelled position keeps the default and is named at start-up.
         let path = write(&dir, "[sections]\ninsert = \"Botom\"\n");
-        let cfg = Config::load(Some(&path)).unwrap().sections;
+        let cfg = Config::load(Some(&path)).unwrap().sections.unwrap();
         assert_eq!(cfg.insert, InsertPosition::BeforeFirstDatedSection);
         assert_eq!(cfg.unknown_insert.as_deref(), Some("Botom"));
         let problem = cfg
@@ -629,14 +634,31 @@ mod tests {
         let path = write(&dir, "[sections]\ntemplate = \"\"\nday_tag = \"\"\n");
         assert_eq!(
             Config::load(Some(&path)).unwrap().sections,
-            SectionsConfig::default()
+            Some(SectionsConfig::default())
         );
+    }
+
+    #[test]
+    fn dated_sections_are_off_without_a_sections_table() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Config::default().sections, None);
         assert_eq!(
             Config::load(Some(&dir.path().join("nope.toml")))
                 .unwrap()
                 .sections,
-            SectionsConfig::default()
+            None
         );
+        // An empty table turns them on with the defaults.
+        let path = write(&dir, "[sections]\n");
+        assert_eq!(
+            Config::load(Some(&path)).unwrap().sections,
+            Some(SectionsConfig::default())
+        );
+        // A commented-out table is no table, and neither is a stray key.
+        let path = write(&dir, "# [sections]\n# insert = \"Botom\"\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().sections, None);
+        let path = write(&dir, "sections = true\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().sections, None);
     }
 
     #[test]
@@ -644,7 +666,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let day_tag = |text: &str| {
             let path = write(&dir, text);
-            Config::load(Some(&path)).unwrap().sections.day_tag
+            Config::load(Some(&path)).unwrap().sections.unwrap().day_tag
         };
         // One time axis for daily notes and dated sections, said once.
         assert_eq!(

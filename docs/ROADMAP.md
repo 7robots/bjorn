@@ -92,8 +92,10 @@ plan lives in `docs/plans/bjorn-rust.md`.
   archive, with `←`/`→` to step days. Sections are found two ways and the
   results merged: the day's tag, and the day's heading searched as a phrase, so
   a note that dates its sections by heading alone is listed too. The day tag
-  and the date heading are strftime patterns, so any dating scheme works. See
-  the README.
+  and the date heading are strftime patterns, so any dating scheme works.
+  Opt-in (the maintainer's call in the #12 review, as for `[daily]`): off
+  until the config has a `[sections]` table, since both go beyond what Bear
+  does and `s` is one key that rewrites a note. See the README.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog

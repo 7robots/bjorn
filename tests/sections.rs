@@ -13,6 +13,25 @@ use chrono::NaiveDate;
 use common::Fake;
 use std::sync::Arc;
 
+/// The fake's config with dated sections on, the way a user turns them on:
+/// an empty `[sections]` table in the file, read by the real parser. Without
+/// the table `s` and `T` only say how to turn them on.
+fn sections_on(fake: &Fake) -> Config {
+    let path = fake.dir.path().join("config.toml");
+    std::fs::write(&path, "[sections]\n").unwrap();
+    let loaded = Config::load(Some(&path)).unwrap();
+    assert_eq!(loaded.sections, Some(SectionsConfig::default()));
+    Config {
+        sections: loaded.sections,
+        ..fake.config()
+    }
+}
+
+/// `fake.harness()` with dated sections on.
+fn harness(fake: &Fake) -> Harness {
+    fake.harness_with(sections_on(fake), None)
+}
+
 fn heading_of(config: &SectionsConfig, date: NaiveDate) -> String {
     format!("## {}", config.heading_text(date))
 }
@@ -54,7 +73,7 @@ fn day_rows(h: &Harness) -> Vec<(String, String)> {
 #[tokio::test]
 async fn s_inserts_todays_section_above_the_first_dated_one() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     // Trail Journal's only section is yesterday's, so today's goes above it.
     open_note(&mut h, "NOTE-TRAIL").await;
@@ -92,7 +111,7 @@ async fn s_inserts_todays_section_above_the_first_dated_one() {
 #[tokio::test]
 async fn s_appends_to_a_note_with_no_dated_sections() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_note(&mut h, "NOTE-GARDEN").await;
     h.press("s");
@@ -121,7 +140,7 @@ async fn s_appends_to_a_note_with_no_dated_sections() {
 #[tokio::test]
 async fn a_second_section_for_today_is_not_written() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     // Field Notes already has a section for today.
     open_note(&mut h, "NOTE-FIELD").await;
@@ -159,10 +178,10 @@ async fn a_second_section_for_today_is_not_written() {
 async fn the_insert_key_puts_the_section_where_the_config_says() {
     let fake = Fake::new();
     let config = Config {
-        sections: SectionsConfig {
+        sections: Some(SectionsConfig {
             insert: InsertPosition::Top,
             ..SectionsConfig::default()
-        },
+        }),
         ..fake.config()
     };
     let mut h = fake.harness_with(config, None);
@@ -189,7 +208,7 @@ async fn the_insert_key_puts_the_section_where_the_config_says() {
 #[tokio::test]
 async fn t_lists_the_days_sections_grouped_by_note() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     let config = SectionsConfig::default();
@@ -223,7 +242,7 @@ async fn t_lists_the_days_sections_grouped_by_note() {
 #[tokio::test]
 async fn left_and_right_step_days_and_t_returns_to_today() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     h.press("left");
@@ -266,7 +285,7 @@ async fn left_and_right_step_days_and_t_returns_to_today() {
 #[tokio::test]
 async fn a_day_with_nothing_on_it_says_so() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     for _ in 0..6 {
@@ -290,7 +309,7 @@ async fn a_day_with_nothing_on_it_says_so() {
 #[tokio::test]
 async fn the_filter_narrows_the_day() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     h.press("slash");
@@ -332,7 +351,7 @@ async fn enter_opens_the_note_at_that_section() {
     let fake = Fake::new();
     // Short enough that the note does not fit on one page, so landing on the
     // section means scrolling to it.
-    let mut h = Harness::new(fake.config(), Arc::new(fake.client()), None, (100, 14));
+    let mut h = Harness::new(sections_on(&fake), Arc::new(fake.client()), None, (100, 14));
     h.load().await;
     let before = h.app.reader.note.as_ref().map(|n| n.id.clone());
     assert!(before.is_some() && before.as_deref() != Some("NOTE-FERRY"));
@@ -368,7 +387,7 @@ async fn enter_opens_the_note_at_that_section() {
 #[tokio::test]
 async fn b_opens_bear_at_the_section() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     h.press("b");
@@ -386,13 +405,13 @@ async fn b_opens_bear_at_the_section() {
 async fn another_day_tag_pattern_finds_its_own_sections() {
     let fake = Fake::new();
     let config = Config {
-        sections: SectionsConfig {
+        sections: Some(SectionsConfig {
             day_tag: "journal/%Y-%m-%d".into(),
             // Only the tag can decide: this heading format matches nothing the
             // sample notes write.
             heading_format: "%Y-%m-%d".into(),
             ..SectionsConfig::default()
-        },
+        }),
         ..fake.config()
     };
     let mut h = fake.harness_with(config, None);
@@ -424,7 +443,7 @@ async fn another_day_tag_pattern_finds_its_own_sections() {
 #[tokio::test]
 async fn a_note_changed_in_bear_between_the_read_and_the_write_is_not_overwritten() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     // Two reads with a write in between: the hash from the first read is what
     // `s` would write against, and by then it is stale.
@@ -461,7 +480,7 @@ async fn a_note_changed_in_bear_between_the_read_and_the_write_is_not_overwritte
 #[tokio::test]
 async fn a_read_with_no_hash_is_never_written_back() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     let before = body(&fake, "NOTE-TRAIL").await;
     let note = h.app.snapshot.by_id("NOTE-TRAIL").unwrap().clone();
@@ -488,7 +507,7 @@ async fn a_read_with_no_hash_is_never_written_back() {
 #[tokio::test]
 async fn s_refuses_a_locked_note() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     let mut state: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fake.state()).unwrap()).unwrap();
@@ -569,7 +588,7 @@ async fn s_on_a_daily_note_goes_after_the_whole_title_section() {
     // body would move under today's date.
     let fake = Fake::new();
     let config = SectionsConfig::default();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     let day = fake.days_ago(3);
     let original = format!(
@@ -608,7 +627,7 @@ async fn s_on_a_daily_note_goes_after_the_whole_title_section() {
 #[tokio::test]
 async fn s_refuses_a_trashed_note() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     let original = "# Discarded\n#survey\n\nold plans\n";
     add_note(&fake, &mut h, "NOTE-BINNED", "Discarded", "trash", original).await;
@@ -638,7 +657,7 @@ async fn s_works_on_an_empty_note() {
         .create("Empty", &["survey".to_string()], "")
         .await
         .unwrap();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_note(&mut h, &empty).await;
     h.press("s");
@@ -677,7 +696,7 @@ async fn s_keeps_a_note_that_ends_without_a_newline() {
         .overwrite(&ragged, "# Ragged\n#survey\n\nlast line", &base.hash)
         .await
         .unwrap();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_note(&mut h, &ragged).await;
     h.press("s");
@@ -701,7 +720,7 @@ async fn s_keeps_a_note_that_ends_without_a_newline() {
 #[tokio::test]
 async fn an_older_day_load_never_lands_on_a_newer_day() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     let rows = day_rows(&h);
@@ -727,7 +746,7 @@ async fn an_older_day_load_never_lands_on_a_newer_day() {
 #[tokio::test]
 async fn stepping_crosses_months_and_years() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     h.app.open_day(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
     h.until(|app| app.day.as_ref().is_some_and(|d| d.loaded))
@@ -775,7 +794,7 @@ async fn a_note_that_only_heads_its_sections_by_date_is_found() {
         )
         .await
         .unwrap();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     assert!(
@@ -790,7 +809,7 @@ async fn a_note_that_only_heads_its_sections_by_date_is_found() {
 async fn an_archived_note_keeps_its_history_and_says_so() {
     let fake = Fake::new();
     fake.client().archive("NOTE-FERRY").await.unwrap();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     assert!(
@@ -825,7 +844,7 @@ async fn an_archived_note_keeps_its_history_and_says_so() {
 async fn enter_opens_an_archived_note_at_its_section() {
     let fake = Fake::new();
     fake.client().archive("NOTE-FERRY").await.unwrap();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     h.press("j");
@@ -860,7 +879,7 @@ async fn enter_opens_an_archived_note_at_its_section() {
 #[tokio::test]
 async fn enter_on_a_note_that_is_gone_says_so_and_changes_nothing() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     // A tag view, cursor off the first row: a list rebuilt behind the toast
     // would move both the cursor and the reader to another note.
@@ -925,7 +944,7 @@ async fn b_quotes_a_section_headed_like_a_flag() {
         .await
         .unwrap();
 
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     let index = day_rows(&h)
@@ -962,7 +981,7 @@ async fn an_insert_value_that_is_not_a_position_says_so_at_start_up() {
     std::fs::write(&path, "[sections]\ninsert = \"end\"\n").unwrap();
     let loaded = Config::load(Some(&path)).unwrap();
     assert_eq!(
-        loaded.sections.insert,
+        loaded.sections.as_ref().unwrap().insert,
         InsertPosition::BeforeFirstDatedSection
     );
     let config = Config {
@@ -982,10 +1001,10 @@ async fn an_insert_value_that_is_not_a_position_says_so_at_start_up() {
 async fn a_day_tag_that_is_not_a_date_says_so_at_start_up() {
     let fake = Fake::new();
     let config = Config {
-        sections: SectionsConfig {
+        sections: Some(SectionsConfig {
             day_tag: "log/daily".into(),
             ..SectionsConfig::default()
-        },
+        }),
         ..fake.config()
     };
     let mut h = fake.harness_with(config, None);
@@ -996,7 +1015,7 @@ async fn a_day_tag_that_is_not_a_date_says_so_at_start_up() {
     })
     .await;
     // The sample config says nothing, because there is nothing to say.
-    let mut clean = fake.harness();
+    let mut clean = harness(&fake);
     clean.load().await;
     assert!(
         !clean
@@ -1012,7 +1031,7 @@ async fn a_day_tag_that_is_not_a_date_says_so_at_start_up() {
 #[tokio::test]
 async fn a_scroll_waiting_on_a_note_that_cannot_be_read_is_dropped() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     // The note goes out from under the day screen between its load and enter.
@@ -1042,7 +1061,7 @@ async fn a_scroll_waiting_on_a_note_that_cannot_be_read_is_dropped() {
 #[tokio::test]
 async fn the_filter_box_says_what_esc_does() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_day(&mut h).await;
     h.press("slash");
@@ -1063,7 +1082,7 @@ async fn a_noisy_note_title_never_reaches_a_toast_as_written() {
         .create("Bell\u{7}Note", &["survey".to_string()], "")
         .await
         .unwrap();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     open_note(&mut h, &id).await;
     h.press("s");
@@ -1085,7 +1104,7 @@ async fn enter_leaves_a_workspace_the_note_is_outside_of() {
     let fake = Fake::new();
     // The day screen searches every note, so a workspace that does not hold
     // the note is the common case, not the odd one.
-    let mut h = fake.harness_with(fake.config(), Some("home"));
+    let mut h = fake.harness_with(sections_on(&fake), Some("home"));
     h.load().await;
     assert_eq!(h.app.selection.workspace, "home");
     open_day(&mut h).await;
@@ -1128,7 +1147,7 @@ async fn enter_leaves_a_workspace_the_note_is_outside_of() {
 #[tokio::test]
 async fn a_scroll_waiting_on_a_locked_note_is_dropped() {
     let fake = Fake::new();
-    let mut h = fake.harness();
+    let mut h = harness(&fake);
     h.load().await;
     let mut state: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fake.state()).unwrap()).unwrap();
@@ -1162,4 +1181,118 @@ async fn a_scroll_waiting_on_a_locked_note_is_dropped() {
         h.app.reader.message()
     );
     assert!(!h.app.jump_pending());
+}
+
+/// A config written to the fake's own file and read by the real parser.
+fn config_from(fake: &Fake, text: &str) -> Config {
+    let path = fake.dir.path().join("config.toml");
+    std::fs::write(&path, text).unwrap();
+    let loaded = Config::load(Some(&path)).unwrap();
+    Config {
+        sections: loaded.sections,
+        daily: loaded.daily,
+        ..fake.config()
+    }
+}
+
+#[tokio::test]
+async fn without_a_sections_table_s_and_t_say_how_to_turn_them_on() {
+    let fake = Fake::new();
+    let config = config_from(&fake, "poll_seconds = 0\n");
+    assert_eq!(config.sections, None);
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    open_note(&mut h, "NOTE-TRAIL").await;
+    let before = body(&fake, "NOTE-TRAIL").await;
+
+    // `s` is one key on the note under the cursor: off, it reads and writes
+    // nothing, and says what would turn it on.
+    h.press("s");
+    h.until(|app| {
+        app.toast_messages()
+            .iter()
+            .any(|m| m == bjorn::sections::SECTIONS_OFF)
+    })
+    .await;
+    h.settle().await;
+    assert_eq!(body(&fake, "NOTE-TRAIL").await, before);
+    assert!(
+        !h.app.toast_messages().iter().any(|m| m.contains("Added “")),
+        "{:?}",
+        h.app.toast_messages()
+    );
+
+    h.press("T");
+    h.settle().await;
+    assert!(h.app.day.is_none(), "no day screen without [sections]");
+    assert_eq!(
+        h.app
+            .toast_messages()
+            .iter()
+            .filter(|m| *m == bjorn::sections::SECTIONS_OFF)
+            .count(),
+        2,
+        "{:?}",
+        h.app.toast_messages()
+    );
+}
+
+#[tokio::test]
+async fn patterns_that_are_not_turned_on_never_warn_at_start_up() {
+    let fake = Fake::new();
+    // Bad values in a commented-out table, and a daily tag that names no day
+    // (fine for daily notes, no time axis): with no [sections] table none of
+    // it is read, so there is nothing to warn about.
+    let config = config_from(
+        &fake,
+        "[daily]\ntag = \"daily\"\n\n# [sections]\n# day_tag = \"log/daily\"\n# insert = \"end\"\n",
+    );
+    assert_eq!(config.sections, None);
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.settle().await;
+    assert!(
+        !h.app.toasts.iter().any(|t| t.title == "Dated sections"),
+        "{:?}",
+        h.app.toast_messages()
+    );
+    assert!(
+        !h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.contains("[sections]")),
+        "{:?}",
+        h.app.toast_messages()
+    );
+}
+
+#[tokio::test]
+async fn the_daily_tag_is_the_day_tag_when_sections_leaves_it_out() {
+    let fake = Fake::new();
+    let config = config_from(
+        &fake,
+        "[daily]\ntag = \"journal/%Y-%m-%d\"\n\n[sections]\nheading_format = \"%Y-%m-%d\"\n",
+    );
+    assert_eq!(
+        config.sections.as_ref().map(|s| s.day_tag.as_str()),
+        Some("journal/%Y-%m-%d")
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    open_day(&mut h).await;
+    h.press("left");
+    h.until(|app| {
+        app.day
+            .as_ref()
+            .is_some_and(|d| d.loaded && d.date == fake.days_ago(1))
+    })
+    .await;
+    assert_eq!(
+        day_rows(&h)
+            .iter()
+            .map(|(title, _)| title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Trail Journal"],
+        "the daily notes' journal tag is the time axis"
+    );
 }

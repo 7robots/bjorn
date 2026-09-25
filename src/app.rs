@@ -34,7 +34,7 @@ use crate::reminders::{
     RemctlClient, Status, join as join_reminders, remctl_found, resolve_remctl,
 };
 use crate::search::{query_pattern, rewrite_subtags};
-use crate::sections::{self, DayScan, Insertion};
+use crate::sections::{self, DayScan, Insertion, SectionsConfig};
 use crate::templates::{self, Template};
 use crate::todos::{TodoScan, scan_rows};
 use crate::ui::day::DayView;
@@ -482,8 +482,14 @@ impl App {
         app.reader.clear("Loading\u{2026}");
         // A day tag that is not a whole date leaves the day screen empty for
         // ever with nothing to say why, so the patterns are checked once here
-        // rather than on every press of T.
-        if let Some(problem) = app.config.sections.problem(today()) {
+        // rather than on every press of T. Only with `[sections]` on: a
+        // feature nobody enabled has nothing to warn about.
+        if let Some(problem) = app
+            .config
+            .sections
+            .as_ref()
+            .and_then(|sections| sections.problem(today()))
+        {
             app.notify_titled(
                 "Dated sections",
                 &problem,
@@ -4278,10 +4284,24 @@ impl App {
 // -- dated sections and the day screen ----------------------------------------------
 
 impl App {
+    /// The `[sections]` settings, or `None` after saying how to turn dated
+    /// sections on. `s` and `T` both start here, so without the table neither
+    /// reads nor writes anything.
+    fn sections_config(&mut self) -> Option<SectionsConfig> {
+        let config = self.config.sections.clone();
+        if config.is_none() {
+            self.notify(sections::SECTIONS_OFF, Duration::from_secs(8));
+        }
+        config
+    }
+
     /// `s`: a section for today in the note under the cursor, from the
     /// `[sections]` template. The note is read first, so the write is guarded
     /// by the hash that read produced.
     fn new_section(&mut self) {
+        if self.sections_config().is_none() {
+            return;
+        }
         let Some(note) = self.current_note().cloned() else {
             self.notify("No note selected.", Duration::from_secs(3));
             return;
@@ -4321,6 +4341,9 @@ impl App {
 
     /// The note came back: splice the section in, or say why nothing was done.
     fn write_section(&mut self, note: Note, before: NoteContent) {
+        let Some(config) = self.sections_config() else {
+            return;
+        };
         // The read took a round trip; a refresh in the meantime may have seen
         // the note go to the Trash.
         if self
@@ -4333,7 +4356,7 @@ impl App {
         }
         let when = crate::model::now_local();
         let title = strip_control(&note.title);
-        match sections::insert_section(&self.config.sections, &before.content, when, &note.title) {
+        match sections::insert_section(&config, &before.content, when, &note.title) {
             Insertion::Exists { heading } => {
                 self.notify(
                     &format!("“{title}” already has a section for today; jumped to it."),
@@ -4437,7 +4460,9 @@ impl App {
 
     /// `T`: every section written on one day, across all notes.
     pub fn open_day(&mut self, date: NaiveDate) {
-        let config = &self.config.sections;
+        let Some(config) = self.sections_config() else {
+            return;
+        };
         self.day = Some(DayView::new(
             date,
             &config.day_tag_display(date),
@@ -4457,12 +4482,15 @@ impl App {
         self.day_gen += 1;
         let generation = self.day_gen;
         let date = day.date;
-        let tag = self.config.sections.day_tag_for(date);
+        // The screen only opens with `[sections]` on.
+        let Some(config) = self.config.sections.clone() else {
+            return;
+        };
+        let tag = config.day_tag_for(date);
         // The tag finds notes that carry it; the heading phrase also finds the
         // ones that only head their sections by date. Both are filtered by the
         // body parse afterwards.
-        let phrase = self.config.sections.heading_phrase(date);
-        let config = self.config.sections.clone();
+        let phrase = config.heading_phrase(date);
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -4497,7 +4525,9 @@ impl App {
             return;
         }
         let filter = day.filter_text.clone();
-        let config = &self.config.sections;
+        let Some(config) = self.config.sections.as_ref() else {
+            return;
+        };
         let mut next = DayView::new(
             date,
             &config.day_tag_display(date),

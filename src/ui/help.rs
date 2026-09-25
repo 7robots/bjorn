@@ -147,11 +147,11 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "s",
-                "add today's section to the note under the cursor, from the [sections] template: a date heading, the day tag, and whatever prompts you keep in it. It goes above the first dated section, so the newest stays on top; if today already has one, nothing is written and the reader jumps to it",
+                "add today's section to the note under the cursor, from the [sections] template: a date heading, the day tag, and whatever prompts you keep in it. It goes above the first dated section, so the newest stays on top; if today already has one, nothing is written and the reader jumps to it. Off until the config has a [sections] table",
             ),
             (
                 "T",
-                "the day screen: every section written on one day, across your notes and archive (archived ones are marked), grouped by note. Found by the day tag and by the date heading as a phrase",
+                "the day screen: every section written on one day, across your notes and archive (archived ones are marked), grouped by note. Found by the day tag and by the date heading as a phrase. Off until the config has a [sections] table",
             ),
             ("← → / [ ]", "a day back / forward; t returns to today"),
             (
