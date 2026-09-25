@@ -6,6 +6,20 @@ bjorn \- terminal front end for the Bear note app
 .RI [ options ]
 .br
 .B bjorn \-\-list\-themes
+.br
+.B bjorn
+.RB [ \-\-config
+.IR path ]
+.RB [ \-\-demo ]
+.B capture
+.RB [ \-\- ]
+.RI [ text ...]
+.br
+.B bjorn
+.RB [ \-\-config
+.IR path ]
+.RB [ \-\-demo ]
+.B today
 .SH DESCRIPTION
 .B bjorn
 is a terminal client for Bear (https://bear.app), written in Rust with
@@ -94,6 +108,43 @@ Print the usage summary and exit.
 .TP
 .BR \-V ", " \-\-version
 Print the version and exit.
+.SH COMMANDS
+Both commands work on today's daily note and need a
+.B [daily]
+table in the config (see
+.BR "DAILY NOTES AND TEMPLATES" ).
+Without one they print
+.I Daily notes are off \(em add a [daily] section to config.toml
+on standard error and exit 1, before reading standard input or calling
+.BR bearcli .
+.BR \-\-config ,
+.B \-\-demo
+and
+.B \-\-tag
+go before the command; after it, any word starting with
+.B \-
+is an error rather than text.
+.TP
+.B capture \fR[\fB\-\-\fR] [\fItext\fR ...]
+Add a line to today's daily note, making the note first if needed. The words
+are joined with spaces; with none, the text is read from standard input, up to
+1 MiB. The line is
+.I capture_format
+filled in, by default
+.BR "* 14:05 text" ,
+added at the end of the note or under
+.IR capture_section .
+Control characters other than tab and newline are dropped. A multi\-line
+capture stays one entry: blank lines are dropped and the lines after the first
+are indented past the bullet, so a pasted heading or rule stays text. Prints
+nothing on success. Write
+.B bjorn capture \-\- \(dq$text\(dq
+for text that might start with a dash.
+.TP
+.B today
+Print today's daily note as
+.IR id <TAB> title ,
+making it first if needed.
 .SH KEYS
 These are the bindings the in\-app help
 .RB ( ? )
@@ -171,6 +222,22 @@ next / previous heading in the reader
 .TP
 .B n
 new note (title, tags), then edit
+.TP
+.B N
+new note from a template in the templates directory
+.RI ( "[templates] dir" ,
+default
+.IR ~/.config/bjorn/templates ):
+pick one, then settle the title and tags as for
+.B n
+.TP
+.B D
+open today's daily note, making it from the daily template the first time.
+Off until the config has a
+.B [daily]
+table; without one,
+.B D
+shows how to turn it on and makes nothing
 .TP
 .B e
 edit in
@@ -514,6 +581,83 @@ every load they are read back and rows show ⏰ for an open reminder
 or ✓ for one completed in Reminders, ready to
 .B x
 in Bear. Nothing is written into Bear when a reminder is added.
+.SH DAILY NOTES AND TEMPLATES
+Bear has no daily notes of its own; its Today view is notes modified today.
+Bjorn makes them only when the config has a
+.B [daily]
+table, and an empty one turns them on with the defaults.
+.PP
+.B D
+opens today's note, making it the first time. By default it is titled with the
+date as a second\-level heading and tagged with a dated nested tag:
+.PP
+.EX
+## September 19, 2026 (Saturday)
+#log/2026/09/19
+* People:
+* Topic:
+
+\-\-\-
+.EE
+.PP
+The note is found by its title: Bjorn selects it when the snapshot already has
+it, and otherwise runs
+.BR "bearcli create \-\-if\-not\-exists" ,
+which returns the existing note or makes one. Asking twice never makes a second
+note; two processes asking in the same instant could, and the duplicate\-title
+warning then says so. A trashed or archived note with today's title is never
+reused. Renaming the note's heading in Bear makes it no longer today's note,
+and the next
+.B D
+or capture makes another.
+.PP
+Because the title is the only link,
+.I title
+must name exactly one day: a year with a month and day
+.RB ( %Y\-%m\-%d ),
+a year and day of the year
+.RB ( %Y\-%j ),
+or an ISO week date
+.RB ( %G\-W%V\-%u ),
+and no time of day. A title that repeats
+.RB ( %A ", " "%B %\-d" )
+would reuse last week's or last year's note, so Bjorn refuses it at start. The
+check runs only while
+.B [daily]
+is on.
+.PP
+A capture belongs to the day it runs: one at 00:05 goes to the new day's note.
+In a git hook,
+.B capture
+with no words reads git's own standard input, so pass the text as an argument
+or add
+.BR </dev/null .
+.PP
+.B N
+makes a note from a template: a Markdown file in the templates directory. When
+a template starts with a heading (after any YAML front matter, which stays on
+top), its text is the proposed title. These placeholders are filled in, and
+anything else in braces stays as written:
+.TP
+.B {{date}} {{time}}
+today's date and the time now
+.TP
+.B {{date:\fIformat\fB}}
+today formatted with any strftime format, e.g.
+.B {{date:%A}}
+.TP
+.B {{title}} {{tag}} {{workspace}}
+the note's title, its tags as Bear writes them, and the workspace
+.PP
+Files over 256 KiB or not UTF\-8 are skipped. A
+.I daily.md
+in the directory replaces the built\-in daily layout and is left out of
+.BR N 's
+list;
+.B {{tag}}
+in it is the dated tag. Meeting, one\-on\-one, decision and daily examples ship
+in
+.IR config/templates/ .
 .SH EXPORT
 .B x
 writes the note under the cursor to a file you pick, in the format chosen in
@@ -1011,6 +1155,50 @@ Path to
 .BR remctl .
 Default: empty, which searches
 .BR $PATH .
+.SS [daily]
+Present, even empty, turns daily notes on; absent, they are off. See
+.BR "DAILY NOTES AND TEMPLATES" .
+.TP
+.I title
+strftime format of the note's title, which is how the note is found; it must
+name one day. Default:
+.BR "%B %\-d, %Y (%A)" .
+.TP
+.I tag
+strftime format of the dated tag;
+.B \(dq\(dq
+for none. Default:
+.BR log/%Y/%m/%d .
+.TP
+.I template
+The daily template: a name inside the templates directory, or an absolute or
+.B ~/
+path. Default:
+.BR daily ,
+and the built\-in layout when that file does not exist.
+.TP
+.I capture_section
+A heading such as
+.B \(dq## Inbox\(dq
+that captures go under, matched ignoring case and made at the end of the note
+when missing. Default: empty, the end of the note.
+.TP
+.I capture_format
+The line a capture adds;
+.BR {{time}} ,
+.BR {{text}} ,
+.B {{date}}
+and
+.B {{workspace}}
+are filled in. Default:
+.BR "* {{time}} {{text}}" .
+.SS [templates]
+.TP
+.I dir
+The templates directory
+.B N
+reads. Default:
+.IR ~/.config/bjorn/templates .
 .SS [[actions]]
 An array of tables; see
 .B ACTIONS
@@ -1105,6 +1293,17 @@ and the test suite run. They have no effect on a real run.
 .I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/config.toml
 The config file. Edited as text, so comments survive.
 .TP
+.I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/templates/
+Note templates for
+.BR N ,
+and
+.I daily.md
+for
+.BR D ,
+unless
+.I [templates] dir
+names another directory.
+.TP
 .I ${XDG_CACHE_HOME:\-~/.cache}/bjorn/previews.json
 The notes list's body previews, keyed by note id and modification stamp.
 Derived state only: deleting it costs one slow start.
@@ -1185,6 +1384,21 @@ format = "textbundle"
 confirm = true
 .EE
 .PP
+Turn on daily notes and capture from the shell:
+.PP
+.EX
+# ~/.config/bjorn/config.toml
+[daily]
+capture_section = "## Inbox"
+.EE
+.PP
+.EX
+bjorn capture "call Ana about the budget"
+pbpaste | bjorn capture
+bjorn capture \-\- "$text" </dev/null   # in a git hook
+bjorn today
+.EE
+.PP
 Choose a palette for one run, or for good:
 .PP
 .EX
@@ -1208,6 +1422,13 @@ An error, with the reason on standard error; for example
 .B \-\-theme
 named a theme that does not exist, the config file does not parse, or the
 terminal could not be put into raw mode.
+For
+.B capture
+and
+.BR today ,
+also: daily notes are off, the text is blank or over 1 MiB, or
+.B bearcli
+failed.
 .TP
 .B 2
 The command line itself was wrong \(em an unknown flag or a missing argument.
