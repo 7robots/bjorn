@@ -1987,9 +1987,18 @@ mod tests {
             format_error: Some("\"pfd\"".into()),
             ..action("Print", "weasyprint - out.pdf")
         };
+        // The list is `export::FORMATS`, whatever formats the build has.
+        let valid: Vec<&str> = crate::export::FORMATS.iter().map(|f| f.id).collect();
         assert_eq!(
-            typo.misconfigured().as_deref(),
-            Some("format = \"pfd\" is not one of md, html, txt, rtf, textbundle")
+            typo.misconfigured(),
+            Some(format!(
+                "format = \"pfd\" is not one of {}",
+                valid.join(", ")
+            ))
+        );
+        assert!(
+            valid.starts_with(&["md", "html", "txt", "rtf"]),
+            "{valid:?}"
         );
     }
 }

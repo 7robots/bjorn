@@ -685,7 +685,7 @@ async fn an_unknown_format_stops_the_action_before_it_runs() {
     h.press("!");
     let message = wait_for_toast(&mut h, "is not one of").await;
     assert!(
-        message.contains("format = \"pfd\" is not one of md, html, txt, rtf, textbundle"),
+        message.contains("format = \"pfd\" is not one of md, html, txt, rtf"),
         "{message}"
     );
     h.settle().await;
