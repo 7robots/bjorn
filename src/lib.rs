@@ -22,3 +22,4 @@ pub mod search_box;
 pub mod todos;
 pub mod ui;
 pub mod util;
+pub mod wiki;

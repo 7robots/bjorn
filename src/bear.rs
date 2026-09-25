@@ -7,7 +7,7 @@
 //! stderr when they fail. Both shapes become `BearError`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 
 use crate::render::{PREVIEW_LIMIT, preview};
-use crate::util::{first_line, home_dir, is_executable, which};
+use crate::util::{first_line, home_dir, is_executable, strip_bidi, which};
 
 pub const ENV_COMMAND: &str = "BJORN_BEARCLI";
 pub const DEFAULT_COMMAND: &str = "bearcli";
@@ -305,7 +305,7 @@ impl Note {
             Some(Value::Array(items)) => items.len() as i64,
             other => int_of(other),
         };
-        let title = text_of(row.get("title")).trim().to_string();
+        let title = strip_bidi(text_of(row.get("title")).trim());
         Note {
             id: text_of(row.get("id")),
             title: if title.is_empty() {
@@ -323,10 +323,10 @@ impl Note {
             done: int_of(row.get("done")),
             attachments,
             locked: is_yes(row.get("locked")),
-            preview: match preview_text {
+            preview: strip_bidi(&match preview_text {
                 Some(text) => text.to_string(),
                 None => preview(&text_of(row.get("content")), PREVIEW_LIMIT),
-            },
+            }),
         }
     }
 
@@ -522,6 +522,34 @@ pub struct BearClient {
     preview_cache_written: Mutex<Option<u64>>,
 }
 
+/// Write `body` to `path`, readable by this user only: the previews are the
+/// opening lines of every note. A missing directory is created 0700.
+///
+/// The file is written to a fresh temporary beside the target and renamed, so
+/// a killed process never leaves half a cache behind and two Bjorns never
+/// rename each other's half-written file into place. The temporary is created
+/// 0600 with `O_EXCL`, so nothing already sitting at its name, a symlink
+/// included, is written through.
+fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".previews-")
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    temp.write_all(body)?;
+    temp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 impl BearClient {
     pub fn new(command: Vec<String>) -> BearClient {
         Self::from_runner(Box::new(ProcessRunner {
@@ -633,14 +661,7 @@ impl BearClient {
         let Ok(body) = serde_json::to_vec(&doc) else {
             return;
         };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        // Written beside the target and renamed, so a killed process never
-        // leaves half a cache behind. The pid keeps two Bjorns (or the Python
-        // one) from renaming each other's half-written file into place.
-        let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        if std::fs::write(&temp, &body).is_ok() && std::fs::rename(&temp, path).is_ok() {
+        if write_private(path, &body).is_ok() {
             *self.preview_cache_written.lock().unwrap() = Some(signature);
         }
     }
@@ -654,6 +675,12 @@ impl BearClient {
         self.previews.lock().unwrap().keys().cloned().collect()
     }
 
+    /// Every call puts its options first, a value that comes from a note or
+    /// the user as one `--flag=value` entry, then `--`, then the positionals.
+    /// bearcli is built on swift-argument-parser, which reads a hyphen-leading
+    /// positional as an unknown option and refuses a hyphen-leading option
+    /// value given as its own entry: a todo line `- [ ] ...` passed as
+    /// `--find`, or an attachment named `-scan.png`, would fail otherwise.
     async fn spawn(&self, args: &[&str], stdin: Option<&str>) -> Result<RawOutput> {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         self.runner.run(&owned, stdin).await
@@ -885,12 +912,12 @@ impl BearClient {
         if query.is_empty() {
             return Ok(Vec::new());
         }
+        let query = format!("--query={query}");
         let rows = self
             .run(
                 &[
                     "search",
-                    "--query",
-                    query,
+                    &query,
                     "--location",
                     location,
                     "--format",
@@ -909,9 +936,53 @@ impl BearClient {
             .collect())
     }
 
+    /// Candidate backlinks to `title`: every note in Notes or the Archive
+    /// whose body holds one of the phrases `wiki::backlink_queries` builds,
+    /// with its content. Each location is searched on its own, so notes in
+    /// the trash (never a backlink) cannot use up the cap: each search reads
+    /// at most `wiki::BACKLINK_LIMIT` notes, and the second flag says whether
+    /// any hit it. Bear's phrase match is a prefix match, so `wiki::backlinks`
+    /// checks each body before any is shown.
+    pub async fn backlink_rows(&self, title: &str) -> Result<(Vec<Value>, bool)> {
+        let limit = crate::wiki::BACKLINK_LIMIT.to_string();
+        let mut rows: Vec<Value> = Vec::new();
+        let mut capped = false;
+        for query in crate::wiki::backlink_queries(title) {
+            let query = format!("--query={query}");
+            for location in ["notes", "archive"] {
+                let found = Self::rows(
+                    self.run(
+                        &[
+                            "search",
+                            &query,
+                            "--location",
+                            location,
+                            "--limit",
+                            &limit,
+                            "--format",
+                            "json",
+                            "--fields",
+                            "id,title,location,content",
+                        ],
+                        true,
+                        None,
+                    )
+                    .await?,
+                );
+                capped |= found.len() >= crate::wiki::BACKLINK_LIMIT;
+                for row in found {
+                    if !rows.iter().any(|r| r.get("id") == row.get("id")) {
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+        Ok((rows, capped))
+    }
+
     pub async fn cat(&self, note_id: &str) -> Result<NoteContent> {
         let payload = self
-            .run(&["cat", note_id, "--format", "json"], true, None)
+            .run(&["cat", "--format", "json", "--", note_id], true, None)
             .await?;
         if !payload.is_object() {
             return Err(BearError::new("bearcli cat returned no content"));
@@ -932,11 +1003,11 @@ impl BearClient {
         } else {
             format!("@todo #{ws}")
         };
+        let query = format!("--query={query}");
         let rows = self
             .run(
                 &[
                     "search",
-                    "--query",
                     &query,
                     "--location",
                     "notes",
@@ -960,11 +1031,12 @@ impl BearClient {
                 &[
                     "attachments",
                     "list",
-                    note_id,
                     "--format",
                     "json",
                     "--fields",
                     "filename",
+                    "--",
+                    note_id,
                 ],
                 true,
                 None,
@@ -983,7 +1055,13 @@ impl BearClient {
     pub async fn attachment(&self, note_id: &str, filename: &str) -> Result<Vec<u8>> {
         let output = self
             .spawn(
-                &["attachments", "save", note_id, "--filename", filename],
+                &[
+                    "attachments",
+                    "save",
+                    &format!("--filename={filename}"),
+                    "--",
+                    note_id,
+                ],
                 None,
             )
             .await?;
@@ -1016,16 +1094,36 @@ impl BearClient {
 
     // -- writes --------------------------------------------------------------
 
-    /// Create a note and return its id.
+    /// Create a note and return its id. Every option goes before `--` and
+    /// the title after it, so a title such as `--content=x` (from a wiki link
+    /// in a note) stays a title.
     pub async fn create(&self, title: &str, tags: &[String], content: &str) -> Result<String> {
-        let mut args: Vec<String> = vec![
-            "create".into(),
-            title.into(),
-            "--format".into(),
-            "json".into(),
-            "--fields".into(),
-            "id".into(),
-        ];
+        self.create_row(Some(title), tags, content)
+            .await
+            .map(|(id, _)| id)
+    }
+
+    /// Create a note from `content` alone, letting Bear take the title from
+    /// its first line (after any front matter). Returns the id and the title
+    /// Bear gave it.
+    pub async fn create_from_content(
+        &self,
+        tags: &[String],
+        content: &str,
+    ) -> Result<(String, String)> {
+        self.create_row(None, tags, content).await
+    }
+
+    /// `bearcli create`, with the body on stdin so none of it is read as an
+    /// escape. `title: None` leaves the title to Bear.
+    async fn create_row(
+        &self,
+        title: Option<&str>,
+        tags: &[String],
+        content: &str,
+    ) -> Result<(String, String)> {
+        let mut args: Vec<String> = vec!["create".into()];
+        args.extend(["--format", "json", "--fields", "id,title"].map(String::from));
         let tag_list = tags
             .iter()
             .map(|t| normalize_tag(t))
@@ -1033,8 +1131,12 @@ impl BearClient {
             .collect::<Vec<_>>()
             .join(",");
         if !tag_list.is_empty() {
-            args.push("--tags".into());
-            args.push(tag_list);
+            // One argument, so a tag that starts with `-` is never an option.
+            args.push(format!("--tags={tag_list}"));
+        }
+        if let Some(title) = title {
+            args.push("--".into());
+            args.push(title.into());
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let payload = {
@@ -1049,14 +1151,59 @@ impl BearClient {
         if !payload.is_object() || id.is_empty() {
             return Err(BearError::new("bearcli create returned no id"));
         }
-        Ok(id)
+        Ok((id, text_of(payload.get("title"))))
+    }
+
+    /// Add `content` to the end of a note, or of the section under the heading
+    /// `section`. The text goes on stdin, so none of it is read as an escape.
+    pub async fn append(&self, note_id: &str, content: &str, section: Option<&str>) -> Result<()> {
+        let mut args: Vec<String> = vec!["append".into()];
+        if let Some(section) = section.filter(|s| !s.trim().is_empty()) {
+            // One argument, so a heading that starts with `-` is never an option.
+            args.push(format!("--section={}", escape_flag(section)));
+        }
+        args.extend(["--".into(), note_id.into()]);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _guard = self.write_lock.lock().await;
+        self.run(&refs, false, Some(content)).await.map(|_| ())
+    }
+
+    /// A note's title and location (`notes`, `archive`, `trash`), read fresh:
+    /// what a write checks just before it goes, and what it reads after.
+    pub async fn title_and_location(&self, note_id: &str) -> Result<(String, String)> {
+        let payload = self
+            .run(
+                &[
+                    "show",
+                    "--format",
+                    "json",
+                    "--fields",
+                    "title,location",
+                    "--",
+                    note_id,
+                ],
+                true,
+                None,
+            )
+            .await?;
+        let payload = match payload {
+            Value::Array(rows) => rows.into_iter().next().unwrap_or(Value::Null),
+            other => other,
+        };
+        if !payload.is_object() {
+            return Err(BearError::new("bearcli show returned no note"));
+        }
+        Ok((
+            text_of(payload.get("title")),
+            text_of(payload.get("location")),
+        ))
     }
 
     /// Replace a note's whole content, guarded by the hash from `cat`.
     pub async fn overwrite(&self, note_id: &str, content: &str, base: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
         self.run(
-            &["overwrite", note_id, "--base", base],
+            &["overwrite", &format!("--base={base}"), "--", note_id],
             false,
             Some(content),
         )
@@ -1066,33 +1213,35 @@ impl BearClient {
 
     pub async fn trash(&self, note_id: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["trash", note_id], false, None).await.map(|_| ())
+        self.run(&["trash", "--", note_id], false, None)
+            .await
+            .map(|_| ())
     }
 
     pub async fn restore(&self, note_id: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["restore", note_id], false, None)
+        self.run(&["restore", "--", note_id], false, None)
             .await
             .map(|_| ())
     }
 
     pub async fn archive(&self, note_id: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["archive", note_id], false, None)
+        self.run(&["archive", "--", note_id], false, None)
             .await
             .map(|_| ())
     }
 
     pub async fn pin(&self, note_id: &str, target: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["pin", "add", note_id, target], false, None)
+        self.run(&["pin", "add", "--", note_id, target], false, None)
             .await
             .map(|_| ())
     }
 
     pub async fn unpin(&self, note_id: &str, target: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["pin", "remove", note_id, target], false, None)
+        self.run(&["pin", "remove", "--", note_id, target], false, None)
             .await
             .map(|_| ())
     }
@@ -1105,15 +1254,14 @@ impl BearClient {
         replace: &str,
         section: &str,
     ) -> Result<()> {
-        let mut args: Vec<String> = vec!["edit".into(), note_id.into()];
+        let mut args: Vec<String> = vec!["edit".into()];
         if !section.is_empty() {
-            args.push("--section".into());
-            args.push(escape_flag(section));
+            args.push(format!("--section={}", escape_flag(section)));
         }
-        args.push("--find".into());
-        args.push(escape_flag(find));
-        args.push("--replace".into());
-        args.push(escape_flag(replace));
+        args.push(format!("--find={}", escape_flag(find)));
+        args.push(format!("--replace={}", escape_flag(replace)));
+        args.push("--".into());
+        args.push(note_id.into());
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let _guard = self.write_lock.lock().await;
         self.run(&refs, false, None).await.map(|_| ())
@@ -1158,12 +1306,14 @@ impl BearClient {
     // -- app -----------------------------------------------------------------
 
     pub async fn open_in_app(&self, note_id: &str, header: &str) -> Result<()> {
-        let mut args = vec!["app", "open", note_id];
+        let mut args = vec!["app".to_string(), "open".to_string()];
         if !header.is_empty() {
-            args.push("--header");
-            args.push(header);
+            args.push(format!("--header={header}"));
         }
-        self.run(&args, false, None).await.map(|_| ())
+        args.push("--".into());
+        args.push(note_id.into());
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.run(&refs, false, None).await.map(|_| ())
     }
 }
 
@@ -1215,6 +1365,199 @@ mod tests {
         assert_eq!(normalize_tag(" #tech "), "tech");
         assert_eq!(display_tag("work/CAD and Design"), "#work/CAD and Design#");
         assert_eq!(display_tag("tech/dev"), "#tech/dev");
+    }
+
+    #[test]
+    fn a_title_or_preview_cannot_reorder_itself_with_bidi_controls() {
+        let note = Note::from_row(
+            &json!({"id": "B", "title": "Invoice \u{202E}fdp.exe", "content": "# T\n\nsee \u{2067}this\u{2069}"}),
+            None,
+        );
+        assert_eq!(note.title, "Invoice fdp.exe");
+        assert_eq!(note.preview, "see this");
+        let toast = crate::ui::modals::Toast::new(
+            "\u{202E}title",
+            "msg\u{202D}",
+            crate::ui::modals::Severity::Error,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            (toast.title.as_str(), toast.message.as_str()),
+            ("title", "msg")
+        );
+    }
+
+    /// Records each argv and answers just enough for the caller to go on.
+    struct Capture(Mutex<Vec<Vec<String>>>);
+
+    impl Runner for Capture {
+        fn run<'a>(
+            &'a self,
+            args: &'a [String],
+            _stdin: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<RawOutput>> {
+            Box::pin(async move {
+                self.0.lock().unwrap().push(args.to_vec());
+                let stdout = match args[0].as_str() {
+                    "create" => r#"{"id": "N"}"#,
+                    "cat" => r#"{"content": "- [ ] -a", "hash": "h"}"#,
+                    "show" => r#"{"title": "T", "location": "notes"}"#,
+                    "search" | "attachments" if args[1] != "save" => "[]",
+                    _ => "",
+                };
+                Ok(RawOutput {
+                    status: 0,
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: String::new(),
+                })
+            })
+        }
+
+        fn describe(&self) -> String {
+            "capture".into()
+        }
+    }
+
+    impl Runner for Arc<Capture> {
+        fn run<'a>(
+            &'a self,
+            args: &'a [String],
+            stdin: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<RawOutput>> {
+            self.as_ref().run(args, stdin)
+        }
+
+        fn describe(&self) -> String {
+            self.as_ref().describe()
+        }
+    }
+
+    #[tokio::test]
+    async fn every_call_puts_options_first_then_dashes_then_positionals() {
+        let capture = Arc::new(Capture(Mutex::new(Vec::new())));
+        let client = BearClient::from_runner(Box::new(capture.clone()));
+        let id = "-id";
+        client.search_ids("-draft", "notes").await.unwrap();
+        client.todo_rows("").await.unwrap();
+        client.cat(id).await.unwrap();
+        client.attachments(id).await.unwrap();
+        client.attachment(id, "-scan.png").await.unwrap();
+        client
+            .create("-title", &["-tag".into()], "body")
+            .await
+            .unwrap();
+        client.overwrite(id, "body", "-base").await.unwrap();
+        client.trash(id).await.unwrap();
+        client.restore(id).await.unwrap();
+        client.archive(id).await.unwrap();
+        client.pin(id, "-work").await.unwrap();
+        client.unpin(id, "-work").await.unwrap();
+        client
+            .tick_todo(id, "- [ ] -a", "- [x] -a", "-sec")
+            .await
+            .unwrap();
+        client.open_in_app(id, "-head").await.unwrap();
+        client.append(id, "body", Some("-sec")).await.unwrap();
+        client.create_from_content(&[], "body").await.unwrap();
+        client.title_and_location(id).await.unwrap();
+        client.backlink_rows("-title").await.unwrap();
+        let calls = capture.0.lock().unwrap().clone();
+        let expected: Vec<Vec<&str>> = vec![
+            vec![
+                "search",
+                "--query=-draft",
+                "--location",
+                "notes",
+                "--format",
+                "json",
+                "--fields",
+                "id",
+            ],
+            vec![
+                "search",
+                "--query=@todo",
+                "--location",
+                "notes",
+                "--format",
+                "json",
+                "--fields",
+                "id,title,tags,locked,content",
+            ],
+            vec!["cat", "--format", "json", "--", "-id"],
+            vec![
+                "attachments",
+                "list",
+                "--format",
+                "json",
+                "--fields",
+                "filename",
+                "--",
+                "-id",
+            ],
+            vec!["attachments", "save", "--filename=-scan.png", "--", "-id"],
+            vec![
+                "create",
+                "--format",
+                "json",
+                "--fields",
+                "id,title",
+                "--tags=-tag",
+                "--",
+                "-title",
+            ],
+            vec!["overwrite", "--base=-base", "--", "-id"],
+            vec!["trash", "--", "-id"],
+            vec!["restore", "--", "-id"],
+            vec!["archive", "--", "-id"],
+            vec!["pin", "add", "--", "-id", "-work"],
+            vec!["pin", "remove", "--", "-id", "-work"],
+            vec!["cat", "--format", "json", "--", "-id"],
+            vec![
+                "edit",
+                "--section=-sec",
+                "--find=- [ ] -a",
+                "--replace=- [x] -a",
+                "--",
+                "-id",
+            ],
+            vec!["app", "open", "--header=-head", "--", "-id"],
+            vec!["append", "--section=-sec", "--", "-id"],
+            vec!["create", "--format", "json", "--fields", "id,title"],
+            vec![
+                "show",
+                "--format",
+                "json",
+                "--fields",
+                "title,location",
+                "--",
+                "-id",
+            ],
+            vec![
+                "search",
+                "--query=\"[[-title\"",
+                "--location",
+                "notes",
+                "--limit",
+                "200",
+                "--format",
+                "json",
+                "--fields",
+                "id,title,location,content",
+            ],
+            vec![
+                "search",
+                "--query=\"[[-title\"",
+                "--location",
+                "archive",
+                "--limit",
+                "200",
+                "--format",
+                "json",
+                "--fields",
+                "id,title,location,content",
+            ],
+        ];
+        assert_eq!(calls, expected);
     }
 
     #[test]
@@ -1348,7 +1691,8 @@ mod tests {
                 self.0.calls.lock().unwrap().push(args.to_vec());
                 let rows = self.0.rows.lock().unwrap().clone();
                 let payload = if args[0] == "cat" {
-                    let row = rows.iter().find(|r| r["id"] == args[1]).unwrap();
+                    let id = args.last().unwrap();
+                    let row = rows.iter().find(|r| r["id"] == *id).unwrap();
                     json!({"content": row["content"], "hash": "h"})
                 } else if args.iter().any(|a| a == "--count") {
                     json!({"count": rows.len()})
@@ -1423,7 +1767,7 @@ mod tests {
         let mut kinds = rec.kinds();
         kinds.sort();
         assert_eq!(kinds, vec!["cat", "list"], "one stamp moved: one cat");
-        assert_eq!(rec.last_call()[1], "N3");
+        assert_eq!(rec.last_call().last().unwrap(), "N3");
         assert_eq!(
             third.by_id("N3").unwrap().preview,
             "body 3 at 2026-09-02T00:00:00Z"
@@ -1519,6 +1863,38 @@ mod tests {
         assert_eq!(rec.kinds(), vec!["list+content"]);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_preview_cache_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("cache").join("bjorn");
+        let path = dir.join("previews.json");
+        let rec = Recorder::new((0..3).map(|i| row(i, "2026-09-01T00:00:00Z")).collect());
+        let client = client(&rec).with_preview_cache(path.clone());
+        client.snapshot().await.unwrap();
+        client.save_preview_cache();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+
+        // A cache an older build left world-readable is replaced, not reused.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        rec.rows.lock().unwrap()[0] = row(0, "2026-09-02T00:00:00Z");
+        client.snapshot().await.unwrap();
+        client.save_preview_cache();
+        assert_eq!(mode(&path), 0o600);
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from("previews.json")],
+            "no temporary left behind"
+        );
+    }
+
     #[tokio::test]
     async fn a_cold_snapshot_hands_back_the_bodies_it_read() {
         let rec = Recorder::new((0..3).map(|i| row(i, "2026-09-01T00:00:00Z")).collect());
@@ -1550,6 +1926,6 @@ mod tests {
         let mut kinds = rec.kinds();
         kinds.sort();
         assert_eq!(kinds, vec!["cat", "list"]);
-        assert_eq!(rec.last_call()[1], "N1");
+        assert_eq!(rec.last_call().last().unwrap(), "N1");
     }
 }

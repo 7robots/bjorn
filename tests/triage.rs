@@ -274,7 +274,9 @@ async fn enter_goes_to_the_note_and_b_opens_bear_at_the_section() {
     assert_eq!(current(&h), "move the hydrangea");
     h.press("b");
     let log = fake.dir.path().join("bear.json.opened");
-    h.until(|_| log.exists()).await;
+    // The log exists before its line is written; wait for the whole line.
+    h.until(|_| std::fs::read_to_string(&log).is_ok_and(|s| s.ends_with('\n')))
+        .await;
     let last: serde_json::Value = serde_json::from_str(
         std::fs::read_to_string(&log)
             .unwrap()
@@ -313,6 +315,12 @@ async fn goto_a_note_outside_the_current_list() {
     h.until(|app| app.notes.current().is_some_and(|n| n.id == "NOTE-PLANNING"))
         .await;
     assert_eq!(h.app.selection.view, bjorn::model::View::All);
+    // The jump is a history entry: backspace returns to Untagged.
+    assert_eq!(h.app.back.len(), 1);
+    h.press("backspace");
+    h.until(|app| app.notes.current().is_some_and(|n| n.id == "NOTE-UNTAGGED"))
+        .await;
+    assert_eq!(h.app.selection.view, bjorn::model::View::Untagged);
 }
 
 #[tokio::test]

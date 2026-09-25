@@ -43,12 +43,14 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `enter` | move into the reader for the highlighted note, at the first match while searching | `1`–`7` | Notes, Untagged, Todo, Today, Pinned, Archive, Trash |
 | `n` | new note (title, tags), then edit | `d` | move the note to the trash, after a confirm |
 | `e` | edit in `$VISUAL` / `$EDITOR` | `u` | restore from Trash or Archive |
-| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle (`←` `→` pick, `enter` confirms) |
+| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle, PDF (`←` `→` pick, `enter` confirms) |
 | `b` | open in Bear.app | `!` / `a` | run the default action / open the action menu (see [Actions](#actions)) |
 | `w` | make the highlighted tag the workspace; again on it to leave | `W` | clear the workspace |
 | `f` | fold / unfold the highlighted tag's subtree | `F` | fold every tag, or unfold them all when all are folded |
 | `t` | triage the workspace's open todos | `c` / click `▮▮▮` | hide the tag column, then the note column too, then show all three |
 | `]` / `[` | next / previous match in the reader while searching | `r` | refresh now |
+| `o` | outline: the note's headings, indented by level; type to filter, `enter` scrolls there | `}` / `{` | next / previous heading in the reader |
+| `L` | the note's wiki links and backlinks; `enter` follows (see [Wiki links](#wiki-links)) | `backspace` / `alt+→` | back to the note a link was followed from / forward again (`ctrl+o`, `alt+←`, `alt+b` go back; `alt+f` goes forward) |
 | `?` | help (`esc` `q` `?` close it) | `q` | quit, after a confirm |
 
 The **workspace** is a tag subtree that scopes the whole app: the tag tree
@@ -68,6 +70,13 @@ again. While a search is active the reader highlights the terms, including
 inside fenced code and table cells, the header counts the matching blocks,
 `]` and `[` step through them, and `enter` on a note lands on its first match.
 
+`o` lists the headings of the note in the reader, indented by level, with the
+section you are reading highlighted; typing filters them and `enter` scrolls
+that heading to the top of the reader. `}` and `{` step to the next and
+previous heading without the list, and the line under the reader names the
+section at the top of the view. Headings come from the same parse that draws
+the note, so a `#` line inside fenced code is never one.
+
 Views are computed from one `bearcli list` snapshot, so the counts in the
 sidebar and the notes list always agree. **Pinned** means any pin, global or
 inside a tag. **Today** means modified today, local time.
@@ -78,6 +87,51 @@ already has: the cursor's neighbours are read ahead, a cold start keeps the
 bodies the preview listing had to read anyway, and only a body that has to
 come from bearcli waits out a 120 ms debounce. Holding `j` down scrolls the
 reader with the list. Every `bearcli` and `remctl` call has a 30 s timeout.
+
+## Wiki links
+
+Bear's `[[Note title]]` links are drawn in the theme's link color, without the
+brackets; click one to follow it, in the text or in a table. `[[Note
+title/Heading]]` lands on that heading (one inside a quote too), and `[[Note
+title|shown text]]` shows the text after the bar. Bear escapes punctuation
+that belongs to the title with a backslash (`\/`, `\#`), so a `\` before any
+ASCII punctuation is one, and `[[/Heading]]` points into the note itself.
+Some links carry a doubled escape (`[[Cloud Arch \\/ EA/Apr 19]]`, for the
+note `Cloud Arch / EA`); rather than guess the rule, a link is read as
+written first and then with each doubled escape taken as one, and the first
+reading that names a note wins. A link that escapes no `/` is also read
+whole first: `[[A/B testing]]` is the note `A/B testing` if there is one, and
+otherwise the heading `B testing` in `A`. Only when no reading names a note
+is creating one offered, under the first reading's title (`A/B testing`, so
+nothing the link says is dropped). Whatever is between the brackets is the title, markdown
+or not (`[[Q&A]]`, a backtick, `*`); brackets in a title work as long as they
+pair up (`[[[Draft] Plan]]`), but a title holding `]]` cannot be linked.
+Brackets inside code, inline or fenced, are left as written.
+
+`L` lists the links in the note (the first 1,000) and, below them, the notes
+that link to it, under a search box like the action menu's; `enter` follows.
+The backlinks come from a `bearcli search` for the phrase `[[Title`, with the
+title's `/` and `#` escaped as Bear writes them (a title needing that is
+searched for in both the single and the doubled form, and a title with a `/`
+also with the slash bare), in Notes and in the Archive (never the trash), run
+in the background, one search at a time. Bear matches a phrase as a prefix, so
+Bjorn parses every candidate's body and keeps only real links to this title:
+not `[[Title 2]]`, not a mention inside code. Each search reads at most 200
+candidates; when one hits that cap the list says it may be incomplete. A
+title too short or odd for a phrase (under three letters or digits before a
+`"`, `\` or `|`) is searched as `@wikilinks` instead, which covers every note
+holding a `[[`.
+
+A link resolves to the note with that exact title, ignoring case; when several
+share it, an active note wins over an archived one, which wins over one in the
+trash, and then the newest. A title no note has offers to create the note,
+then opens it in the editor as `n` does. When the target is outside the
+current list the list widens to the view that holds it (Notes, Archive or
+Trash), and a workspace that excludes it is cleared, with a toast. `backspace`
+(or `ctrl+o`, `alt+←`, `alt+b`) goes back to where you were, list, workspace,
+search and scroll included; `alt+→` (or `alt+f`) goes forward again. While the
+search box is open, `backspace` edits the query instead. `enter` in triage
+counts as a jump too.
 
 ## Todo triage
 
@@ -106,7 +160,7 @@ list of defaults: each line says whether its value is the default or an example.
 ```toml
 editor = "nvim"               # example; unset falls back to $VISUAL, $EDITOR, vim
 export_dir = "~/Downloads"    # where `x` proposes to write
-export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle
+export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle | pdf
 poll_seconds = 5              # 0 disables the background refresh
 workspace = "work"            # example; unset starts unscoped
 bearcli = "/usr/local/bin/bearcli"  # example; unset searches PATH, then Bear.app
@@ -123,7 +177,7 @@ list = "Bear"                 # example; unset uses remctl's own default list
 due = "today"                 # due date for new reminders; "" for none
 remctl = ""                   # path to remctl; default searches PATH
 
-[[actions]]                   # shell commands for `!` and `a`; see Actions below
+[[actions]]                   # shell commands for `!` and `a`, output to a toast or back into Bear; see Actions below
 ```
 
 `mouse_pixels` and `--no-mouse-pixels` are accepted from older config files
@@ -243,7 +297,7 @@ command of yours: publish it, copy it, POST it, push it.
 [[actions]]
 name = "Publish to S3"
 command = 'aws s3 cp "$BJORN_NOTE_FILE" "s3://notes/$BJORN_NOTE_TITLE.html"'
-format = "html"        # md (default), html, txt, rtf, textbundle
+format = "html"        # md (default), html, txt, rtf, textbundle, pdf
 confirm = true         # ask first
 default = true         # this is what `!` runs
 
@@ -251,19 +305,70 @@ default = true         # this is what `!` runs
 name = "Copy as plain text"
 command = "pbcopy"
 format = "txt"
+
+[[actions]]
+name = "Mail it to someone"
+command = 'mail -s "$BJORN_NOTE_TITLE" "$BJORN_ACTION_INPUT" < "$BJORN_NOTE_FILE"'
+prompt = "Send to which address"   # asks first, answer in $BJORN_ACTION_INPUT
+
+[[actions]]
+name = "Open a session"
+command = 'my-session "$BJORN_ACTION_INPUT"'
+prompt = "What should it do?"
+interactive = true                 # takes the window, like the editor does
+
+[[actions]]
+name = "Summarize"
+command = 'llm "Summarize this note in five bullet points."'
+output = "append"                  # toast (default), append, new-note, replace
+section = "## Summary"             # append under this heading
 ```
 
 `a` opens the action menu — a search box over your actions, filtered as you
 type, with the default marked ★ and the highlighted command shown in full;
-`enter` runs. `!` skips the menu and runs the default straight away. The
-menu's last row, **+ New action**, adds one, `ctrl+e` edits the highlighted one
-and `ctrl+d` deletes it after asking; all three write the config for you,
-comments and all. The note is rendered the way
-export renders it, written to a temp file the command gets as
-`$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in the
-environment; the file goes away when the command ends. The first line the
-command prints comes back as a toast, and a non-zero exit is reported with its
-stderr. Full reference: [docs/actions.md](docs/actions.md).
+`enter` runs. An action with a `prompt` asks for one line of text first and
+passes it as `$BJORN_ACTION_INPUT`, which is one action rather than five
+when all that changes between them is an argument. `!` skips the menu and
+runs the default straight away. The menu's last row, **+ New action**, adds
+one, `ctrl+e` edits the highlighted one and `ctrl+d` deletes it after
+asking; all three write the config for you, comments and all. The note is
+rendered the way export renders it, written to a temp file the command gets
+as `$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in
+the environment; the file goes away when the command ends. The first line
+the command prints comes back as a toast, and a non-zero exit is reported
+with its stderr. With `output`, everything it prints goes back into Bear
+instead: appended to the note (or under one of its headings), as a new note,
+or in place of the note, hash-guarded and after asking. Empty output and a
+failed command never write. An action marked `interactive` instead takes the window and the
+keyboard in a pseudo-terminal until its command exits, for the ones that ask
+their own questions. Full reference: [docs/actions.md](docs/actions.md).
+
+A PDF is one of those commands. The HTML export carries a print stylesheet —
+A4, a light page whatever the theme is, the theme's own colors on the links
+and the list markers — so `weasyprint` or headless Chrome turns an exported
+note into a PDF that reads like Bear's own: [recipe](docs/actions.md#a-pdf).
+The page is the note as written, inline HTML included; a policy in the page
+stops it running in a browser or in Chrome, but WeasyPrint ignores that and
+fetches the files and URLs the note's HTML points at, so keep WeasyPrint to
+notes you wrote yourself.
+
+Publishing to a [Hugo](https://gohugo.io) site is an action too:
+[`contrib/hugo-publish`](contrib/hugo-publish) writes the note as a post
+(a draft unless you pick the entry that publishes live), keeps its tags,
+wiki links and local links off the site, and never replaces a file it did
+not write. Bjorn itself stays free of Hugo code and network calls. Setup and
+what it guards: [Publish to Hugo](docs/actions.md#publish-to-hugo).
+
+A PDF is built in: `x` then `p` writes one, and `format = "pdf"` hands one to
+an action. Bjorn draws no page itself; it prints the HTML rendering with the
+first converter it finds — WeasyPrint on `PATH`, then a Chromium browser
+(`chromium`/`google-chrome` on `PATH`, then Chrome, Chromium, Brave, Edge or
+Vivaldi in `/Applications` or `~/Applications`), headless, with a throwaway
+profile and no network. macOS ships neither. Before printing, the note's body
+is parsed and rebuilt from an allowlist, so a note's inline HTML cannot make
+the converter fetch a remote URL or bake a local file into the PDF. Piping
+`format = "html"` to `weasyprint` or Chrome yourself skips that filter; use
+`pdf`. Details: [A PDF](docs/actions.md#a-pdf).
 
 ## Development
 

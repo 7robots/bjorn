@@ -6,7 +6,8 @@ use regex::Regex;
 
 use crate::bear::Note;
 use crate::ui::highlight::highlight_line;
-use crate::ui::markdown::{RLine, render, wrap};
+use crate::ui::markdown::{Heading, Placed, RLine, render_with_headings, wrap_mapped};
+use crate::wiki::WikiLink;
 
 /// Glyph per column count: a hollow block for each hidden column.
 pub fn column_glyph(count: u8) -> &'static str {
@@ -17,12 +18,35 @@ pub fn column_glyph(count: u8) -> &'static str {
     }
 }
 
+/// One screen row of the wrapped note: what it draws, the block and line it
+/// came from, and where that line's spans landed on it.
+#[derive(Debug, Clone)]
+struct Row {
+    line: Line<'static>,
+    block: usize,
+    source: usize,
+    placed: Vec<Placed>,
+}
+
+/// The headings the outline lists for `query`: their indices into
+/// `headings`, in document order. Case-insensitive substring match; an empty
+/// query lists them all.
+pub fn outline_filter(headings: &[Heading], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    headings
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| query.is_empty() || h.text.to_lowercase().contains(&query))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Reader {
     pub note: Option<Note>,
     pub full_text: Option<String>,
     lines: Vec<RLine>,
-    wrapped: Vec<(Line<'static>, usize)>,
+    wrapped: Vec<Row>,
     wrapped_width: usize,
     pub scroll: usize,
     pub header: String,
@@ -31,6 +55,12 @@ pub struct Reader {
     /// Blocks holding a match, in document order, and the index last jumped to (-1: none yet).
     pub matches: Vec<usize>,
     pub match_index: i64,
+    /// The note's headings, in document order, from the same parse that drew it.
+    pub headings: Vec<Heading>,
+    /// The heading last jumped to and the scroll that jump set. It counts as
+    /// the current section until the reader scrolls (a heading near the end
+    /// cannot reach the top row).
+    heading_index: Option<(usize, usize)>,
     message: Option<String>,
     /// How many times a note was (re)rendered, for tests.
     pub renders: usize,
@@ -52,6 +82,8 @@ impl Reader {
         self.wrapped.clear();
         self.matches.clear();
         self.match_index = -1;
+        self.headings.clear();
+        self.heading_index = None;
         self.header.clear();
         self.meta.clear();
         self.scroll = 0;
@@ -66,7 +98,8 @@ impl Reader {
         self.renders += 1;
         self.note = Some(note.clone());
         self.full_text = Some(content.to_string());
-        self.lines = render(content);
+        (self.lines, self.headings) = render_with_headings(content);
+        self.heading_index = None;
         self.wrapped.clear();
         self.wrapped_width = 0;
         self.message = None;
@@ -82,6 +115,8 @@ impl Reader {
         self.wrapped.clear();
         self.matches.clear();
         self.match_index = -1;
+        self.headings.clear();
+        self.heading_index = None;
         self.scroll = 0;
         self.header = note.title.clone();
         self.meta.clear();
@@ -135,11 +170,97 @@ impl Reader {
         self.match_index = (self.match_index + delta).rem_euclid(n);
         let block = self.matches[self.match_index as usize];
         self.ensure_wrapped(width);
-        if let Some(row) = self.wrapped.iter().position(|(_, b)| *b == block) {
+        if let Some(row) = self.wrapped.iter().position(|r| r.block == block) {
             self.scroll = row;
         }
         self.set_header();
         true
+    }
+
+    /// The first wrapped row of heading `index`, at `width`.
+    pub fn heading_row(&mut self, index: usize, width: usize) -> Option<usize> {
+        let block = self.headings.get(index)?.block;
+        self.ensure_wrapped(width);
+        // Block ids only grow down the note, so the rows are sorted by block.
+        let row = self.wrapped.partition_point(|r| r.block < block);
+        (self.wrapped.get(row).map(|r| r.block) == Some(block)).then_some(row)
+    }
+
+    /// The section the viewport is in: the heading last jumped to while it
+    /// is still on screen, else the last heading at or above the top row.
+    /// None above the first heading.
+    pub fn current_heading(&mut self, width: usize, height: usize) -> Option<usize> {
+        if self.message.is_some() || self.headings.is_empty() {
+            return None;
+        }
+        let top = self.scroll.min(self.max_scroll(width, height));
+        if let Some((i, scroll)) = self.heading_index
+            && scroll == self.scroll
+            && let Some(row) = self.heading_row(i, width)
+            && (top..top + height.max(1)).contains(&row)
+        {
+            return Some(i);
+        }
+        let mut current = None;
+        for i in 0..self.headings.len() {
+            match self.heading_row(i, width) {
+                Some(row) if row <= top => current = Some(i),
+                Some(_) => break,
+                None => {}
+            }
+        }
+        current
+    }
+
+    /// The name of the section the viewport is in, for the reader's footer.
+    /// None above the first heading and in the note's own title: an H1 on
+    /// the first line, which is where Bear takes the title from.
+    pub fn section_name(&mut self, width: usize, height: usize) -> Option<String> {
+        let index = self.current_heading(width, height)?;
+        let heading = &self.headings[index];
+        let is_title = index == 0
+            && heading.level == 1
+            && self
+                .full_text
+                .as_deref()
+                .is_some_and(|text| text.trim_start().starts_with("# "));
+        (!is_title).then(|| heading.text.clone())
+    }
+
+    /// Scroll so heading `index` is the top row, or as near as the end of
+    /// the note allows. False when there is no such heading.
+    pub fn scroll_to_heading(&mut self, index: usize, width: usize, height: usize) -> bool {
+        let Some(row) = self.heading_row(index, width) else {
+            return false;
+        };
+        self.scroll = row.min(self.max_scroll(width, height));
+        self.heading_index = Some((index, self.scroll));
+        true
+    }
+
+    /// `}` (`delta` 1) or `{` (-1): the next heading below the current
+    /// section's, or the start of the current section, then the one before
+    /// it. No wrapping. False when there is nowhere to go.
+    pub fn jump_heading(&mut self, delta: i64, width: usize, height: usize) -> bool {
+        let current = self.current_heading(width, height);
+        let target = if delta > 0 {
+            current.map_or(0, |i| i + 1)
+        } else {
+            let Some(i) = current else { return false };
+            let top = self.scroll.min(self.max_scroll(width, height));
+            let above = self.heading_row(i, width).is_some_and(|row| row < top);
+            if above {
+                i
+            } else if i > 0 {
+                i - 1
+            } else {
+                return false;
+            }
+        };
+        if target >= self.headings.len() {
+            return false;
+        }
+        self.scroll_to_heading(target, width, height)
     }
 
     fn match_label(&self) -> String {
@@ -202,8 +323,61 @@ impl Reader {
         self.wrapped = self
             .lines
             .iter()
-            .flat_map(|l| wrap(l, width).into_iter().map(move |row| (row, l.block)))
+            .enumerate()
+            .flat_map(|(source, l)| {
+                wrap_mapped(l, width)
+                    .into_iter()
+                    .map(move |(line, placed)| Row {
+                        line,
+                        block: l.block,
+                        source,
+                        placed,
+                    })
+            })
             .collect();
+    }
+
+    /// The wiki link drawn at `col`, `row` of the viewport, if any.
+    pub fn link_at(&mut self, col: usize, row: usize, width: usize) -> Option<WikiLink> {
+        if self.message.is_some() {
+            return None;
+        }
+        self.ensure_wrapped(width);
+        let drawn = self.wrapped.get(self.scroll + row)?;
+        let span = drawn
+            .placed
+            .iter()
+            .find(|p| p.start <= col && col < p.end)?
+            .span;
+        self.lines[drawn.source]
+            .links
+            .iter()
+            .find(|(index, _)| *index == span)
+            .map(|(_, link)| link.clone())
+    }
+
+    /// Scroll to the first heading called `section`, ignoring case, as
+    /// `scroll_to_heading` does. It looks the name up in `headings`, so a
+    /// heading inside a quote matches on its text, without the quote bars.
+    /// False when the note has no such heading.
+    pub fn scroll_to_section(&mut self, section: &str, width: usize, height: usize) -> bool {
+        let wanted = section.trim().to_lowercase();
+        match self
+            .headings
+            .iter()
+            .position(|h| h.text.to_lowercase() == wanted)
+        {
+            Some(index) => self.scroll_to_heading(index, width, height),
+            None => false,
+        }
+    }
+
+    /// The note's wiki links in order, as drawn (none from inside code).
+    pub fn wiki_links(&self) -> Vec<WikiLink> {
+        self.full_text
+            .as_deref()
+            .map(crate::ui::markdown::wiki_links)
+            .unwrap_or_default()
     }
 
     pub fn row_count(&mut self, width: usize) -> usize {
@@ -240,9 +414,9 @@ impl Reader {
             .iter()
             .skip(self.scroll)
             .take(height)
-            .map(|(line, _)| match &pattern {
-                Some(p) => highlight_line(line.clone(), p),
-                None => line.clone(),
+            .map(|row| match &pattern {
+                Some(p) => highlight_line(row.line.clone(), p),
+                None => row.line.clone(),
             })
             .collect()
     }

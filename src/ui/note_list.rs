@@ -172,8 +172,7 @@ impl NoteList {
         }
         let preview = RLine {
             spans,
-            block: 0,
-            cont: Vec::new(),
+            ..RLine::default()
         };
         let mut rows = wrap(&preview, width);
         let clipped = rows.len() > PREVIEW_ROWS;

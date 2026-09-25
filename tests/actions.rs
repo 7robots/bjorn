@@ -17,8 +17,11 @@ fn recording(dir: &std::path::Path, name: &str) -> Action {
     Action {
         name: name.to_string(),
         command: format!(
-            "{{ printf '%s\\n%s\\n%s\\n' \"$BJORN_ACTION\" \"$BJORN_NOTE_TITLE\" \"$BJORN_NOTE_FILE\"; cat; }} > {}; echo sent",
-            shell_quote(&receipt.to_string_lossy())
+            // Written aside and moved into place, so a test that waits for the
+            // receipt to exist never reads it half-written.
+            "{{ printf '%s\\n%s\\n%s\\n' \"$BJORN_ACTION\" \"$BJORN_NOTE_TITLE\" \"$BJORN_NOTE_FILE\"; cat; }} > {tmp} && mv {tmp} {receipt}; echo sent",
+            tmp = shell_quote(&format!("{}.tmp", receipt.to_string_lossy())),
+            receipt = shell_quote(&receipt.to_string_lossy())
         ),
         ..Action::default()
     }
@@ -33,6 +36,13 @@ fn config_with(fake: &Fake, actions: Vec<Action>) -> Config {
         actions,
         ..fake.config()
     }
+}
+
+/// Wait for an action to finish: its toast, not its output file, which the
+/// shell creates before it has written a byte.
+async fn until_toast(h: &mut bjorn::harness::Harness, message: &str) {
+    h.until(|app| app.toast_messages().iter().any(|m| m == message))
+        .await;
 }
 
 fn receipt(fake: &Fake, name: &str) -> String {
@@ -108,8 +118,7 @@ async fn bang_runs_the_default_action_without_the_palette() {
     h.load().await;
     h.press("!");
     assert!(h.app.overlay.is_none(), "no palette for a default action");
-    h.until(|_| fake.dir.path().join("Publish.receipt").exists())
-        .await;
+    until_toast(&mut h, "sent").await;
     assert!(receipt(&fake, "Publish").starts_with("Publish\nSprint Planning\n"));
 }
 
@@ -138,12 +147,11 @@ async fn a_lone_action_is_the_default() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| fake.dir.path().join("Copy.receipt").exists())
-        .await;
+    until_toast(&mut h, "sent").await;
 }
 
 #[tokio::test]
-async fn a_confirm_action_asks_first_and_can_be_cancelled() {
+async fn a_confirm_action_asks_first_and_can_be_canceled() {
     let fake = Fake::new();
     let config = config_with(
         &fake,
@@ -164,8 +172,7 @@ async fn a_confirm_action_asks_first_and_can_be_cancelled() {
 
     h.press("!");
     h.press("y");
-    h.until(|_| fake.dir.path().join("Publish.receipt").exists())
-        .await;
+    until_toast(&mut h, "sent").await;
 }
 
 #[tokio::test]
@@ -208,8 +215,7 @@ async fn html_actions_get_the_rendered_note() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| fake.dir.path().join("Web.receipt").exists())
-        .await;
+    until_toast(&mut h, "sent").await;
     let receipt = receipt(&fake, "Web");
     assert!(receipt.contains("Sprint Planning.html"), "{receipt}");
     assert!(receipt.contains("<!DOCTYPE html>"), "{receipt}");
@@ -258,8 +264,8 @@ async fn the_payload_is_removed_when_the_command_ends() {
         vec![Action {
             default: true,
             command: format!(
-                "printf '%s' \"$BJORN_NOTE_FILE\" > {}",
-                shell_quote(&fake.dir.path().join("path").to_string_lossy())
+                "printf '%s' \"$BJORN_NOTE_FILE\" > {path}.tmp && mv {path}.tmp {path}",
+                path = shell_quote(&fake.dir.path().join("path").to_string_lossy())
             ),
             name: "Where".into(),
             ..Action::default()
@@ -309,8 +315,8 @@ async fn actions_come_from_the_config_file() {
         &path,
         format!(
             "[[actions]]\nname = \"Save it\"\ndefault = true\nformat = \"txt\"\n\
-             command = \"cp \\\"$BJORN_NOTE_FILE\\\" {}\"\n",
-            shell_quote(&receipt.to_string_lossy())
+             command = \"cp \\\"$BJORN_NOTE_FILE\\\" {r}.tmp && mv {r}.tmp {r}\"\n",
+            r = shell_quote(&receipt.to_string_lossy())
         ),
     )
     .unwrap();
@@ -324,7 +330,7 @@ async fn actions_come_from_the_config_file() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| receipt.exists()).await;
+    until_toast(&mut h, "Done.").await;
     let text = std::fs::read_to_string(&receipt).unwrap();
     assert!(text.starts_with("Sprint Planning\n"), "{text}");
     assert!(!text.contains("- [ ]"), "txt renders the checkbox: {text}");
@@ -345,9 +351,15 @@ async fn the_menu_marks_the_default_and_shows_the_highlighted_command() {
                 name: "Publish".into(),
                 command: "aws s3 cp \"$BJORN_NOTE_FILE\" s3://notes/".into(),
                 format: "html".into(),
+                format_error: None,
                 confirm: true,
+                prompt: None,
+                interactive: false,
+                output: Default::default(),
+                section: None,
+                output_error: None,
                 default: true,
-                timeout: Duration::from_secs(300),
+                timeout: Duration::from_secs(900),
             },
         ],
     );
@@ -374,7 +386,7 @@ async fn the_menu_marks_the_default_and_shows_the_highlighted_command() {
     let screen = h.text();
     assert!(screen.contains("$ aws s3 cp"), "{screen}");
     assert!(
-        screen.contains("renders as HTML · stops after 300 s · asks before running · runs on !"),
+        screen.contains("renders as HTML · stops after 900 s · asks before running · runs on !"),
         "{screen}"
     );
 }
@@ -522,7 +534,7 @@ async fn ctrl_e_edits_the_highlighted_action_in_place() {
     let (config, path) = file_config(
         &fake,
         "# my notes config\n[[actions]]\nname = \"Copy\"  # clipboard\ncommand = \"true\"\n\n\
-         [[actions]]\nname = \"Upload\"\ncommand = \"false\"\ntimeout = 300\n",
+         [[actions]]\nname = \"Upload\"\ncommand = \"false\"\ntimeout = 900\nprompt = \"Range\"\n",
     );
     let mut h = fake.harness_with(config, None);
     h.load().await;
@@ -565,7 +577,7 @@ async fn ctrl_e_edits_the_highlighted_action_in_place() {
     );
     assert!(body.contains("name = \"Upload v2\"\n"), "{body}");
     assert!(
-        body.contains("timeout = 300\n"),
+        body.contains("timeout = 900\n") && body.contains("prompt = \"Range\"\n"),
         "keys the form does not show survive: {body}"
     );
     let actions = Config::load(Some(&path)).unwrap().actions;
@@ -578,6 +590,9 @@ async fn ctrl_e_edits_the_highlighted_action_in_place() {
     h.press("escape");
     h.press("a");
     h.press("down");
+    h.press("enter");
+    // The entry kept its `prompt`, so running it asks before the command goes.
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Text"));
     h.press("enter");
     h.until(|_| receipt.exists()).await;
 }
@@ -629,4 +644,424 @@ async fn ctrl_d_deletes_an_action_after_asking() {
     );
     assert_eq!(h.app.config.actions.len(), 1);
     assert_eq!(h.app.config.actions[0].name, "Copy");
+}
+
+/// An action that records `$BJORN_ACTION_INPUT`, and nothing else, so an empty
+/// answer is visible as an empty file rather than a missing one.
+fn recording_input(dir: &std::path::Path, name: &str) -> Action {
+    let receipt = dir.join(format!("{name}.receipt"));
+    Action {
+        name: name.to_string(),
+        command: format!(
+            "printf '%s' \"$BJORN_ACTION_INPUT\" > {r}.tmp && mv {r}.tmp {r}; echo sent",
+            r = shell_quote(&receipt.to_string_lossy())
+        ),
+        ..Action::default()
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_action_asks_for_a_line_and_passes_it_to_the_command() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            default: true,
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Text"));
+    assert!(h.text().contains("Range"), "{}", h.text());
+    for key in ["l", "a", "s", "t", "-", "w", "e", "e", "k"] {
+        h.press(key);
+    }
+    h.press("enter");
+    until_toast(&mut h, "sent").await;
+    assert_eq!(receipt(&fake, "Sync"), "last-week");
+}
+
+#[tokio::test]
+async fn an_empty_answer_still_runs_and_escape_cancels() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            default: true,
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+
+    h.press("!");
+    h.press("escape");
+    h.settle().await;
+    assert!(h.app.overlay.is_none());
+    assert!(!fake.dir.path().join("Sync.receipt").exists());
+
+    // Enter on an empty field is an answer: the command decides what it means.
+    h.press("!");
+    h.press("enter");
+    until_toast(&mut h, "sent").await;
+    assert_eq!(receipt(&fake, "Sync"), "");
+}
+
+#[tokio::test]
+async fn a_prompt_action_that_confirms_quotes_the_answer() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            confirm: true,
+            default: true,
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    h.press("2");
+    h.press("w");
+    h.press("enter");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
+    assert!(h.text().contains("Run “Sync” on “2w”?"), "{}", h.text());
+    h.press("y");
+    until_toast(&mut h, "sent").await;
+    assert_eq!(receipt(&fake, "Sync"), "2w");
+}
+
+#[tokio::test]
+async fn an_action_without_a_prompt_still_gets_the_variable_set_and_empty() {
+    // Documented in docs/actions.md: `$BJORN_ACTION_INPUT` is always defined, so
+    // a command under `set -u` can read it without guarding.
+    let fake = Fake::new();
+    let receipt = fake.dir.path().join("Plain.receipt");
+    let config = config_with(
+        &fake,
+        vec![Action {
+            name: "Plain".into(),
+            command: format!(
+                "set -u; printf '[%s]' \"$BJORN_ACTION_INPUT\" > {r}.tmp && mv {r}.tmp {r}; echo sent",
+                r = shell_quote(&receipt.to_string_lossy())
+            ),
+            default: true,
+            ..Action::default()
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    until_toast(&mut h, "sent").await;
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "[]");
+}
+
+#[tokio::test]
+async fn an_empty_answer_is_not_confirmed_as_the_note_title() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            confirm: true,
+            default: true,
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    h.press("enter");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
+    // The note under the cursor is "Sprint Planning"; naming it here would point
+    // at something this command never touches.
+    let text = h.text();
+    assert!(text.contains("Run “Sync” on no input?"), "{text}");
+    assert!(!text.contains("on “Sprint Planning”?"), "{text}");
+}
+
+#[tokio::test]
+async fn the_menu_says_an_action_asks_and_what_it_asks() {
+    let fake = Fake::new();
+    let config = config_with(
+        &fake,
+        vec![Action {
+            prompt: Some("Range".into()),
+            ..recording_input(fake.dir.path(), "Sync")
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("a");
+    assert!(h.text().contains("asks: Range"), "{}", h.text());
+}
+
+#[tokio::test]
+async fn an_interactive_action_takes_the_window_and_the_keyboard() {
+    let fake = Fake::new();
+    let receipt = fake.dir.path().join("typed");
+    // Draws a banner, waits for a line, writes it out: a stand-in for anything
+    // that talks back.
+    let config = config_with(
+        &fake,
+        vec![Action {
+            name: "Session".into(),
+            command: format!(
+                "printf 'SESSION UP %s' \"$BJORN_ACTION_INPUT\"; read -r line; printf '%s' \"$line\" > {receipt}.tmp && mv {receipt}.tmp {receipt}",
+                receipt = shell_quote(&receipt.to_string_lossy())
+            ),
+            interactive: true,
+            prompt: Some("Range".into()),
+            default: true,
+            ..Action::default()
+        }],
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+
+    h.press("!");
+    h.type_text("week");
+    h.press("enter");
+    h.until(|app| app.session.is_some()).await;
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("SESSION UP"))
+    })
+    .await;
+    h.draw();
+    let text = h.text();
+    // The prompt's answer reached it, and the window is its own: the note
+    // columns are gone and the footer says where the keys go.
+    assert!(text.contains("SESSION UP week"), "{text}");
+    assert!(text.contains("Session"), "{text}");
+    assert!(text.contains("Keys go to the command"), "{text}");
+    assert!(
+        !text.contains("Garden Plan"),
+        "the note list is not drawn: {text}"
+    );
+
+    // Keys reach the command, not Bjorn: "q" would otherwise ask to quit.
+    h.type_text("qq");
+    h.press("enter");
+    h.until(|_| receipt.exists()).await;
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "qq");
+
+    // When it ends, Bjorn comes back.
+    h.until(|app| app.session.is_none()).await;
+    h.draw();
+    assert!(h.text().contains("Garden Plan"), "{}", h.text());
+}
+
+/// An interactive default action running `command`.
+fn interactive(fake: &Fake, command: &str) -> Config {
+    config_with(
+        fake,
+        vec![Action {
+            name: "Session".into(),
+            command: command.to_string(),
+            interactive: true,
+            default: true,
+            ..Action::default()
+        }],
+    )
+}
+
+#[tokio::test]
+async fn keys_are_dropped_while_an_interactive_action_starts() {
+    let fake = Fake::new();
+    let mut h = fake.harness_with(
+        interactive(&fake, "printf 'SESSION UP'; read -r line"),
+        None,
+    );
+    h.load().await;
+
+    // Before the note is rendered: a second `!` must not start a second
+    // session, and `q` must not open a quit dialog behind the first.
+    h.press("!");
+    assert!(h.app.session.is_none(), "still preparing");
+    h.press("!");
+    h.press("q");
+    assert!(
+        h.app.overlay.is_none(),
+        "{:?}",
+        h.app.overlay.as_ref().map(|o| o.name())
+    );
+
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("SESSION UP"))
+    })
+    .await;
+    h.settle().await;
+    assert!(h.app.overlay.is_none());
+    // Nor is the `q` passed on: the command echoes what it reads, and it
+    // read nothing.
+    let contents = h.app.session.as_ref().unwrap().pty.contents();
+    assert!(!contents.contains('q'), "{contents}");
+    assert!(
+        !h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.contains("did not start")),
+        "{:?}",
+        h.app.toast_messages()
+    );
+
+    // The pty is the size of the pane it is drawn in.
+    let pane = bjorn::ui::session_pane(h.app.rects.window);
+    let session = h.app.session.as_ref().unwrap();
+    assert_eq!(session.pty.size(), (pane.height, pane.width));
+
+    h.press("enter");
+    h.until(|app| app.session.is_none()).await;
+}
+
+#[tokio::test]
+async fn esc_calls_off_an_interactive_action_that_has_not_started() {
+    let fake = Fake::new();
+    let ran = fake.dir.path().join("ran");
+    let command = format!("touch {}", shell_quote(&ran.to_string_lossy()));
+    let mut h = fake.harness_with(interactive(&fake, &command), None);
+    h.load().await;
+
+    h.press("!");
+    h.press("escape");
+    h.until(|app| app.toast_messages().iter().any(|m| m.contains("canceled")))
+        .await;
+    h.settle().await;
+    assert!(h.app.session.is_none());
+    assert!(!ran.exists(), "the command never ran");
+
+    // Nothing is left holding the keyboard.
+    h.press("q");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
+}
+
+/// A start called off with `esc` can still be rendering its note when the
+/// next one begins. Its note arriving then must not start it in place of the
+/// newer one.
+#[tokio::test]
+async fn a_canceled_start_does_not_run_in_place_of_the_next_one() {
+    let fake = Fake::new();
+    let mut h = fake.harness_with(
+        interactive(
+            &fake,
+            "printf 'SESSION ON %s' \"$BJORN_NOTE_TITLE\"; read -r line",
+        ),
+        None,
+    );
+    h.load().await;
+    let hold = |id: &str| std::path::PathBuf::from(format!("{}.hold-{id}", fake.state().display()));
+
+    // `!` on A, whose note is slow to render, then `esc`.
+    let a = h.app.current_note().unwrap().clone();
+    std::fs::write(hold(&a.id), "").unwrap();
+    h.press("!");
+    h.press("escape");
+
+    // Move to B and press `!` again while A's note is still being read.
+    h.press("j");
+    h.until(|app| app.reader.note.as_ref().is_some_and(|n| n.id != a.id))
+        .await;
+    let b = h.app.current_note().unwrap().clone();
+    assert_ne!(a.id, b.id);
+    std::fs::write(hold(&b.id), "").unwrap();
+    h.press("!");
+
+    // A's note arrives first, while B's start is pending: it is dropped.
+    std::fs::remove_file(hold(&a.id)).unwrap();
+    // Its `cat` returns within milliseconds of the release; half a second
+    // is the window in which it would have started.
+    let _ = h
+        .wait_until(|app| app.session.is_some(), Duration::from_millis(500))
+        .await;
+    assert!(
+        h.app.session.is_none(),
+        "{:?}",
+        h.app.session.as_ref().map(|s| s.pty.contents())
+    );
+
+    // B's arrives and B starts, on B's note.
+    std::fs::remove_file(hold(&b.id)).unwrap();
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("SESSION ON"))
+    })
+    .await;
+    let contents = h.app.session.as_ref().unwrap().pty.contents();
+    assert!(
+        contents.contains(&format!("SESSION ON {}", b.title)),
+        "{contents}"
+    );
+
+    h.press("enter");
+    h.until(|app| app.session.is_none()).await;
+}
+
+#[tokio::test]
+async fn an_interactive_action_gets_the_mouse() {
+    let fake = Fake::new();
+    let receipt = fake.dir.path().join("mouse");
+    // Turns on mouse reporting, then records the first report it is sent.
+    let command = format!(
+        "stty -icanon -echo min 1; printf '\\033[?1000hREADY'; dd bs=1 count=6 2>/dev/null | od -An -tx1 > {r}.tmp && mv {r}.tmp {r}",
+        r = shell_quote(&receipt.to_string_lossy())
+    );
+    let mut h = fake.harness_with(interactive(&fake, &command), None);
+    h.load().await;
+    h.press("!");
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("READY"))
+    })
+    .await;
+
+    let pane = h.app.rects.editor;
+    h.click(pane.x + 2, pane.y + 1);
+    h.until(|_| receipt.exists()).await;
+    // ESC [ M, then button 0 (+32), then column 3 and row 2 (1-based, +32).
+    let bytes = std::fs::read_to_string(&receipt).unwrap();
+    assert_eq!(
+        bytes.split_whitespace().collect::<Vec<_>>(),
+        ["1b", "5b", "4d", "20", "23", "22"]
+    );
+    h.until(|app| app.session.is_none()).await;
+}
+
+#[tokio::test]
+async fn shutdown_kills_an_interactive_action() {
+    let fake = Fake::new();
+    let mut h = fake.harness_with(interactive(&fake, "printf 'SESSION UP'; sleep 30"), None);
+    h.load().await;
+    h.press("!");
+    h.until(|app| {
+        app.session
+            .as_ref()
+            .is_some_and(|s| s.pty.contents().contains("SESSION UP"))
+    })
+    .await;
+    h.app.shutdown();
+    h.until(|app| app.session.is_none()).await;
+}
+
+/// Constraint 2: a test that saves must never reach the user's own config.
+#[tokio::test]
+async fn the_test_fixture_config_lives_in_the_fakes_folder() {
+    let fake = Fake::new();
+    let h = fake.harness();
+    assert!(
+        h.app.config_path().starts_with(fake.dir.path()),
+        "{}",
+        h.app.config_path().display()
+    );
+    assert_ne!(h.app.config_path(), bjorn::config::default_config_path());
 }

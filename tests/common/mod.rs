@@ -32,11 +32,15 @@ impl Fake {
         )
     }
 
+    /// A config whose file lives in the fake's own folder. Left as `None`, the
+    /// path resolves to the user's real `~/.config/bjorn/config.toml`, which
+    /// any test that saves an action would then write to.
     pub fn config(&self) -> Config {
         Config {
             poll_seconds: 0,
             export_dir: self.dir.path().join("exports"),
             icon_style: "none".into(),
+            path: Some(self.dir.path().join("config.toml")),
             ..Config::default()
         }
     }

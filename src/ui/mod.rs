@@ -53,7 +53,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Every pane paints its own surface over this; it covers the gaps and
     // gives the reader and the modals their background.
     frame.buffer_mut().set_style(area, theme::screen());
-    let [body, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(area);
+    let [body, footer] = split_footer(area);
     let mut rects = Rects::default();
 
     if app.triage.is_some() {
@@ -64,6 +64,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         if let Some(overlay) = app.overlay.clone() {
             draw_overlay(frame, app, area, &overlay);
         }
+        return;
+    }
+
+    // An interactive action owns the window while it runs: its program draws its
+    // own screen and there is nothing useful to keep beside it, unlike the
+    // editor, which sits next to the note it is editing.
+    if app.session.is_some() {
+        rects.window = area;
+        draw_session(frame, app, body, &mut rects);
+        draw_footer_entries(frame, footer, SESSION_FOOTER);
+        app.rects = rects;
+        draw_toasts(frame, app, body);
         return;
     }
 
@@ -86,6 +98,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_notes(frame, app, areas[next], &mut rects);
         next += 1;
     }
+    rects.window = area;
     draw_reader(frame, app, areas[next], &mut rects);
     if app.editing.is_some() {
         draw_footer_entries(frame, footer, EDITING_FOOTER);
@@ -408,13 +421,73 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
             " {} · quit the editor to save back to Bear",
             editing.job.command[0]
         ),
-        None => format!(" {}", app.reader.meta),
+        None => {
+            let section = app
+                .reader
+                .section_name(inner.width as usize, inner.height as usize);
+            match section {
+                Some(section) => {
+                    let section = fit_cells(&section, (inner.width as usize / 3).max(8));
+                    format!(" § {} · {}", section.trim_end(), app.reader.meta)
+                }
+                None => format!(" {}", app.reader.meta),
+            }
+        }
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(meta_text, theme::muted()))),
         meta,
     );
 }
+
+/// The window less the two-line footer.
+fn split_footer(area: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(area)
+}
+
+/// The border around an interactive action's screen.
+fn session_block(name: &str) -> Block<'static> {
+    Block::bordered()
+        .border_style(theme::border())
+        .title(Line::from(format!(" {name} ")).style(theme::header()))
+}
+
+/// Where an interactive action's screen goes in a window of `area`: inside the
+/// border, above the footer. `App` sizes the pty from this before the first draw.
+pub fn session_pane(area: Rect) -> Rect {
+    session_block("").inner(split_footer(area)[0])
+}
+
+/// The interactive action's screen, filling the body, with a title line naming
+/// it so the window never looks like it has been taken over by nothing.
+fn draw_session(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) {
+    let Some(session) = app.session.as_mut() else {
+        return;
+    };
+    let block = session_block(&session.name);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    rects.editor = inner;
+    session.pty.resize(inner.height, inner.width);
+    let parser = session.pty.parser();
+    let screen = parser.screen();
+    frame.render_widget(
+        PseudoTerminal::new(screen).cursor(Cursor::default().visibility(false)),
+        inner,
+    );
+    if !screen.hide_cursor() {
+        let (row, col) = screen.cursor_position();
+        if row < inner.height && col < inner.width {
+            frame.set_cursor_position((inner.x + col, inner.y + row));
+        }
+    }
+}
+
+/// While an interactive action runs every key goes to it.
+pub const SESSION_FOOTER: &[(&str, &str)] = &[
+    ("action", "Keys go to the command"),
+    ("quit it", "Back to Bjorn"),
+];
 
 /// While an editor is open every key goes to it; the footer says so.
 pub const EDITING_FOOTER: &[(&str, &str)] = &[
@@ -670,7 +743,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             frame.render_widget(Paragraph::new(lines), inner);
         }
         Overlay::Format { index, .. } => {
-            let inner = dialog(frame, area, 70, 7, None);
+            let inner = dialog(frame, area, 80, 7, None);
             let mut choices: Vec<Span<'static>> = vec![Span::raw("  ")];
             for (i, fmt) in FORMATS.iter().enumerate() {
                 if i > 0 {
@@ -814,7 +887,11 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     ),
                     Span::styled(format!("  {label:<10}"), theme::muted()),
                     Span::styled(
-                        if action.confirm { "  asks first" } else { "" },
+                        if action.asks_first() {
+                            "  asks first"
+                        } else {
+                            ""
+                        },
                         Style::default().fg(theme::warning_color()),
                     ),
                 ]));
@@ -851,7 +928,17 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                         ),
                         format!("stops after {} s", action.timeout.as_secs()),
                     ];
-                    if action.confirm {
+                    if let Some(title) = &action.prompt {
+                        facts.push(format!("asks: {title}"));
+                    }
+                    match (action.output, &action.section) {
+                        (crate::actions::ActionOutput::Toast, _) => {}
+                        (crate::actions::ActionOutput::Append, Some(section)) => {
+                            facts.push(format!("appends under {section}"))
+                        }
+                        (other, _) => facts.push(output_hint(other).into()),
+                    }
+                    if action.asks_first() {
                         facts.push("asks before running".into());
                     }
                     if is_default(action) {
@@ -887,12 +974,112 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             frame.render_widget(Paragraph::new(lines), inner);
             field_cursor(frame, field, inner.x + 2, inner.y, width as u16);
         }
+        Overlay::Links {
+            field,
+            index,
+            note,
+            outgoing,
+            more,
+            backlinks,
+            capped,
+            error,
+        } => draw_links(
+            frame,
+            area,
+            LinksView {
+                field,
+                index: *index,
+                note,
+                outgoing,
+                more: *more,
+                backlinks: backlinks.as_deref(),
+                capped: *capped,
+                error,
+            },
+        ),
+        Overlay::Outline { field, index } => {
+            let headings = &app.reader.headings;
+            let shown = crate::ui::note_view::outline_filter(headings, &field.value);
+            let wide = area.width.saturating_sub(8).clamp(40, 80);
+            let width = wide.min(area.width).saturating_sub(6) as usize;
+            let no_match = shown.is_empty();
+            let rows = shown
+                .len()
+                .clamp(1, (area.height as usize).saturating_sub(6).max(1));
+            // Border, filter, gap, rows, gap, hint, border.
+            let height = (rows + 6) as u16;
+            let index = &(*index).min(shown.len().saturating_sub(1));
+            let title = match &app.reader.note {
+                Some(note) => format!("Outline · “{}”", fit_cells(&note.title, 40).trim_end()),
+                None => "Outline".to_string(),
+            };
+            let inner = dialog(frame, area, wide, height, Some(&title));
+
+            let mut lines = Vec::new();
+            if field.value.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        fit_cells("type to filter headings…", width),
+                        theme::cursor_focused().add_modifier(Modifier::DIM),
+                    ),
+                ]));
+            } else {
+                lines.push(field_line(field, true, width));
+            }
+            lines.push(Line::from(""));
+            if no_match {
+                lines.push(Line::from(Span::styled(
+                    "  no heading matches",
+                    theme::muted(),
+                )));
+            }
+            // The list scrolls under the highlight once it is past the window.
+            let top = index.saturating_sub(rows - 1);
+            for (i, &h) in shown.iter().enumerate().skip(top).take(rows) {
+                let heading = &headings[h];
+                let selected = i == *index;
+                let style = if selected {
+                    theme::match_style()
+                } else {
+                    Style::default()
+                };
+                let indent = "  ".repeat(heading.level.saturating_sub(1) as usize);
+                let text_style = if heading.level <= 2 {
+                    style.add_modifier(Modifier::BOLD)
+                } else {
+                    style
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(if selected { "  ▸ " } else { "    " }, style),
+                    Span::styled(indent.clone(), style),
+                    Span::styled(
+                        fit_cells(
+                            &heading.text,
+                            width.saturating_sub(4 + UnicodeWidthStr::width(indent.as_str())),
+                        )
+                        .trim_end()
+                        .to_string(),
+                        text_style,
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  type to filter · ↑/↓ pick · enter scrolls there · esc closes",
+                theme::muted(),
+            )));
+            frame.render_widget(Paragraph::new(lines), inner);
+            field_cursor(frame, field, inner.x + 2, inner.y, width as u16);
+        }
         Overlay::NewAction {
             name,
             command,
             format,
             confirm,
             default,
+            output,
+            section,
             focus,
             editing,
             ..
@@ -902,7 +1089,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 "{verb} action · saved to {}",
                 tilde_path(&app.config_path())
             );
-            let inner = dialog(frame, area, 84, 13, Some(&title));
+            let inner = dialog(frame, area, 84, 15, Some(&title));
             let width = inner.width.saturating_sub(4) as usize;
             let heading = |row: usize| {
                 if *focus == row {
@@ -927,6 +1114,24 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 }
             };
             let (name_shown, command_shown) = (scrolled(name), scrolled(command));
+            let chosen = crate::actions::ActionOutput::ALL[*output];
+            // The section box is narrower: it shares its row with its label.
+            let section_width = width.saturating_sub(13).min(30);
+            let section_shown = {
+                let start = section
+                    .cursor
+                    .saturating_sub(section_width.saturating_sub(1));
+                Field {
+                    value: section
+                        .value
+                        .chars()
+                        .skip(start)
+                        .take(section_width)
+                        .collect(),
+                    cursor: section.cursor - start,
+                }
+            };
+            let appending = chosen == crate::actions::ActionOutput::Append;
             let check = |on: bool| if on { "[x]" } else { "[ ]" };
             let mut lines = vec![
                 Line::from(Span::styled("  Name", heading(0))),
@@ -942,14 +1147,40 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  Format     ", heading(2)),
-                    Span::styled(format!("‹ {} ›", FORMATS[*format].label), control(2)),
+                    Span::styled(
+                        format!(
+                            "‹ {} ›",
+                            match format {
+                                Some(index) => FORMATS[*index].label.to_string(),
+                                // The unknown value as written, so the form
+                                // shows what saving would refuse.
+                                None => editing
+                                    .as_ref()
+                                    .and_then(|a| a.format_error.clone())
+                                    .unwrap_or_default(),
+                            }
+                        ),
+                        control(2),
+                    ),
                     Span::styled("   ←/→ changes it", theme::muted()),
                 ]),
-                Line::from(vec![
-                    Span::styled("  Ask first  ", heading(3)),
-                    Span::styled(check(*confirm), control(3)),
-                    Span::styled("   space ticks · asks before it runs", theme::muted()),
-                ]),
+                if chosen == crate::actions::ActionOutput::Replace {
+                    // Replace always asks, whatever the box says.
+                    Line::from(vec![
+                        Span::styled("  Ask first  ", heading(3)),
+                        Span::styled("[x]", control(3)),
+                        Span::styled(
+                            "   always, for an action that replaces the note",
+                            theme::muted(),
+                        ),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled("  Ask first  ", heading(3)),
+                        Span::styled(check(*confirm), control(3)),
+                        Span::styled("   space ticks · asks before it runs", theme::muted()),
+                    ])
+                },
                 Line::from(vec![
                     Span::styled("  Default    ", heading(4)),
                     Span::styled(check(*default), control(4)),
@@ -958,6 +1189,29 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                         theme::muted(),
                     ),
                 ]),
+                Line::from(vec![
+                    Span::styled("  Output     ", heading(5)),
+                    Span::styled(format!("‹ {} ›", output_label(chosen)), control(5)),
+                    Span::styled(format!("   {}", output_hint(chosen)), theme::muted()),
+                ]),
+                {
+                    let mut spans = vec![Span::styled("  Section    ", heading(6))];
+                    spans.extend(
+                        field_line(&section_shown, *focus == 6, section_width)
+                            .spans
+                            .into_iter()
+                            .skip(1),
+                    );
+                    spans.push(Span::styled(
+                        if appending {
+                            "  blank for the end of the note"
+                        } else {
+                            "  only used by append"
+                        },
+                        theme::muted(),
+                    ));
+                    Line::from(spans)
+                },
                 Line::from(""),
             ];
             // Only one action is the default; say which one this replaces.
@@ -967,12 +1221,18 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 .iter()
                 .find(|a| a.default && Some(*a) != editing.as_ref())
                 .filter(|_| *default);
-            lines.push(match replaced {
-                Some(old) => Line::from(Span::styled(
+            // What would stop it from saving comes first; enter says it again.
+            let problem = overlay.form_action().and_then(|a| a.misconfigured());
+            lines.push(match (problem, replaced) {
+                (Some(problem), _) => Line::from(Span::styled(
+                    format!("  ! {problem}"),
+                    Style::default().fg(theme::warning_color()),
+                )),
+                (None, Some(old)) => Line::from(Span::styled(
                     format!("  ★ “{}” stops being the default", old.name),
                     Style::default().fg(theme::warning_color()),
                 )),
-                None => Line::from(""),
+                (None, None) => Line::from(""),
             });
             lines.push(Line::from(Span::styled(
                 "  tab or ↑/↓ moves · enter saves · esc goes back to the menu",
@@ -987,6 +1247,13 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     inner.x + 2,
                     inner.y + 3,
                     width as u16,
+                ),
+                6 => field_cursor(
+                    frame,
+                    &section_shown,
+                    inner.x + 13,
+                    inner.y + 9,
+                    section_width as u16,
                 ),
                 _ => {}
             }
@@ -1045,4 +1312,201 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             frame.render_widget(Paragraph::new(shown), text_area);
         }
     }
+}
+
+/// The form's name for an action's `output`.
+fn output_label(output: crate::actions::ActionOutput) -> &'static str {
+    match output {
+        crate::actions::ActionOutput::Toast => "Toast",
+        crate::actions::ActionOutput::Append => "Append",
+        crate::actions::ActionOutput::NewNote => "New note",
+        crate::actions::ActionOutput::Replace => "Replace",
+    }
+}
+
+/// What an `output` does with what the command prints.
+fn output_hint(output: crate::actions::ActionOutput) -> &'static str {
+    match output {
+        crate::actions::ActionOutput::Toast => "shows the first line it prints",
+        crate::actions::ActionOutput::Append => "appends what it prints to the note",
+        crate::actions::ActionOutput::NewNote => "makes a new note of what it prints",
+        crate::actions::ActionOutput::Replace => "replaces the note with what it prints",
+    }
+}
+
+/// What the Links list draws, borrowed from its overlay.
+struct LinksView<'a> {
+    field: &'a Field,
+    index: usize,
+    note: &'a crate::bear::Note,
+    outgoing: &'a [crate::ui::modals::LinkRow],
+    more: usize,
+    backlinks: Option<&'a [crate::ui::modals::LinkRow]>,
+    capped: bool,
+    error: &'a str,
+}
+
+/// One row of the Links list, highlighted when `selected`. With a detail to
+/// show, the label gets at most half the row, so an alias never hides the
+/// `→ target` after it.
+fn link_row_line(row: &crate::ui::modals::LinkRow, selected: bool, width: usize) -> Line<'static> {
+    let style = if selected {
+        theme::match_style()
+    } else if row.missing {
+        theme::muted()
+    } else {
+        theme::link()
+    };
+    let room = width.saturating_sub(4);
+    let cap = if row.detail.is_empty() {
+        room
+    } else {
+        room / 2
+    };
+    let label_width = UnicodeWidthStr::width(row.label.as_str()).min(cap);
+    let mut spans = vec![
+        Span::styled(if selected { "  ▸ " } else { "    " }, style),
+        Span::styled(
+            fit_cells(&row.label, label_width).trim_end().to_string(),
+            style,
+        ),
+    ];
+    let rest = room.saturating_sub(label_width + 2);
+    if !row.detail.is_empty() && rest > 1 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            fit_cells(&row.detail, rest).trim_end().to_string(),
+            theme::muted(),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// `L`: a search box, the links out of the note, then the notes linking in.
+/// The list can be long, so only the rows in the window are built.
+fn draw_links(frame: &mut Frame, area: Rect, view: LinksView) {
+    use crate::ui::modals::filter_links;
+    let (out, back) = filter_links(view.outgoing, view.backlinks, &view.field.value);
+    let wide = area.width.saturating_sub(8).clamp(50, 96);
+    let width = wide.min(area.width).saturating_sub(6) as usize;
+
+    let heading = |text: String| {
+        Line::from(Span::styled(
+            format!("  {text}"),
+            theme::accent().add_modifier(Modifier::BOLD),
+        ))
+    };
+    let muted = |text: &str| Line::from(Span::styled(format!("    {text}"), theme::muted()));
+
+    // The lines are: the outgoing heading; its rows (or a note that there are
+    // none) and an "…and N more" row; a blank; the backlink heading; its
+    // status lines; its rows. Row `i` of either group is selectable as `i`
+    // (outgoing) or `out.len() + i` (backlinks).
+    let out_placeholder = usize::from(out.is_empty());
+    let more_row = usize::from(view.more > 0);
+    let out_block = out.len() + out_placeholder + more_row;
+    let mut status: Vec<Line<'static>> = Vec::new();
+    let back_heading = match view.backlinks {
+        None => {
+            status.push(muted("searching Bear…"));
+            heading("Linked from".to_string())
+        }
+        Some(all) => {
+            if !view.error.is_empty() {
+                status.push(Line::from(Span::styled(
+                    format!("    {}", view.error),
+                    Style::default().fg(theme::error_color()),
+                )));
+            } else if back.is_empty() {
+                status.push(muted(if all.is_empty() {
+                    "no other note links here"
+                } else {
+                    "no link matches"
+                }));
+            }
+            if view.capped {
+                status.push(Line::from(Span::styled(
+                    format!(
+                        "    {}+ candidates, list may be incomplete",
+                        crate::wiki::BACKLINK_LIMIT
+                    ),
+                    Style::default().fg(theme::warning_color()),
+                )));
+            }
+            heading(format!("Linked from · {}", back.len()))
+        }
+    };
+    let total = 1 + out_block + 2 + status.len() + back.len();
+    let line_at = |k: usize| -> Line<'static> {
+        if k == 0 {
+            return heading(format!("Links from this note · {}", out.len()));
+        }
+        let k = k - 1;
+        if k < out_block {
+            if k < out.len() {
+                return link_row_line(out[k], k == view.index, width);
+            }
+            if out_placeholder == 1 && k == 0 {
+                return muted(if view.outgoing.is_empty() {
+                    "none: write [[Note title]] to link one"
+                } else {
+                    "no link matches"
+                });
+            }
+            return muted(&format!("…and {} more", view.more));
+        }
+        let k = k - out_block;
+        match k {
+            0 => Line::from(""),
+            1 => back_heading.clone(),
+            _ if k - 2 < status.len() => status[k - 2].clone(),
+            _ => {
+                let i = k - 2 - status.len();
+                let n = out.len() + i;
+                link_row_line(back[i], n == view.index, width)
+            }
+        }
+    };
+    let selected_line = if view.index < out.len() {
+        1 + view.index
+    } else {
+        1 + out_block + 2 + status.len() + (view.index - out.len())
+    };
+
+    // Search box, blank, the body, blank, hint; inside borders.
+    let chrome = 2 + 2 + 2;
+    let room = (area.height as usize).saturating_sub(chrome + 2).max(3);
+    let shown = total.min(room);
+    let top = selected_line
+        .min(total - 1)
+        .saturating_sub(shown.saturating_sub(1))
+        .min(total - shown);
+    let height = (shown + chrome) as u16;
+    let title = format!(
+        "Links · “{}”",
+        fit_cells(&crate::util::strip_control(&view.note.title), 40).trim_end()
+    );
+    let inner = dialog(frame, area, wide, height, Some(&title));
+
+    let mut lines = Vec::with_capacity(shown + 4);
+    if view.field.value.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                fit_cells("type to filter the links…", width),
+                theme::cursor_focused().add_modifier(Modifier::DIM),
+            ),
+        ]));
+    } else {
+        lines.push(field_line(view.field, true, width));
+    }
+    lines.push(Line::from(""));
+    lines.extend((top..top + shown).map(line_at));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  type to filter · ↑/↓ pick · enter follows · esc closes · backspace returns later",
+        theme::muted(),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+    field_cursor(frame, view.field, inner.x + 2, inner.y, width as u16);
 }

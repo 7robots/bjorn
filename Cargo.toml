@@ -7,6 +7,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ammonia = "4.2.0"
 anyhow = "1.0.104"
 base64 = "0.23.1"
 chrono = "0.4.45"
@@ -14,6 +15,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 fancy-regex = "0.19.1"
 futures = "0.3.34"
+libc = "0.2.189"
 percent-encoding = "2.3.2"
 portable-pty = "0.9.0"
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }

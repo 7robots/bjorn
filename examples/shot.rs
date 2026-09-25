@@ -81,6 +81,10 @@ async fn main() {
         h.press("a");
         h.settle().await;
     }
+    if screen == "outline" {
+        h.press("o");
+        h.settle().await;
+    }
     if screen == "new-action" {
         h.press("a");
         h.type_text("Upload");
@@ -90,6 +94,10 @@ async fn main() {
             h.press("tab");
         }
         h.press("space");
+        h.settle().await;
+    }
+    if screen == "links" {
+        h.press("L");
         h.settle().await;
     }
     if screen == "edit-action" {
