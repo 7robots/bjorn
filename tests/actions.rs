@@ -1052,3 +1052,16 @@ async fn shutdown_kills_an_interactive_action() {
     h.app.shutdown();
     h.until(|app| app.session.is_none()).await;
 }
+
+/// Constraint 2: a test that saves must never reach the user's own config.
+#[tokio::test]
+async fn the_test_fixture_config_lives_in_the_fakes_folder() {
+    let fake = Fake::new();
+    let h = fake.harness();
+    assert!(
+        h.app.config_path().starts_with(fake.dir.path()),
+        "{}",
+        h.app.config_path().display()
+    );
+    assert_ne!(h.app.config_path(), bjorn::config::default_config_path());
+}
