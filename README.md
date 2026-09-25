@@ -256,6 +256,17 @@ the environment; the file goes away when the command ends. The first line
 the command prints comes back as a toast, and a non-zero exit is reported
 with its stderr. Full reference: [docs/actions.md](docs/actions.md).
 
+A PDF is built in: `x` then `p` writes one, and `format = "pdf"` hands one to
+an action. Bjorn draws no page itself; it prints the HTML rendering with the
+first converter it finds — WeasyPrint on `PATH`, then a Chromium browser
+(`chromium`/`google-chrome` on `PATH`, then Chrome, Chromium, Brave, Edge or
+Vivaldi in `/Applications` or `~/Applications`), headless, with a throwaway
+profile and no network. macOS ships neither. Before printing, the note's body
+is parsed and rebuilt from an allowlist, so a note's inline HTML cannot make
+the converter fetch a remote URL or bake a local file into the PDF. Piping
+`format = "html"` to `weasyprint` or Chrome yourself skips that filter; use
+`pdf`. Details: [A PDF](docs/actions.md#a-pdf).
+
 ## Development
 
 ```sh

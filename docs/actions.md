@@ -135,6 +135,54 @@ anything else your shell exported when you launched Bjorn is there. It does not
 read your `~/.zshrc`: it is `sh -c`, not a login shell. If an action needs a
 shell function or an alias, put it in a script and call the script.
 
+## A PDF
+
+PDF is a format of its own: `x` then `p` in the export picker writes one to a
+file you choose, and `format = "pdf"` hands one to an action. `bearcli` does
+not export and nothing in Bjorn draws a page, so the HTML rendering, on A4
+(what Bear's own PDF export uses) and always on a white page, is printed by a
+converter already on the machine. Bjorn uses the first of these it finds:
+
+1. **WeasyPrint**, `weasyprint` on `PATH` (`pipx install weasyprint`, or
+   `uv tool install weasyprint`). It runs no scripts and needs no browser.
+2. **A Chromium browser, run headless**: `chromium`, `google-chrome` or
+   `google-chrome-stable` on `PATH`, then Google Chrome, Chromium, Brave,
+   Microsoft Edge or Vivaldi in `/Applications` or `~/Applications`. It gets a
+   throwaway profile, so the print never sees your cookies and does not fail
+   because the browser is already open, and no network: no hostname resolves
+   and anything else meets a dead proxy.
+
+macOS ships neither. Without one, the export says so and writes nothing.
+
+```toml
+[[actions]]
+name = "Save as PDF to Desktop"
+command = 'cp "$BJORN_NOTE_FILE" "$HOME/Desktop/" && echo "saved to Desktop"'
+format = "pdf"
+```
+
+**The built-in path filters the note; piping `format = "html"` to a converter
+yourself does not.** A note is not always one you wrote — an import, a web
+clip, a note someone shared — and its inline HTML reaches the page as written.
+A converter fetches what that page points at: a remote image tells somebody the
+note was printed, and a local one (`<img src="/Users/you/…">`) bakes a file off
+your disk into a PDF that is usually about to be sent on. WeasyPrint has no
+flag to stop it, and a browser's network switches do not cover `file:`. So
+before the converter sees it, Bjorn parses the note's body and rebuilds it from
+an allowlist: no scripts, styles, frames, objects or SVG, no relative or
+`bear:` links, and an image only when it is a PNG, JPEG, GIF, WebP, BMP or TIFF
+already embedded as a `data:` URI. Attachments are embedded that way by then,
+so nothing that was going to print is lost, and the note's own words (a `url(`
+in a sentence, `<img>` in a code block) are text and come through untouched.
+An action with `format = "html"` gets the unfiltered page — right for
+publishing HTML, wrong as a PDF recipe.
+
+An attachment in a format neither converter can be trusted with (SVG, HEIC,
+a PDF) prints as an empty frame.
+
+The converter gets up to 60 seconds before it is killed; an action's own
+`timeout` starts after that, when the PDF is written.
+
 ## What comes back
 
 Exit status 0 is success: a toast titled with the action's name, carrying the

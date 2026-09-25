@@ -484,6 +484,12 @@ const PRINT_PAGE: &str = "<style>@page { size: A4; margin: 18mm 16mm; }\n\
      @media print { body { max-width: none; margin: 0; padding: 0; color: #1a1a1a; background: #fff; } }\n\
      </style>\n</head>";
 
+/// What a machine with no converter is told. It names Chromium rather than
+/// Chrome because any of `CHROME_BUNDLES` prints: someone who has Brave should
+/// not go and install Chrome.
+const NO_CONVERTER: &str = "PDF export needs weasyprint or a Chromium browser (Chrome, Brave, Edge, …); \
+     macOS ships neither.";
+
 /// The HTML rendering, printed by whichever converter the machine has.
 pub fn export_pdf(
     content: &str,
@@ -492,9 +498,7 @@ pub fn export_pdf(
     images: &HashMap<String, Vec<u8>>,
 ) -> Result<PathBuf, ExportError> {
     let Some(converter) = Converter::find() else {
-        return Err(ExportError(
-            "PDF export needs weasyprint or Google Chrome; macOS ships neither.".into(),
-        ));
+        return Err(ExportError(NO_CONVERTER.into()));
     };
     let destination = prepare(destination)?;
     let tmp = tempfile::Builder::new()
@@ -1051,6 +1055,21 @@ mod tests {
     }
 
     #[test]
+    fn the_missing_converter_message_names_any_chromium_browser() {
+        // Checked on its own: a machine with a converter never reaches it.
+        assert!(NO_CONVERTER.contains("weasyprint"), "{NO_CONVERTER}");
+        assert!(
+            NO_CONVERTER.contains("a Chromium browser"),
+            "{NO_CONVERTER}"
+        );
+        assert!(NO_CONVERTER.contains("Brave"), "{NO_CONVERTER}");
+        assert!(
+            !NO_CONVERTER.contains("Google Chrome"),
+            "Chrome is one choice, not the requirement"
+        );
+    }
+
+    #[test]
     fn export_pdf_writes_a_pdf_or_says_what_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("Note.pdf");
@@ -1060,8 +1079,7 @@ mod tests {
             // not installed one, and it has to say so rather than fail blankly.
             None => {
                 let message = result.expect_err("no converter, no PDF").0;
-                assert!(message.contains("weasyprint"), "{message}");
-                assert!(message.contains("Chrome"), "{message}");
+                assert_eq!(message, NO_CONVERTER);
                 assert!(!target.exists(), "it says so before it writes anything");
             }
             Some(converter) => {

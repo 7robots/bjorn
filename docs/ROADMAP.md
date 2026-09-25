@@ -28,9 +28,10 @@ plan lives in `docs/plans/bjorn-rust.md`.
 - PDF export, as the sixth format in the picker. The headless-browser concern
   recorded in bjorn's ROADMAP is why nothing draws a page inside the binary:
   the HTML rendering is handed to a converter the user already has, WeasyPrint
-  or Chrome, the way RTF is handed to `textutil`. macOS ships neither (its own
-  `cupsfilter` refuses HTML), so a machine without one gets a plain error
-  naming both rather than a format that fails blankly. A browser is given a
+  or a Chromium browser (Chrome, Chromium, Brave, Edge, Vivaldi), the way RTF
+  is handed to `textutil`. macOS ships neither (its own `cupsfilter` refuses
+  HTML), so a machine without one gets a plain error naming both rather than a
+  format that fails blankly. A browser is given a
   throwaway profile and no network, and the note's body handed to either
   converter is parsed and rebuilt from an allowlist (`ammonia`): no scripts,
   styles, frames or SVG, and an image only when it is already a `data:` URI.
