@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::actions::Action;
 use crate::bear::Note;
+use crate::wiki::WikiLink;
 
 /// What a confirmed dialog goes on to do.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +18,55 @@ pub enum Pending {
     /// Deleting an action from the config; cancelling goes back to the menu.
     DeleteAction(Action, Note),
     Tick(Vec<crate::ui::triage::TriageRow>),
+    /// A wiki link to a note that does not exist yet: create it.
+    CreateLinked(String),
+}
+
+/// Where a row of the Links list goes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkTarget {
+    /// An outgoing link, resolved by title when followed.
+    Wiki(WikiLink),
+    /// A note that links here.
+    Note { id: String },
+}
+
+/// One row of the Links list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkRow {
+    pub label: String,
+    /// Muted text after the label: the target behind an alias, the heading,
+    /// the location, or that the note does not exist yet.
+    pub detail: String,
+    pub target: LinkTarget,
+    /// An outgoing link no note answers to; following it offers to create one.
+    pub missing: bool,
+}
+
+impl LinkRow {
+    fn matches(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || self.label.to_lowercase().contains(&query)
+            || self.detail.to_lowercase().contains(&query)
+    }
+}
+
+/// The rows of the Links list that match `query`: outgoing, then backlinks.
+/// The highlight indexes the two as one list, outgoing first.
+pub fn filter_links<'a>(
+    outgoing: &'a [LinkRow],
+    backlinks: Option<&'a [LinkRow]>,
+    query: &str,
+) -> (Vec<&'a LinkRow>, Vec<&'a LinkRow>) {
+    (
+        outgoing.iter().filter(|r| r.matches(query)).collect(),
+        backlinks
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.matches(query))
+            .collect(),
+    )
 }
 
 /// What a submitted text prompt goes on to do.
@@ -154,6 +204,22 @@ pub enum Overlay {
         /// The action being edited, as it was read; `None` for a new one.
         editing: Option<Action>,
     },
+    /// `L`: the note's wiki links and the notes linking to it, under a search
+    /// box. `backlinks` is None while the search for them runs.
+    Links {
+        field: Field,
+        index: usize,
+        note: Note,
+        /// At most `app::OUTGOING_LIMIT` of the note's links.
+        outgoing: Vec<LinkRow>,
+        /// Links past that limit, not listed.
+        more: usize,
+        backlinks: Option<Vec<LinkRow>>,
+        /// The backlink search hit its cap, so the list may be incomplete.
+        capped: bool,
+        /// Why the backlinks could not be read, if they could not.
+        error: String,
+    },
     /// Title and tags for a new note; `field` is 0 for the title, 1 for the tags.
     NewNote {
         title: Field,
@@ -216,6 +282,7 @@ impl Overlay {
             Overlay::Outline { .. } => "Outline",
             Overlay::NewAction { .. } => "NewAction",
             Overlay::NewNote { .. } => "NewNote",
+            Overlay::Links { .. } => "Links",
         }
     }
 }
