@@ -193,12 +193,19 @@ Three details in those commands are load-bearing:
   `--host-resolver-rules` stops any hostname resolving; `--proxy-server` points
   what is left at a dead port, because a URL written as a bare IP address never
   goes near the resolver. Between them a note that carries a tracking pixel or
-  a script has nowhere to send anything.
+  a script has nowhere to send anything, on top of the page's own policy,
+  which stops the script running at all.
 
-WeasyPrint runs no scripts, but it fetches what the page points at, and there
-is no flag to stop it: a remote URL is fetched, and so is a local file — a note
-saying `<img src="/Users/you/…">` bakes that file into the PDF you then send
-on. Print a note you did not write yourself with Chrome.
+The HTML is the note as written: any HTML inside the note reaches the page
+unchanged. The page carries a Content-Security-Policy that lets nothing run
+and nothing load except its own styles and its embedded images, and Chrome
+(like any browser you open the export in) honors it. WeasyPrint does not read
+the policy. It runs no scripts, but it fetches whatever the note's HTML points
+at, and there is no flag to stop it: a remote URL is fetched, and so is a local
+file — `<img src="/Users/you/…">` bakes that file into the PDF, and
+`<link rel="attachment" href="…">` attaches it whole — which then goes wherever
+you send the PDF. Use WeasyPrint only for notes you wrote yourself; print
+anything else with Chrome.
 
 ## What comes back
 
