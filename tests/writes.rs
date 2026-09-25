@@ -344,7 +344,10 @@ async fn export_via_picker(h: &mut bjorn::harness::Harness, key: &str) -> std::p
     assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Text"));
     let target = std::path::PathBuf::from(prefill(h));
     h.press("enter");
-    h.until(|_| target.exists()).await;
+    // The toast, not the path: a bundle's folder exists before its files do.
+    // It names the target, so an earlier export's toast does not count.
+    let done = format!("Exported to {}", target.display());
+    h.until(|app| app.toast_messages().contains(&done)).await;
     target
 }
 
@@ -388,16 +391,16 @@ async fn x_exports_to_the_prefilled_path_and_can_be_canceled() {
             .to_string_lossy()
     );
     h.press("enter");
-    h.until(|_| Path::new(&path).exists()).await;
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.starts_with("# Sprint Planning\n#work/sprint\n"));
-    assert!(text.contains("- [ ] write the release notes"));
+    // The toast, not the path: the file exists before it is written.
     h.until(|app| {
         app.toast_messages()
             .iter()
             .any(|m| m.starts_with("Exported to"))
     })
     .await;
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# Sprint Planning\n#work/sprint\n"));
+    assert!(text.contains("- [ ] write the release notes"));
 }
 
 #[tokio::test]
