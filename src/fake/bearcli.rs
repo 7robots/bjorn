@@ -1375,7 +1375,8 @@ fn cmd_app(state: &State, cmd: AppCmd) -> CmdResult {
         .create(true)
         .open(log)
         .expect("writable .opened log");
-    let _ = writeln!(file, "{line}");
+    // One write, so a test reading the log never sees half a line.
+    let _ = file.write_all(format!("{line}\n").as_bytes());
     Ok(())
 }
 
