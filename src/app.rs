@@ -2847,6 +2847,10 @@ impl App {
             );
             return;
         }
+        if note.location == Location::Trash {
+            self.refuse_trashed_section();
+            return;
+        }
         let client = self.client.clone();
         let tx = self.tx.clone();
         let id = note.id.clone();
@@ -2856,8 +2860,29 @@ impl App {
         });
     }
 
+    /// A trashed note is on its way out; a section written into it would be
+    /// history nobody sees, since the day screen skips the Trash.
+    fn refuse_trashed_section(&mut self) {
+        self.notify_titled(
+            "",
+            "Notes in the Trash cannot take a section.",
+            Severity::Warning,
+            Duration::from_secs(5),
+        );
+    }
+
     /// The note came back: splice the section in, or say why nothing was done.
     fn write_section(&mut self, note: Note, before: NoteContent) {
+        // The read took a round trip; a refresh in the meantime may have seen
+        // the note go to the Trash.
+        if self
+            .snapshot
+            .by_id(&note.id)
+            .is_some_and(|n| n.location == Location::Trash)
+        {
+            self.refuse_trashed_section();
+            return;
+        }
         let when = crate::model::now_local();
         let title = strip_control(&note.title);
         match sections::insert_section(&self.config.sections, &before.content, when, &note.title) {

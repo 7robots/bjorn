@@ -598,6 +598,30 @@ async fn s_on_a_daily_note_goes_after_the_whole_title_section() {
 }
 
 #[tokio::test]
+async fn s_refuses_a_trashed_note() {
+    let fake = Fake::new();
+    let mut h = fake.harness();
+    h.load().await;
+    let original = "# Discarded\n#survey\n\nold plans\n";
+    add_note(&fake, &mut h, "NOTE-BINNED", "Discarded", "trash", original).await;
+    h.app.action_view(View::Trash);
+    assert!(h.app.notes.select_id("NOTE-BINNED"));
+    h.press("s");
+    h.until(|app| {
+        app.toast_messages()
+            .iter()
+            .any(|m| m.contains("Notes in the Trash cannot take a section"))
+    })
+    .await;
+    h.settle().await;
+    assert_eq!(
+        body(&fake, "NOTE-BINNED").await,
+        original,
+        "nothing was written into the trashed note"
+    );
+}
+
+#[tokio::test]
 async fn s_works_on_an_empty_note() {
     let fake = Fake::new();
     let config = SectionsConfig::default();
