@@ -370,7 +370,7 @@ fn explain(name: &str, skipped: &[bear_theme::Skipped]) -> Option<String> {
     skipped
         .iter()
         .find(|s| s.name() == wanted)
-        .map(|s| format!("{} did not load: {}", s.path.display(), s.problem))
+        .map(|s| format!("{} did not load: {}", s.shown_path(), s.problem))
 }
 
 /// The theme every drawing function reads.

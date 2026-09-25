@@ -81,11 +81,13 @@ async fn main() -> anyhow::Result<()> {
         for name in bjorn::ui::theme::names() {
             println!("{name}");
         }
-        // On stderr, so the names on stdout stay a clean list.
+        // On stderr, so the names on stdout stay a clean list. The path and
+        // the problem are escaped (`bear_theme::escaped`): both can carry
+        // what a file name or a theme file holds.
         for skipped in bjorn::ui::theme::skipped() {
             eprintln!(
                 "bjorn: skipped {}: {}",
-                skipped.path.display(),
+                skipped.shown_path(),
                 skipped.problem
             );
         }
@@ -98,16 +100,19 @@ async fn main() -> anyhow::Result<()> {
     // unknown name there falls back to the default with a warning in the app.
     if let Some(theme) = cli.theme.as_deref() {
         if bjorn::ui::theme::lookup(theme).is_none() {
+            let shown = bjorn::ui::bear_theme::escaped(theme);
             // A file by that name that did not load: say why, rather than
             // suggest adding the file that is already there.
             if let Some(why) = bjorn::ui::theme::why_not(theme) {
-                anyhow::bail!("theme {theme:?}: {why}");
+                anyhow::bail!("theme \"{shown}\": {why}");
             }
             anyhow::bail!(
-                "unknown theme {:?}; try one of: {} (or add a .theme file to {})",
-                theme,
+                "unknown theme \"{}\"; try one of: {} (or add a .theme file to {})",
+                shown,
                 bjorn::ui::theme::names().collect::<Vec<_>>().join(", "),
-                bjorn::ui::theme::themes_dir().display()
+                bjorn::ui::bear_theme::escaped(
+                    &bjorn::ui::theme::themes_dir().display().to_string()
+                )
             );
         }
         config.theme = theme.trim().to_lowercase();

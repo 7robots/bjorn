@@ -44,9 +44,15 @@ const MAX_DEPTH: usize = 16;
 const MAX_BYTES: u64 = 256 * 1024;
 
 /// Why a theme file did not load, worded to follow its path on one line.
+///
+/// Most of what goes into one comes out of the file (a key, a value, a base
+/// theme's name) and is printed straight to the terminal by `--list-themes`
+/// and `--theme`, so every such piece goes through `escaped`: a value like
+/// `"$\u{1b}]52;c;…"` would otherwise reach the terminal as an escape
+/// sequence, here one that writes to the clipboard.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum Problem {
-    #[error("cannot read it: {0}")]
+    #[error("cannot read it: {}", escaped(.0))]
     Unreadable(String),
     #[error("not a regular file")]
     NotAFile,
@@ -54,28 +60,52 @@ pub enum Problem {
     TooLarge,
     #[error("the file name gives no theme name")]
     NoName,
-    #[error("bad JSON: {0}")]
+    #[error("bad JSON: {}", escaped(.0))]
     BadJson(String),
     #[error("bad JSON: the file is not a JSON object")]
     NotAnObject,
-    #[error("missing color `{0}`")]
+    #[error("missing color `{}`", escaped(.0))]
     MissingColor(String),
-    #[error("`{key}` refers to `${target}`, which is not there")]
+    #[error("`{}` refers to `${}`, which is not there", escaped(.key), escaped(.target))]
     DanglingReference { key: String, target: String },
-    #[error("`{0}` is not a color: {1}")]
+    #[error("`{}` is not a color: {}", escaped(.0), escaped(.1))]
     BadColor(String, String),
-    #[error("reference loop: `{0}` never reaches a color")]
+    #[error("reference loop: `{}` never reaches a color", escaped(.0))]
     ReferenceLoop(String),
-    #[error("base theme {0:?} not found (no such file here, and no built-in theme by that name)")]
+    #[error(
+        "base theme \"{}\" not found (no such file here, and no built-in theme by that name)",
+        escaped(.0)
+    )]
     BaseNotFound(String),
-    #[error("base theme {0:?} did not load: {1}")]
+    #[error("base theme \"{}\" did not load: {}", escaped(.0), .1)]
     BaseBroken(String, Box<Problem>),
-    #[error("base theme {0:?} leads back to this theme")]
+    #[error("base theme \"{}\" leads back to this theme", escaped(.0))]
     BaseLoop(String),
-    #[error("`{0}` is already the name of {1}, which comes first")]
+    #[error("`{}` is already the name of {}, which comes first", .0, escaped(.1))]
     Duplicate(String, String),
     #[error("`{0}` is a built-in theme, and a built-in name always wins")]
     BuiltIn(String),
+}
+
+/// `text` safe to print to a terminal: control characters (C0, DEL, C1) and
+/// the bidirectional overrides and isolates (U+202A-202E, U+2066-2069, and
+/// the marks U+200E, U+200F, U+061C) written out as `\u{1b}`, so the reader
+/// sees what the file holds instead of the terminal acting on it or
+/// reordering the line. Everything else, `\` included, is left as it is.
+pub fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let bidi = matches!(
+            c,
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
+        );
+        if c.is_control() || bidi {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 impl Problem {
@@ -106,6 +136,12 @@ impl Skipped {
                 .map(|s| s.to_string_lossy())
                 .unwrap_or_default(),
         )
+    }
+
+    /// The file's path, safe to print: a file name can hold control
+    /// characters too (see `escaped`).
+    pub fn shown_path(&self) -> String {
+        escaped(&self.path.display().to_string())
     }
 }
 
@@ -227,8 +263,14 @@ fn file_name(path: &Path) -> String {
 
 /// One theme file, opened read-only. A symlink is followed; what it leads to
 /// must be a regular file under `MAX_BYTES`, checked before it is opened (a
-/// FIFO would block the read) and again on the open file, in case it was
-/// swapped in between.
+/// FIFO would block the open) and again on the open file, so that what is
+/// read is what was checked even if the path was swapped in between.
+///
+/// What that second check cannot catch is a FIFO swapped in during the gap:
+/// the open itself then waits for a writer. `O_NONBLOCK` would close it, but
+/// it needs `libc` for the flag, which this crate does not depend on, and
+/// the window is only open to someone who can already write to the user's
+/// own themes directory. The cost is a hang at startup, not a wrong read.
 fn read_json(path: &Path) -> Result<Value, Problem> {
     let unreadable = |e: std::io::Error| Problem::Unreadable(e.to_string());
     let checked = |meta: std::fs::Metadata| {
@@ -893,6 +935,48 @@ mod tests {
         assert_eq!(slug("  Red   Graphite "), "red-graphite");
         assert_eq!(slug("D.Boring"), "d-boring");
         assert_eq!(slug("Shibuya Lo-fi"), "shibuya-lo-fi");
+    }
+
+    /// A theme file's keys and values reach the terminal through a
+    /// `Problem`, so control characters and bidi overrides come out
+    /// escaped, where the reader can see them.
+    #[test]
+    fn problems_escape_what_the_file_holds() {
+        let osc52 = "$\u{1b}]52;c;aGVsbG8=\u{7}";
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "Sneaky.theme",
+            &format!(
+                r##"{{"base": {{"text color": "#111111", "background color": "#FFFFFF",
+                    "accent color": {}}}}}"##,
+                serde_json::to_string(osc52).unwrap()
+            ),
+        );
+        let loaded = load_dir(dir.path(), &[]);
+        let line = loaded.skipped[0].problem.to_string();
+        assert!(
+            !line.contains('\u{1b}') && !line.contains('\u{7}'),
+            "{line}"
+        );
+        assert!(line.contains(r"\u{1b}]52;c;aGVsbG8=\u{7}"), "{line}");
+
+        let problems = [
+            Problem::BadColor("base.accent color".into(), "\"\u{9b}31m\"".into()),
+            Problem::MissingColor("a\u{202e}b".into()),
+            Problem::BaseNotFound("x\u{2066}y\u{7f}".into()),
+            Problem::Duplicate("d".into(), "D\u{1b}[2J.theme".into()),
+        ];
+        for problem in problems {
+            let line = problem.to_string();
+            assert!(
+                !line.chars().any(|c| c.is_control()
+                    || ('\u{202a}'..='\u{202e}').contains(&c)
+                    || ('\u{2066}'..='\u{2069}').contains(&c)),
+                "{line:?}"
+            );
+        }
+        assert_eq!(escaped("a\u{202e}b\\c\té"), r"a\u{202e}b\c\u{9}é");
     }
 
     #[test]
