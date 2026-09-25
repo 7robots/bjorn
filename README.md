@@ -130,7 +130,7 @@ list = "Bear"                 # target list; remctl's default when empty
 due = "today"                 # due date for new reminders; "" for none
 remctl = ""                   # path to remctl; default searches PATH
 
-[[actions]]                   # shell commands for `!` and `a`; see Actions below
+[[actions]]                   # shell commands for `!` and `a`, output to a toast or back into Bear; see Actions below
 ```
 
 `mouse_pixels` and `--no-mouse-pixels` are accepted from older config files
@@ -240,6 +240,18 @@ format = "txt"
 name = "Mail it to someone"
 command = 'mail -s "$BJORN_NOTE_TITLE" "$BJORN_ACTION_INPUT" < "$BJORN_NOTE_FILE"'
 prompt = "Send to which address"   # asks first, answer in $BJORN_ACTION_INPUT
+
+[[actions]]
+name = "Open a session"
+command = 'my-session "$BJORN_ACTION_INPUT"'
+prompt = "What should it do?"
+interactive = true                 # takes the window, like the editor does
+
+[[actions]]
+name = "Summarize"
+command = 'llm "Summarize this note in five bullet points."'
+output = "append"                  # toast (default), append, new-note, replace
+section = "## Summary"             # append under this heading
 ```
 
 `a` opens the action menu — a search box over your actions, filtered as you
@@ -254,7 +266,12 @@ rendered the way export renders it, written to a temp file the command gets
 as `$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in
 the environment; the file goes away when the command ends. The first line
 the command prints comes back as a toast, and a non-zero exit is reported
-with its stderr. Full reference: [docs/actions.md](docs/actions.md).
+with its stderr. With `output`, everything it prints goes back into Bear
+instead: appended to the note (or under one of its headings), as a new note,
+or in place of the note, hash-guarded and after asking. Empty output and a
+failed command never write. An action marked `interactive` instead takes the window and the
+keyboard in a pseudo-terminal until its command exits, for the ones that ask
+their own questions. Full reference: [docs/actions.md](docs/actions.md).
 
 ## Development
 

@@ -274,7 +274,9 @@ async fn enter_goes_to_the_note_and_b_opens_bear_at_the_section() {
     assert_eq!(current(&h), "move the hydrangea");
     h.press("b");
     let log = fake.dir.path().join("bear.json.opened");
-    h.until(|_| log.exists()).await;
+    // The log exists before its line is written; wait for the whole line.
+    h.until(|_| std::fs::read_to_string(&log).is_ok_and(|s| s.ends_with('\n')))
+        .await;
     let last: serde_json::Value = serde_json::from_str(
         std::fs::read_to_string(&log)
             .unwrap()

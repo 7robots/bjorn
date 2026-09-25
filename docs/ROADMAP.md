@@ -26,6 +26,17 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
+- An action's output can go back into Bear (`output` in its config entry):
+  `append` adds it to the note or under a `section` heading, `new-note` makes a
+  note of it, tagged the way `n` tags one, and `replace` writes it over the
+  note after asking, hash-guarded like the editor, keeping the old text in a
+  temp file. Empty output, a failed command, anything over 1 MB or not UTF-8,
+  and a note trashed meanwhile never write; output that is not written is
+  kept in a private temp file. An action whose entry cannot work (an unknown
+  `output`, `replace` on a non-Markdown format) does not run at all.
+- An action can take the window and the keyboard (`interactive = true`), running
+  in a pty like the editor does, for commands that ask their own questions
+  rather than printing one line and leaving.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog

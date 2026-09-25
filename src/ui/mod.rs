@@ -52,7 +52,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Every pane paints its own surface over this; it covers the gaps and
     // gives the reader and the modals their background.
     frame.buffer_mut().set_style(area, theme::screen());
-    let [body, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(area);
+    let [body, footer] = split_footer(area);
     let mut rects = Rects::default();
 
     if app.triage.is_some() {
@@ -63,6 +63,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         if let Some(overlay) = app.overlay.clone() {
             draw_overlay(frame, app, area, &overlay);
         }
+        return;
+    }
+
+    // An interactive action owns the window while it runs: its program draws its
+    // own screen and there is nothing useful to keep beside it, unlike the
+    // editor, which sits next to the note it is editing.
+    if app.session.is_some() {
+        rects.window = area;
+        draw_session(frame, app, body, &mut rects);
+        draw_footer_entries(frame, footer, SESSION_FOOTER);
+        app.rects = rects;
+        draw_toasts(frame, app, body);
         return;
     }
 
@@ -85,6 +97,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_notes(frame, app, areas[next], &mut rects);
         next += 1;
     }
+    rects.window = area;
     draw_reader(frame, app, areas[next], &mut rects);
     if app.editing.is_some() {
         draw_footer_entries(frame, footer, EDITING_FOOTER);
@@ -425,6 +438,55 @@ fn draw_reader(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) 
         meta,
     );
 }
+
+/// The window less the two-line footer.
+fn split_footer(area: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(area)
+}
+
+/// The border around an interactive action's screen.
+fn session_block(name: &str) -> Block<'static> {
+    Block::bordered()
+        .border_style(theme::border())
+        .title(Line::from(format!(" {name} ")).style(theme::header()))
+}
+
+/// Where an interactive action's screen goes in a window of `area`: inside the
+/// border, above the footer. `App` sizes the pty from this before the first draw.
+pub fn session_pane(area: Rect) -> Rect {
+    session_block("").inner(split_footer(area)[0])
+}
+
+/// The interactive action's screen, filling the body, with a title line naming
+/// it so the window never looks like it has been taken over by nothing.
+fn draw_session(frame: &mut Frame, app: &mut App, area: Rect, rects: &mut Rects) {
+    let Some(session) = app.session.as_mut() else {
+        return;
+    };
+    let block = session_block(&session.name);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    rects.editor = inner;
+    session.pty.resize(inner.height, inner.width);
+    let parser = session.pty.parser();
+    let screen = parser.screen();
+    frame.render_widget(
+        PseudoTerminal::new(screen).cursor(Cursor::default().visibility(false)),
+        inner,
+    );
+    if !screen.hide_cursor() {
+        let (row, col) = screen.cursor_position();
+        if row < inner.height && col < inner.width {
+            frame.set_cursor_position((inner.x + col, inner.y + row));
+        }
+    }
+}
+
+/// While an interactive action runs every key goes to it.
+pub const SESSION_FOOTER: &[(&str, &str)] = &[
+    ("action", "Keys go to the command"),
+    ("quit it", "Back to Bjorn"),
+];
 
 /// While an editor is open every key goes to it; the footer says so.
 pub const EDITING_FOOTER: &[(&str, &str)] = &[
@@ -824,7 +886,11 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     ),
                     Span::styled(format!("  {label:<10}"), theme::muted()),
                     Span::styled(
-                        if action.confirm { "  asks first" } else { "" },
+                        if action.asks_first() {
+                            "  asks first"
+                        } else {
+                            ""
+                        },
                         Style::default().fg(theme::warning_color()),
                     ),
                 ]));
@@ -864,7 +930,14 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     if let Some(title) = &action.prompt {
                         facts.push(format!("asks: {title}"));
                     }
-                    if action.confirm {
+                    match (action.output, &action.section) {
+                        (crate::actions::ActionOutput::Toast, _) => {}
+                        (crate::actions::ActionOutput::Append, Some(section)) => {
+                            facts.push(format!("appends under {section}"))
+                        }
+                        (other, _) => facts.push(output_hint(other).into()),
+                    }
+                    if action.asks_first() {
                         facts.push("asks before running".into());
                     }
                     if is_default(action) {
@@ -981,6 +1054,8 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             format,
             confirm,
             default,
+            output,
+            section,
             focus,
             editing,
             ..
@@ -990,7 +1065,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 "{verb} action · saved to {}",
                 tilde_path(&app.config_path())
             );
-            let inner = dialog(frame, area, 84, 13, Some(&title));
+            let inner = dialog(frame, area, 84, 15, Some(&title));
             let width = inner.width.saturating_sub(4) as usize;
             let heading = |row: usize| {
                 if *focus == row {
@@ -1015,6 +1090,24 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 }
             };
             let (name_shown, command_shown) = (scrolled(name), scrolled(command));
+            let chosen = crate::actions::ActionOutput::ALL[*output];
+            // The section box is narrower: it shares its row with its label.
+            let section_width = width.saturating_sub(13).min(30);
+            let section_shown = {
+                let start = section
+                    .cursor
+                    .saturating_sub(section_width.saturating_sub(1));
+                Field {
+                    value: section
+                        .value
+                        .chars()
+                        .skip(start)
+                        .take(section_width)
+                        .collect(),
+                    cursor: section.cursor - start,
+                }
+            };
+            let appending = chosen == crate::actions::ActionOutput::Append;
             let check = |on: bool| if on { "[x]" } else { "[ ]" };
             let mut lines = vec![
                 Line::from(Span::styled("  Name", heading(0))),
@@ -1030,14 +1123,40 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  Format     ", heading(2)),
-                    Span::styled(format!("‹ {} ›", FORMATS[*format].label), control(2)),
+                    Span::styled(
+                        format!(
+                            "‹ {} ›",
+                            match format {
+                                Some(index) => FORMATS[*index].label.to_string(),
+                                // The unknown value as written, so the form
+                                // shows what saving would refuse.
+                                None => editing
+                                    .as_ref()
+                                    .and_then(|a| a.format_error.clone())
+                                    .unwrap_or_default(),
+                            }
+                        ),
+                        control(2),
+                    ),
                     Span::styled("   ←/→ changes it", theme::muted()),
                 ]),
-                Line::from(vec![
-                    Span::styled("  Ask first  ", heading(3)),
-                    Span::styled(check(*confirm), control(3)),
-                    Span::styled("   space ticks · asks before it runs", theme::muted()),
-                ]),
+                if chosen == crate::actions::ActionOutput::Replace {
+                    // Replace always asks, whatever the box says.
+                    Line::from(vec![
+                        Span::styled("  Ask first  ", heading(3)),
+                        Span::styled("[x]", control(3)),
+                        Span::styled(
+                            "   always, for an action that replaces the note",
+                            theme::muted(),
+                        ),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled("  Ask first  ", heading(3)),
+                        Span::styled(check(*confirm), control(3)),
+                        Span::styled("   space ticks · asks before it runs", theme::muted()),
+                    ])
+                },
                 Line::from(vec![
                     Span::styled("  Default    ", heading(4)),
                     Span::styled(check(*default), control(4)),
@@ -1046,6 +1165,29 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                         theme::muted(),
                     ),
                 ]),
+                Line::from(vec![
+                    Span::styled("  Output     ", heading(5)),
+                    Span::styled(format!("‹ {} ›", output_label(chosen)), control(5)),
+                    Span::styled(format!("   {}", output_hint(chosen)), theme::muted()),
+                ]),
+                {
+                    let mut spans = vec![Span::styled("  Section    ", heading(6))];
+                    spans.extend(
+                        field_line(&section_shown, *focus == 6, section_width)
+                            .spans
+                            .into_iter()
+                            .skip(1),
+                    );
+                    spans.push(Span::styled(
+                        if appending {
+                            "  blank for the end of the note"
+                        } else {
+                            "  only used by append"
+                        },
+                        theme::muted(),
+                    ));
+                    Line::from(spans)
+                },
                 Line::from(""),
             ];
             // Only one action is the default; say which one this replaces.
@@ -1055,12 +1197,18 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 .iter()
                 .find(|a| a.default && Some(*a) != editing.as_ref())
                 .filter(|_| *default);
-            lines.push(match replaced {
-                Some(old) => Line::from(Span::styled(
+            // What would stop it from saving comes first; enter says it again.
+            let problem = overlay.form_action().and_then(|a| a.misconfigured());
+            lines.push(match (problem, replaced) {
+                (Some(problem), _) => Line::from(Span::styled(
+                    format!("  ! {problem}"),
+                    Style::default().fg(theme::warning_color()),
+                )),
+                (None, Some(old)) => Line::from(Span::styled(
                     format!("  ★ “{}” stops being the default", old.name),
                     Style::default().fg(theme::warning_color()),
                 )),
-                None => Line::from(""),
+                (None, None) => Line::from(""),
             });
             lines.push(Line::from(Span::styled(
                 "  tab or ↑/↓ moves · enter saves · esc goes back to the menu",
@@ -1075,6 +1223,13 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                     inner.x + 2,
                     inner.y + 3,
                     width as u16,
+                ),
+                6 => field_cursor(
+                    frame,
+                    &section_shown,
+                    inner.x + 13,
+                    inner.y + 9,
+                    section_width as u16,
                 ),
                 _ => {}
             }
@@ -1132,5 +1287,25 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
             };
             frame.render_widget(Paragraph::new(shown), text_area);
         }
+    }
+}
+
+/// The form's name for an action's `output`.
+fn output_label(output: crate::actions::ActionOutput) -> &'static str {
+    match output {
+        crate::actions::ActionOutput::Toast => "Toast",
+        crate::actions::ActionOutput::Append => "Append",
+        crate::actions::ActionOutput::NewNote => "New note",
+        crate::actions::ActionOutput::Replace => "Replace",
+    }
+}
+
+/// What an `output` does with what the command prints.
+fn output_hint(output: crate::actions::ActionOutput) -> &'static str {
+    match output {
+        crate::actions::ActionOutput::Toast => "shows the first line it prints",
+        crate::actions::ActionOutput::Append => "appends what it prints to the note",
+        crate::actions::ActionOutput::NewNote => "makes a new note of what it prints",
+        crate::actions::ActionOutput::Replace => "replaces the note with what it prints",
     }
 }

@@ -1018,14 +1018,35 @@ impl BearClient {
 
     /// Create a note and return its id.
     pub async fn create(&self, title: &str, tags: &[String], content: &str) -> Result<String> {
-        let mut args: Vec<String> = vec![
-            "create".into(),
-            title.into(),
-            "--format".into(),
-            "json".into(),
-            "--fields".into(),
-            "id".into(),
-        ];
+        self.create_row(Some(title), tags, content)
+            .await
+            .map(|(id, _)| id)
+    }
+
+    /// Create a note from `content` alone, letting Bear take the title from
+    /// its first line (after any front matter). Returns the id and the title
+    /// Bear gave it.
+    pub async fn create_from_content(
+        &self,
+        tags: &[String],
+        content: &str,
+    ) -> Result<(String, String)> {
+        self.create_row(None, tags, content).await
+    }
+
+    /// `bearcli create`, with the body on stdin so none of it is read as an
+    /// escape. `title: None` leaves the title to Bear.
+    async fn create_row(
+        &self,
+        title: Option<&str>,
+        tags: &[String],
+        content: &str,
+    ) -> Result<(String, String)> {
+        let mut args: Vec<String> = vec!["create".into()];
+        if let Some(title) = title {
+            args.push(title.into());
+        }
+        args.extend(["--format", "json", "--fields", "id,title"].map(String::from));
         let tag_list = tags
             .iter()
             .map(|t| normalize_tag(t))
@@ -1033,8 +1054,8 @@ impl BearClient {
             .collect::<Vec<_>>()
             .join(",");
         if !tag_list.is_empty() {
-            args.push("--tags".into());
-            args.push(tag_list);
+            // One argument, so a tag that starts with `-` is never an option.
+            args.push(format!("--tags={tag_list}"));
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let payload = {
@@ -1049,7 +1070,50 @@ impl BearClient {
         if !payload.is_object() || id.is_empty() {
             return Err(BearError::new("bearcli create returned no id"));
         }
-        Ok(id)
+        Ok((id, text_of(payload.get("title"))))
+    }
+
+    /// Add `content` to the end of a note, or of the section under the heading
+    /// `section`. The text goes on stdin, so none of it is read as an escape.
+    pub async fn append(&self, note_id: &str, content: &str, section: Option<&str>) -> Result<()> {
+        let mut args: Vec<String> = vec!["append".into(), note_id.into()];
+        if let Some(section) = section.filter(|s| !s.trim().is_empty()) {
+            // One argument, so a heading that starts with `-` is never an option.
+            args.push(format!("--section={}", escape_flag(section)));
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _guard = self.write_lock.lock().await;
+        self.run(&refs, false, Some(content)).await.map(|_| ())
+    }
+
+    /// A note's title and location (`notes`, `archive`, `trash`), read fresh:
+    /// what a write checks just before it goes, and what it reads after.
+    pub async fn title_and_location(&self, note_id: &str) -> Result<(String, String)> {
+        let payload = self
+            .run(
+                &[
+                    "show",
+                    note_id,
+                    "--format",
+                    "json",
+                    "--fields",
+                    "title,location",
+                ],
+                true,
+                None,
+            )
+            .await?;
+        let payload = match payload {
+            Value::Array(rows) => rows.into_iter().next().unwrap_or(Value::Null),
+            other => other,
+        };
+        if !payload.is_object() {
+            return Err(BearError::new("bearcli show returned no note"));
+        }
+        Ok((
+            text_of(payload.get("title")),
+            text_of(payload.get("location")),
+        ))
     }
 
     /// Replace a note's whole content, guarded by the hash from `cat`.
