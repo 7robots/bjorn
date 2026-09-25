@@ -129,6 +129,8 @@ instant could, and the duplicate-title warning would then say so. Bear reads
 the `## ` first line as the title and keeps it as written. If the note sits
 outside the workspace, the workspace is cleared to show it. A trashed or
 archived note with today's title is never reused; Bear makes a fresh one.
+Rename the note's heading in Bear and it is no longer today's note: the next
+`D` or capture makes a second one under the configured title.
 
 Because the title is the only link, `[daily] title` must name exactly one
 day: a year with a month and day (`%Y-%m-%d`), a year and day of the year
@@ -159,6 +161,14 @@ instead; it is matched ignoring case, and added at the end of the note the
 first time. It must be a heading line (`#` to `######`, a space, a name).
 `{{workspace}}` in `capture_format` is the config's `workspace`, or the tag
 given with `--tag` before the subcommand.
+
+A multi-line capture stays one entry: its blank lines are dropped and the
+lines after the first are indented past the bullet, so a pasted `## Foo` or
+`---` is text in that entry, not a heading or a rule in the note. The note
+is the one for the day the capture runs: a capture at 00:05 goes to the new
+day's note. With no words, `capture` reads stdin, and in a git hook that is
+git's own (a pre-push hook gets ref lines), so give the text as an argument
+there, or add `</dev/null`.
 
 `N` makes a note from a template: a Markdown file in the templates
 directory (`[templates] dir`, default `~/.config/bjorn/templates/`). Pick

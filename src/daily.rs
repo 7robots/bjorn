@@ -216,20 +216,117 @@ pub fn valid_section(section: &str) -> bool {
 }
 
 /// Captured text without C0 control characters, tabs and newlines excepted:
-/// an escape sequence has no business in a note.
+/// an escape sequence has no business in a note. A carriage return is a line
+/// break, whether alone or before `\n`, so a CRLF or old-Mac paste keeps its
+/// lines instead of running them together.
 pub fn clean(text: &str) -> String {
-    text.chars()
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
         .filter(|c| *c == '\t' || *c == '\n' || (*c as u32) >= 0x20)
         .collect()
 }
 
 /// What one capture adds: `capture_format` with `{{text}}` filled in.
+///
+/// A multi-line capture (`pbpaste | bjorn capture`) stays one entry. Its
+/// blank lines are dropped and every line after the first is indented four
+/// spaces past the content column of the line `{{text}}` sits on (six for
+/// `* {{time}} {{text}}`). Indenting only to the content column would keep a
+/// line inside the list item but still let it start a block there: a pasted
+/// `## Foo` would be a heading and `---` a rule or a setext underline. Four
+/// more spaces is the indentation no heading, rule, fence, quote or list
+/// marker allows, and an indented code block cannot interrupt a paragraph,
+/// so each such line is only more text of the entry's paragraph. A blank
+/// line would end that paragraph and make what follows a code block, which
+/// is why blank lines go.
 pub fn capture_line(config: &Config, text: &str, now: &DateTime<Local>) -> String {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let text = match lines.as_slice() {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [first, rest @ ..] => {
+            let pad = " ".repeat(content_column(&text_prefix(config, now)) + 4);
+            let mut joined = (*first).to_string();
+            for line in rest {
+                joined.push('\n');
+                joined.push_str(&pad);
+                joined.push_str(line);
+            }
+            joined
+        }
+    };
     templates::render(
         &config.daily.capture_format,
         now,
-        &[("text", text), ("workspace", &config.workspace)],
+        &[("text", &text), ("workspace", &config.workspace)],
     )
+}
+
+/// What `capture_format` puts before `{{text}}` on the text's own line. NUL
+/// stands in for the text: `clean` removes it from anything captured.
+fn text_prefix(config: &Config, now: &DateTime<Local>) -> String {
+    let probe = templates::render(
+        &config.daily.capture_format,
+        now,
+        &[("text", "\0"), ("workspace", &config.workspace)],
+    );
+    let before = probe.split('\0').next().unwrap_or_default();
+    before.rsplit('\n').next().unwrap_or_default().to_string()
+}
+
+/// The column a line's content starts at, as CommonMark counts it: past the
+/// indentation, and past a list marker (`*`, `-`, `+`, `1.`, `1)`) with the
+/// one to four spaces after it. A line with no marker is a paragraph, whose
+/// content starts after its indentation. Tabs stop every four columns.
+fn content_column(line: &str) -> usize {
+    let width = |s: &str, from: usize| {
+        s.chars().fold(from, |col, c| {
+            if c == '\t' {
+                col + 4 - col % 4
+            } else {
+                col + 1
+            }
+        })
+    };
+    let rest = line.trim_start_matches([' ', '\t']);
+    let indent = width(&line[..line.len() - rest.len()], 0);
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let marker = match rest[digits..].chars().next() {
+        Some('*' | '-' | '+') if digits == 0 => 1,
+        Some('.' | ')') if (1..=9).contains(&digits) => digits + 1,
+        _ => return indent,
+    };
+    let after = &rest[marker..];
+    let spaces = after.len() - after.trim_start_matches([' ', '\t']).len();
+    let marker_end = indent + marker;
+    let gap = width(&after[..spaces], marker_end) - marker_end;
+    // Five or more spaces after the marker make the content an indented code
+    // block that starts one column past the marker. A marker with no space
+    // after it (`*{{text}}`) is no list item, but counting it as one only
+    // overshoots, and indenting further than needed is still safe.
+    if (1..=4).contains(&gap) {
+        marker_end + gap
+    } else {
+        marker_end + 1
+    }
+}
+
+/// The heading line in `content` that `section` names, compared ignoring
+/// case, as the note writes it. A line indented four or more columns is not
+/// a heading, so a pasted `## Inbox` inside an earlier capture is never taken
+/// for the section.
+fn find_section(content: &str, section: &str) -> Option<String> {
+    let wanted = section.trim().to_lowercase();
+    content
+        .lines()
+        .filter(|l| {
+            let rest = l.trim_start_matches(' ');
+            l.len() - rest.len() <= 3 && !rest.starts_with('\t')
+        })
+        .map(str::trim)
+        .find(|l| l.to_lowercase() == wanted)
+        .map(str::to_string)
 }
 
 /// Add `text` to today's note, making the note (and the capture section) when
@@ -252,21 +349,14 @@ pub async fn capture(
     }
     let daily = today(config, now)?;
     let id = ensure(client, &daily).await.map_err(|e| e.message)?;
-    let line = capture_line(config, text.trim_end_matches('\n'), now);
+    let line = capture_line(config, &text, now);
     if section.is_empty() {
         return client.append(&id, &line, "").await.map_err(|e| e.message);
     }
     // bearcli refuses a section that is not there, so look first (ignoring
     // case) and start the section at the end of the note when it is missing.
     let note = client.cat(&id).await.map_err(|e| e.message)?;
-    let wanted = section.to_lowercase();
-    let existing = note
-        .content
-        .lines()
-        .map(str::trim)
-        .find(|l| l.to_lowercase() == wanted)
-        .map(str::to_string);
-    match existing {
+    match find_section(&note.content, section) {
         Some(heading) => client.append(&id, &line, &heading).await,
         None => {
             client
@@ -352,6 +442,7 @@ mod tests {
                 .contains("control character")
         );
         assert_eq!(clean("a\x1b[31mb\tc\r\nd\x07"), "a[31mb\tc\nd");
+        assert_eq!(clean("old\rmac\r\r\nend"), "old\nmac\n\nend");
     }
 
     #[test]
@@ -447,6 +538,78 @@ mod tests {
             assert!(err.contains(why), "{bad}: {err}");
             assert!(err.starts_with(&format!("[daily] title {bad:?} ")), "{err}");
         }
+    }
+
+    #[test]
+    fn multi_line_captures_are_indented_past_the_bullet() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        let paste = clean("first\r\n## Foo\r\n---\r\n\r\n  \r\n  kept indent\r\n");
+        assert_eq!(
+            capture_line(&cfg, &paste, &at()),
+            "* 14:05 first\n      ## Foo\n      ---\n        kept indent"
+        );
+        // Blank lines around a one-line capture go; its own spacing stays.
+        assert_eq!(
+            capture_line(&cfg, "\n\n call Ana\n\n", &at()),
+            "* 14:05  call Ana"
+        );
+        for (format, pad) in [
+            ("- [ ] {{text}}", 6),
+            ("1. {{text}}", 7),
+            ("10) {{text}}", 8),
+            ("  - {{time}}: {{text}}", 8),
+            ("\t* {{text}}", 10),
+            ("*     {{text}}", 6),
+            ("{{text}}", 4),
+            ("{{time}}\n* {{text}}", 6),
+        ] {
+            cfg.daily.capture_format = format.into();
+            let line = capture_line(&cfg, "a\n## b", &at());
+            assert!(
+                line.ends_with(&format!("a\n{}## b", " ".repeat(pad))),
+                "{format:?}: {line:?}"
+            );
+        }
+        // Captured placeholders are still left alone.
+        cfg.daily.capture_format = "* {{text}}".into();
+        assert_eq!(
+            capture_line(&cfg, "{{date}}\n{{text}}", &at()),
+            "* {{date}}\n      {{text}}"
+        );
+    }
+
+    #[test]
+    fn indented_multi_line_captures_render_as_text_not_structure() {
+        let dir = tempfile::tempdir().unwrap();
+        let paste = "first\n## Foo\n---\n===\n> quote\n- item\n```\n| a |\n|---|";
+        for format in ["* {{time}} {{text}}", "1. {{text}}", "{{text}}"] {
+            let mut cfg = config(dir.path());
+            cfg.daily.capture_format = format.into();
+            let line = capture_line(&cfg, paste, &at());
+            let note = format!("## Day\n{line}\n\n## Inbox\n");
+            let (_, headings) = crate::ui::markdown::render_with_headings(&note);
+            let names: Vec<&str> = headings.iter().map(|h| h.text.as_str()).collect();
+            assert_eq!(names, ["Day", "Inbox"], "{format:?}");
+            let html =
+                crate::render_html::render_body(&note, &Default::default(), &Default::default());
+            for tag in ["<hr", "<blockquote", "<pre", "<table", "<h1", "<h3"] {
+                assert!(!html.contains(tag), "{format:?} made {tag}: {html}");
+            }
+            assert_eq!(html.matches("<h2>").count(), 2, "{format:?}: {html}");
+            assert_eq!(
+                html.matches("<li>").count(),
+                usize::from(format != "{{text}}"),
+                "{html}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_unindented_heading_is_the_capture_section() {
+        let note = "# Day\n- one\n      ## inbox\n\t## Inbox\n   ## INBOX  \n";
+        assert_eq!(find_section(note, "## Inbox").as_deref(), Some("## INBOX"));
+        assert_eq!(find_section("- x\n    ## Inbox\n", "## Inbox"), None);
     }
 
     #[test]

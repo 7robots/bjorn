@@ -412,6 +412,31 @@ async fn capture_starts_a_missing_section_then_grows_it() {
 }
 
 #[tokio::test]
+async fn a_multi_line_capture_stays_one_entry_in_its_section() {
+    let fake = Fake::new();
+    let mut config = steady(&fake);
+    config.daily.capture_section = "## Inbox".into();
+    config.daily.capture_format = "- {{text}}".into();
+    let client = fake.client();
+    daily::capture(&client, &config, "one\r\n## Foo\r\n\r\n---\r\n", &at())
+        .await
+        .unwrap();
+    daily::capture(&client, &config, "two", &at())
+        .await
+        .unwrap();
+    // The pasted heading and rule are text of the first entry, so they neither
+    // end the section nor come between it and the next capture.
+    let body = body_of(&fake, TITLE).await;
+    assert!(
+        body.ends_with("---\n\n## Inbox\n- one\n      ## Foo\n      ---\n- two\n"),
+        "{body:?}"
+    );
+    let (_, headings) = bjorn::ui::markdown::render_with_headings(&body);
+    let names: Vec<&str> = headings.iter().map(|h| h.text.as_str()).collect();
+    assert_eq!(names, ["Work log", "Inbox"]);
+}
+
+#[tokio::test]
 async fn capture_refuses_blank_text_and_a_section_that_is_not_a_heading() {
     let fake = Fake::new();
     let mut config = steady(&fake);
@@ -590,6 +615,22 @@ async fn flags_after_the_subcommand_are_errors_not_text() {
     );
     assert!(out.status.success(), "{out:?}");
     assert!(dated_bodies(&fake).await.contains(" --config=x -h\n"));
+}
+
+#[tokio::test]
+async fn a_pasted_capture_keeps_its_lines_under_the_bullet() {
+    let fake = Fake::new();
+    let out = bjorn(
+        &fake,
+        &["--demo", "--config", "CONFIG", "capture"],
+        b"first\r\n## Foo\r\n---\r\n\r\nlast\r\n",
+    );
+    assert!(out.status.success(), "{out:?}");
+    let body = dated_bodies(&fake).await;
+    assert!(
+        body.contains(" first\n      ## Foo\n      ---\n      last\n"),
+        "{body:?}"
+    );
 }
 
 #[tokio::test]
