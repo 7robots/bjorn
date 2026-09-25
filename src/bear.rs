@@ -675,6 +675,12 @@ impl BearClient {
         self.previews.lock().unwrap().keys().cloned().collect()
     }
 
+    /// Every call puts its options first, a value that comes from a note or
+    /// the user as one `--flag=value` entry, then `--`, then the positionals.
+    /// bearcli is built on swift-argument-parser, which reads a hyphen-leading
+    /// positional as an unknown option and refuses a hyphen-leading option
+    /// value given as its own entry: a todo line `- [ ] ...` passed as
+    /// `--find`, or an attachment named `-scan.png`, would fail otherwise.
     async fn spawn(&self, args: &[&str], stdin: Option<&str>) -> Result<RawOutput> {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         self.runner.run(&owned, stdin).await
@@ -906,12 +912,12 @@ impl BearClient {
         if query.is_empty() {
             return Ok(Vec::new());
         }
+        let query = format!("--query={query}");
         let rows = self
             .run(
                 &[
                     "search",
-                    "--query",
-                    query,
+                    &query,
                     "--location",
                     location,
                     "--format",
@@ -932,7 +938,7 @@ impl BearClient {
 
     pub async fn cat(&self, note_id: &str) -> Result<NoteContent> {
         let payload = self
-            .run(&["cat", note_id, "--format", "json"], true, None)
+            .run(&["cat", "--format", "json", "--", note_id], true, None)
             .await?;
         if !payload.is_object() {
             return Err(BearError::new("bearcli cat returned no content"));
@@ -953,11 +959,11 @@ impl BearClient {
         } else {
             format!("@todo #{ws}")
         };
+        let query = format!("--query={query}");
         let rows = self
             .run(
                 &[
                     "search",
-                    "--query",
                     &query,
                     "--location",
                     "notes",
@@ -981,11 +987,12 @@ impl BearClient {
                 &[
                     "attachments",
                     "list",
-                    note_id,
                     "--format",
                     "json",
                     "--fields",
                     "filename",
+                    "--",
+                    note_id,
                 ],
                 true,
                 None,
@@ -1004,7 +1011,13 @@ impl BearClient {
     pub async fn attachment(&self, note_id: &str, filename: &str) -> Result<Vec<u8>> {
         let output = self
             .spawn(
-                &["attachments", "save", note_id, "--filename", filename],
+                &[
+                    "attachments",
+                    "save",
+                    &format!("--filename={filename}"),
+                    "--",
+                    note_id,
+                ],
                 None,
             )
             .await?;
@@ -1041,7 +1054,6 @@ impl BearClient {
     pub async fn create(&self, title: &str, tags: &[String], content: &str) -> Result<String> {
         let mut args: Vec<String> = vec![
             "create".into(),
-            title.into(),
             "--format".into(),
             "json".into(),
             "--fields".into(),
@@ -1054,9 +1066,10 @@ impl BearClient {
             .collect::<Vec<_>>()
             .join(",");
         if !tag_list.is_empty() {
-            args.push("--tags".into());
-            args.push(tag_list);
+            args.push(format!("--tags={tag_list}"));
         }
+        args.push("--".into());
+        args.push(title.into());
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let payload = {
             let _guard = self.write_lock.lock().await;
@@ -1077,7 +1090,7 @@ impl BearClient {
     pub async fn overwrite(&self, note_id: &str, content: &str, base: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
         self.run(
-            &["overwrite", note_id, "--base", base],
+            &["overwrite", &format!("--base={base}"), "--", note_id],
             false,
             Some(content),
         )
@@ -1087,33 +1100,35 @@ impl BearClient {
 
     pub async fn trash(&self, note_id: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["trash", note_id], false, None).await.map(|_| ())
+        self.run(&["trash", "--", note_id], false, None)
+            .await
+            .map(|_| ())
     }
 
     pub async fn restore(&self, note_id: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["restore", note_id], false, None)
+        self.run(&["restore", "--", note_id], false, None)
             .await
             .map(|_| ())
     }
 
     pub async fn archive(&self, note_id: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["archive", note_id], false, None)
+        self.run(&["archive", "--", note_id], false, None)
             .await
             .map(|_| ())
     }
 
     pub async fn pin(&self, note_id: &str, target: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["pin", "add", note_id, target], false, None)
+        self.run(&["pin", "add", "--", note_id, target], false, None)
             .await
             .map(|_| ())
     }
 
     pub async fn unpin(&self, note_id: &str, target: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.run(&["pin", "remove", note_id, target], false, None)
+        self.run(&["pin", "remove", "--", note_id, target], false, None)
             .await
             .map(|_| ())
     }
@@ -1126,15 +1141,14 @@ impl BearClient {
         replace: &str,
         section: &str,
     ) -> Result<()> {
-        let mut args: Vec<String> = vec!["edit".into(), note_id.into()];
+        let mut args: Vec<String> = vec!["edit".into()];
         if !section.is_empty() {
-            args.push("--section".into());
-            args.push(escape_flag(section));
+            args.push(format!("--section={}", escape_flag(section)));
         }
-        args.push("--find".into());
-        args.push(escape_flag(find));
-        args.push("--replace".into());
-        args.push(escape_flag(replace));
+        args.push(format!("--find={}", escape_flag(find)));
+        args.push(format!("--replace={}", escape_flag(replace)));
+        args.push("--".into());
+        args.push(note_id.into());
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let _guard = self.write_lock.lock().await;
         self.run(&refs, false, None).await.map(|_| ())
@@ -1179,12 +1193,14 @@ impl BearClient {
     // -- app -----------------------------------------------------------------
 
     pub async fn open_in_app(&self, note_id: &str, header: &str) -> Result<()> {
-        let mut args = vec!["app", "open", note_id];
+        let mut args = vec!["app".to_string(), "open".to_string()];
         if !header.is_empty() {
-            args.push("--header");
-            args.push(header);
+            args.push(format!("--header={header}"));
         }
-        self.run(&args, false, None).await.map(|_| ())
+        args.push("--".into());
+        args.push(note_id.into());
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.run(&refs, false, None).await.map(|_| ())
     }
 }
 
@@ -1256,6 +1272,139 @@ mod tests {
             (toast.title.as_str(), toast.message.as_str()),
             ("title", "msg")
         );
+    }
+
+    /// Records each argv and answers just enough for the caller to go on.
+    struct Capture(Mutex<Vec<Vec<String>>>);
+
+    impl Runner for Capture {
+        fn run<'a>(
+            &'a self,
+            args: &'a [String],
+            _stdin: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<RawOutput>> {
+            Box::pin(async move {
+                self.0.lock().unwrap().push(args.to_vec());
+                let stdout = match args[0].as_str() {
+                    "create" => r#"{"id": "N"}"#,
+                    "cat" => r#"{"content": "- [ ] -a", "hash": "h"}"#,
+                    "search" | "attachments" if args[1] != "save" => "[]",
+                    _ => "",
+                };
+                Ok(RawOutput {
+                    status: 0,
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: String::new(),
+                })
+            })
+        }
+
+        fn describe(&self) -> String {
+            "capture".into()
+        }
+    }
+
+    impl Runner for Arc<Capture> {
+        fn run<'a>(
+            &'a self,
+            args: &'a [String],
+            stdin: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<RawOutput>> {
+            self.as_ref().run(args, stdin)
+        }
+
+        fn describe(&self) -> String {
+            self.as_ref().describe()
+        }
+    }
+
+    #[tokio::test]
+    async fn every_call_puts_options_first_then_dashes_then_positionals() {
+        let capture = Arc::new(Capture(Mutex::new(Vec::new())));
+        let client = BearClient::from_runner(Box::new(capture.clone()));
+        let id = "-id";
+        client.search_ids("-draft", "notes").await.unwrap();
+        client.todo_rows("").await.unwrap();
+        client.cat(id).await.unwrap();
+        client.attachments(id).await.unwrap();
+        client.attachment(id, "-scan.png").await.unwrap();
+        client
+            .create("-title", &["-tag".into()], "body")
+            .await
+            .unwrap();
+        client.overwrite(id, "body", "-base").await.unwrap();
+        client.trash(id).await.unwrap();
+        client.restore(id).await.unwrap();
+        client.archive(id).await.unwrap();
+        client.pin(id, "-work").await.unwrap();
+        client.unpin(id, "-work").await.unwrap();
+        client
+            .tick_todo(id, "- [ ] -a", "- [x] -a", "-sec")
+            .await
+            .unwrap();
+        client.open_in_app(id, "-head").await.unwrap();
+        let calls = capture.0.lock().unwrap().clone();
+        let expected: Vec<Vec<&str>> = vec![
+            vec![
+                "search",
+                "--query=-draft",
+                "--location",
+                "notes",
+                "--format",
+                "json",
+                "--fields",
+                "id",
+            ],
+            vec![
+                "search",
+                "--query=@todo",
+                "--location",
+                "notes",
+                "--format",
+                "json",
+                "--fields",
+                "id,title,tags,locked,content",
+            ],
+            vec!["cat", "--format", "json", "--", "-id"],
+            vec![
+                "attachments",
+                "list",
+                "--format",
+                "json",
+                "--fields",
+                "filename",
+                "--",
+                "-id",
+            ],
+            vec!["attachments", "save", "--filename=-scan.png", "--", "-id"],
+            vec![
+                "create",
+                "--format",
+                "json",
+                "--fields",
+                "id",
+                "--tags=-tag",
+                "--",
+                "-title",
+            ],
+            vec!["overwrite", "--base=-base", "--", "-id"],
+            vec!["trash", "--", "-id"],
+            vec!["restore", "--", "-id"],
+            vec!["archive", "--", "-id"],
+            vec!["pin", "add", "--", "-id", "-work"],
+            vec!["pin", "remove", "--", "-id", "-work"],
+            vec!["cat", "--format", "json", "--", "-id"],
+            vec![
+                "edit",
+                "--section=-sec",
+                "--find=- [ ] -a",
+                "--replace=- [x] -a",
+                "--",
+                "-id",
+            ],
+            vec!["app", "open", "--header=-head", "--", "-id"],
+        ];
+        assert_eq!(calls, expected);
     }
 
     #[test]
@@ -1389,7 +1538,8 @@ mod tests {
                 self.0.calls.lock().unwrap().push(args.to_vec());
                 let rows = self.0.rows.lock().unwrap().clone();
                 let payload = if args[0] == "cat" {
-                    let row = rows.iter().find(|r| r["id"] == args[1]).unwrap();
+                    let id = args.last().unwrap();
+                    let row = rows.iter().find(|r| r["id"] == *id).unwrap();
                     json!({"content": row["content"], "hash": "h"})
                 } else if args.iter().any(|a| a == "--count") {
                     json!({"count": rows.len()})
@@ -1464,7 +1614,7 @@ mod tests {
         let mut kinds = rec.kinds();
         kinds.sort();
         assert_eq!(kinds, vec!["cat", "list"], "one stamp moved: one cat");
-        assert_eq!(rec.last_call()[1], "N3");
+        assert_eq!(rec.last_call().last().unwrap(), "N3");
         assert_eq!(
             third.by_id("N3").unwrap().preview,
             "body 3 at 2026-09-02T00:00:00Z"
@@ -1623,6 +1773,6 @@ mod tests {
         let mut kinds = rec.kinds();
         kinds.sort();
         assert_eq!(kinds, vec!["cat", "list"]);
-        assert_eq!(rec.last_call()[1], "N1");
+        assert_eq!(rec.last_call().last().unwrap(), "N1");
     }
 }

@@ -451,6 +451,13 @@ fn with_ancestors(tags: &mut Vec<String>, tag: &str) {
 }
 
 // -- argv --------------------------------------------------------------------
+//
+// As strict as the real bearcli (swift-argument-parser), checked read-only
+// against it: a hyphen-leading positional is an unknown option unless it comes
+// after `--`, and a hyphen-leading option value must be attached with `=`
+// (`--filename=-x`); as its own argv entry it is a missing value. Only
+// `search --query` takes one either way, as bearcli documents. A lenient fake
+// would let a test pass that fails against Bear.
 
 #[derive(Parser)]
 #[command(
@@ -486,9 +493,8 @@ struct Listing {
 
 #[derive(Args)]
 struct Target {
-    #[arg(allow_hyphen_values = true)]
     note_id: Option<String>,
-    #[arg(short = 't', long, allow_hyphen_values = true)]
+    #[arg(short = 't', long)]
     title: Option<String>,
 }
 
@@ -501,7 +507,6 @@ enum Cmd {
         tag: Option<String>,
     },
     Search {
-        #[arg(allow_hyphen_values = true)]
         query_arg: Option<String>,
         #[arg(short = 'q', long, allow_hyphen_values = true)]
         query: Option<String>,
@@ -511,7 +516,7 @@ enum Cmd {
     Cat {
         #[command(flatten)]
         target: Target,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         section: Option<String>,
     },
     Show {
@@ -523,11 +528,10 @@ enum Cmd {
         cmd: Option<TagsCmd>,
     },
     Create {
-        #[arg(allow_hyphen_values = true)]
         title: Option<String>,
-        #[arg(short = 'c', long, allow_hyphen_values = true)]
+        #[arg(short = 'c', long)]
         content: Option<String>,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         tags: Option<String>,
         #[arg(long)]
         if_not_exists: bool,
@@ -535,11 +539,11 @@ enum Cmd {
     Overwrite {
         #[command(flatten)]
         target: Target,
-        #[arg(short = 'c', long, allow_hyphen_values = true)]
+        #[arg(short = 'c', long)]
         content: Option<String>,
         #[arg(long)]
         base: Option<String>,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         section: Option<String>,
         #[arg(long)]
         no_update_modified: bool,
@@ -549,11 +553,11 @@ enum Cmd {
     Edit {
         #[command(flatten)]
         target: Target,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         section: Option<String>,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         find: String,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         replace: Option<String>,
         #[arg(long)]
         delete: bool,
@@ -629,7 +633,7 @@ enum AttCmd {
     Save {
         #[command(flatten)]
         target: Target,
-        #[arg(short = 'f', long, allow_hyphen_values = true)]
+        #[arg(short = 'f', long)]
         filename: String,
     },
 }
@@ -639,7 +643,7 @@ enum AppCmd {
     Open {
         #[command(flatten)]
         target: Target,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         header: Option<String>,
         #[arg(long)]
         edit: bool,
@@ -1413,5 +1417,42 @@ mod tests {
             .collect();
         // The Python regex stops a multi-word tag at the first space; the fake matches it.
         assert_eq!(found, vec!["work/sprint", "multi", "inline"]);
+    }
+
+    #[test]
+    fn hyphen_leading_values_parse_only_where_bearcli_takes_them() {
+        let parses = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("bearcli").chain(args.iter().copied())).is_ok()
+        };
+        assert!(parses(&["cat", "--format", "json", "--", "-x"]));
+        assert!(
+            !parses(&["cat", "-x"]),
+            "a hyphen-leading positional needs --"
+        );
+        assert!(parses(&[
+            "attachments",
+            "save",
+            "--filename=-a.png",
+            "--",
+            "N"
+        ]));
+        assert!(
+            !parses(&["attachments", "save", "--filename", "-a.png", "--", "N"]),
+            "a hyphen-leading value needs ="
+        );
+        assert!(!parses(&["edit", "--find", "- [ ] a", "--", "N"]));
+        assert!(parses(&[
+            "edit",
+            "--find=- [ ] a",
+            "--replace=- [x] a",
+            "--",
+            "N"
+        ]));
+        assert!(!parses(&["create", "-title"]));
+        assert!(parses(&["create", "--tags=-t", "--", "-title"]));
+        assert!(
+            parses(&["search", "--query", "-draft"]),
+            "bearcli documents this one"
+        );
     }
 }
