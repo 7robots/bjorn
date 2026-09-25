@@ -1,7 +1,8 @@
 //! Work notes: the daily note (`D`), templates (`N`) and `bjorn capture`.
 //!
 //! Tests that go through the clock use a daily title with no date in it, so a
-//! run that crosses midnight still finds the note it made.
+//! run that crosses midnight still finds the note it made. A config file
+//! refuses such a title, so the tests that run the binary use `DATED`.
 
 mod common;
 
@@ -430,6 +431,37 @@ async fn capture_refuses_blank_text_and_a_section_that_is_not_a_heading() {
     assert!(err.message.contains("Section not found"), "{}", err.message);
 }
 
+/// The daily title the binary runs with. A config file may not hold a title
+/// without a date (`check_title_format`), and the binary reads the wall
+/// clock, so these tests find their notes by this pattern rather than by one
+/// day's title: a run that crosses midnight writes to two notes and still
+/// passes.
+const DATED: &str = "Log %Y-%m-%d";
+
+/// Today's title under `DATED`, by the wall clock.
+fn dated_today() -> String {
+    Local::now().format(DATED).to_string()
+}
+
+/// The notes the binary made under `DATED`, in the fake's order.
+async fn dated_notes(fake: &Fake) -> Vec<String> {
+    let snap = fake.client().snapshot().await.unwrap();
+    snap.notes
+        .iter()
+        .filter(|n| chrono::NaiveDate::parse_from_str(&n.title, DATED).is_ok())
+        .map(|n| n.id.clone())
+        .collect()
+}
+
+/// Every body the binary wrote under `DATED`, joined.
+async fn dated_bodies(fake: &Fake) -> String {
+    let mut out = String::new();
+    for id in dated_notes(fake).await {
+        out.push_str(&fake.client().cat(&id).await.unwrap().content);
+    }
+    out
+}
+
 /// Run the real binary against the fake. `BJORN_BEARCLI` points at the fake
 /// too, so even a run that lost `--demo` never reaches Bear, and the config
 /// keeps templates in the temp directory.
@@ -438,7 +470,7 @@ fn bjorn(fake: &Fake, args: &[&str], stdin: &[u8]) -> std::process::Output {
     std::fs::write(
         &config,
         format!(
-            "[daily]\ntitle = \"{TITLE}\"\ntag = \"daily\"\n[templates]\ndir = \"{}\"\n",
+            "[daily]\ntitle = \"{DATED}\"\ntag = \"daily\"\n[templates]\ndir = \"{}\"\n",
             fake.templates().display()
         ),
     )
@@ -468,6 +500,7 @@ fn stderr(out: &std::process::Output) -> String {
 #[tokio::test]
 async fn the_capture_command_reads_stdin_and_stays_quiet() {
     let fake = Fake::new();
+    let started = dated_today();
     let base = ["--demo", "--config", "CONFIG"];
     let run = |extra: &[&str], stdin: &[u8]| {
         let args: Vec<&str> = base.iter().chain(extra).copied().collect();
@@ -478,7 +511,7 @@ async fn the_capture_command_reads_stdin_and_stays_quiet() {
     assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
     let out = run(&["capture", "from", "args"], b"");
     assert!(out.status.success(), "{out:?}");
-    let body = body_of(&fake, TITLE).await;
+    let body = dated_bodies(&fake).await;
     assert!(body.contains("from a pipe\n"), "{body:?}");
     assert!(body.contains(" from args\n"), "{body:?}");
     assert!(body.contains("#daily"), "{body:?}");
@@ -492,13 +525,21 @@ async fn the_capture_command_reads_stdin_and_stays_quiet() {
     let out = run(&["capture"], &big);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("over 1 MiB"), "{}", stderr(&out));
-    assert!(!body_of(&fake, TITLE).await.contains("xxxx"));
+    assert!(!dated_bodies(&fake).await.contains("xxxx"));
 
     let out = run(&["today"], b"");
     assert!(out.status.success(), "{out:?}");
     let line = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
-    assert!(line.ends_with(&format!("\t{TITLE}")), "{line:?}");
-    assert_eq!(count_titled(&fake, TITLE).await, 1);
+    let (id, title) = line.split_once('\t').unwrap();
+    assert!(
+        dated_notes(&fake).await.contains(&id.to_string()),
+        "{line:?}"
+    );
+    // `today` found the note the captures made, unless midnight fell between.
+    if dated_today() == started {
+        assert_eq!(title, started);
+        assert_eq!(dated_notes(&fake).await.len(), 1);
+    }
 }
 
 #[tokio::test]
@@ -531,7 +572,7 @@ async fn flags_after_the_subcommand_are_errors_not_text() {
             stderr(&out)
         );
     }
-    assert_eq!(count_titled(&fake, TITLE).await, 0);
+    assert!(dated_notes(&fake).await.is_empty());
 
     // After `--`, anything is text.
     let out = bjorn(
@@ -548,7 +589,36 @@ async fn flags_after_the_subcommand_are_errors_not_text() {
         b"",
     );
     assert!(out.status.success(), "{out:?}");
-    assert!(body_of(&fake, TITLE).await.contains(" --config=x -h\n"));
+    assert!(dated_bodies(&fake).await.contains(" --config=x -h\n"));
+}
+
+#[tokio::test]
+async fn the_binary_refuses_a_daily_title_that_names_no_day() {
+    let fake = Fake::new();
+    let before = fake.client().snapshot().await.unwrap().notes.len();
+    let config = fake.dir.path().join("weekday.toml");
+    let path = config.to_string_lossy().into_owned();
+    for (title, why) in [
+        ("%A", "no year"),
+        ("%B %-d", "no year"),
+        ("%Y (%A)", "no single day"),
+    ] {
+        std::fs::write(&config, format!("[daily]\ntitle = \"{title}\"\n")).unwrap();
+        for command in [&["capture", "hi"][..], &["today"]] {
+            let args: Vec<&str> = ["--demo", "--config", &path]
+                .into_iter()
+                .chain(command.iter().copied())
+                .collect();
+            let out = bjorn(&fake, &args, b"");
+            assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+            let err = stderr(&out);
+            assert!(
+                err.contains(&path) && err.contains("[daily] title") && err.contains(why),
+                "{args:?}: {err}"
+            );
+        }
+    }
+    assert_eq!(fake.client().snapshot().await.unwrap().notes.len(), before);
 }
 
 #[tokio::test]
@@ -558,7 +628,7 @@ async fn capture_honors_tag_before_the_subcommand_for_workspace() {
     std::fs::write(
         &config,
         format!(
-            "[daily]\ntitle = \"{TITLE}\"\ncapture_format = \"{{{{workspace}}}}: {{{{text}}}}\"\n\
+            "[daily]\ntitle = \"{DATED}\"\ncapture_format = \"{{{{workspace}}}}: {{{{text}}}}\"\n\
              [templates]\ndir = \"{}\"\n",
             fake.templates().display()
         ),
@@ -573,7 +643,7 @@ async fn capture_honors_tag_before_the_subcommand_for_workspace() {
         b"",
     );
     assert!(out.status.success(), "{out:?}");
-    assert!(body_of(&fake, TITLE).await.contains("work: hi\n"));
+    assert!(dated_bodies(&fake).await.contains("work: hi\n"));
 }
 
 #[tokio::test]

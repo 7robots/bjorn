@@ -30,7 +30,8 @@ pub struct Daily {
 /// Work out today's note from the `[daily]` config. Fails on a format chrono
 /// cannot read, a title or tag holding control characters, or a named
 /// template that is missing or cannot be used, with a message fit for a toast
-/// or stderr.
+/// or stderr. Whether the title names one day is checked when the config is
+/// loaded (`check_title_format`), not here.
 pub fn today(config: &Config, now: &DateTime<Local>) -> Result<Daily, String> {
     let daily = &config.daily;
     let title = templates::strftime(now, &daily.title)
@@ -83,6 +84,91 @@ pub fn today(config: &Config, now: &DateTime<Local>) -> Result<Daily, String> {
         tag,
         content,
     })
+}
+
+/// Refuse a `[daily] title` format that does not name exactly one day.
+/// Today's note is found by its title alone, so a title that repeats (`%A`,
+/// `%B %-d`) would quietly reuse last week's or last year's note, and one
+/// that changes during the day (`%H`) would make a new note every hour.
+///
+/// The format is read as chrono's items, not searched as text, so `%%d` is a
+/// literal and `%F`, `%D`, `%x` and `%v` count for the fields they expand to.
+/// A day is named by one of three sets of fields:
+///
+/// - a year, a month and a day of the month (`%Y-%m-%d`, `%B %-d, %Y`);
+/// - a year and a day of the year (`%Y-%j`), or a year, a week (`%U`, `%W`)
+///   and a weekday;
+/// - an ISO week-based year, an ISO week and a weekday (`%G-W%V-%u`).
+///
+/// The years do not mix: `%G` is not the calendar year in the days around New
+/// Year, so `%G-%m-%d` and `%Y-W%V-%u` each give two days the same title. A
+/// two-digit year (`%y`, `%g`) is accepted; it repeats only after a century.
+/// Any time-of-day or time-zone field is refused, `%c` and `%+` included.
+pub fn check_title_format(format: &str) -> Result<(), String> {
+    use chrono::format::{Fixed, Item, Numeric, StrftimeItems};
+
+    let mut year = false;
+    let mut iso_year = false;
+    let mut month = false;
+    let mut day = false;
+    let mut ordinal = false;
+    let mut week = false;
+    let mut iso_week = false;
+    let mut weekday = false;
+    let mut not_a_date = false;
+    for item in StrftimeItems::new(format) {
+        match item {
+            Item::Error => {
+                return Err(format!(
+                    "[daily] title {format:?} is not a date format chrono can read"
+                ));
+            }
+            Item::Literal(_) | Item::OwnedLiteral(_) | Item::Space(_) | Item::OwnedSpace(_) => {}
+            Item::Numeric(numeric, _) => match numeric {
+                Numeric::Year | Numeric::YearMod100 => year = true,
+                Numeric::IsoYear | Numeric::IsoYearMod100 => iso_year = true,
+                // A century alone names no year; with `%y` the `%y` does.
+                Numeric::YearDiv100 | Numeric::IsoYearDiv100 | Numeric::Quarter => {}
+                Numeric::Month => month = true,
+                Numeric::Day => day = true,
+                Numeric::Ordinal => ordinal = true,
+                Numeric::WeekFromSun | Numeric::WeekFromMon => week = true,
+                Numeric::IsoWeek => iso_week = true,
+                Numeric::NumDaysFromSun | Numeric::WeekdayFromMon => weekday = true,
+                _ => not_a_date = true,
+            },
+            Item::Fixed(fixed) => match fixed {
+                Fixed::ShortMonthName | Fixed::LongMonthName => month = true,
+                Fixed::ShortWeekdayName | Fixed::LongWeekdayName => weekday = true,
+                _ => not_a_date = true,
+            },
+        }
+    }
+    let why = if not_a_date {
+        "holds a time of day or a time zone, so it can change during the day \
+         and a capture could make a new note"
+    } else if (year && ((month && day) || ordinal || (week && weekday)))
+        || (iso_year && iso_week && weekday)
+    {
+        return Ok(());
+    } else if !year && !iso_year {
+        "has no year, so it repeats and would bring back an older note"
+    } else if iso_year && !year {
+        "has an ISO week-based year (%G, %g), which names a day only with an ISO \
+         week (%V) and a weekday; around New Year it is not the calendar year"
+    } else if iso_week && !iso_year {
+        "has an ISO week (%V) but the calendar year; around New Year they \
+         disagree, so use %G with %V"
+    } else {
+        "names no single day of the year (that takes a month and a day of the \
+         month, a day of the year, or a week and a weekday)"
+    };
+    Err(format!(
+        "[daily] title {format:?} does not name one day: it {why}. Today's note is \
+         found by its title, so the title must change every day and only then. \
+         Use a year, month and day (%Y-%m-%d or %B %-d, %Y), a year and day of \
+         the year (%Y-%j), or an ISO week date (%G-W%V-%u)"
+    ))
 }
 
 /// The id of today's note, made now if Bear has none by that title. A tag the
@@ -308,6 +394,59 @@ mod tests {
         );
         cfg.daily.template = "sub/day.md".into();
         assert!(today(&cfg, &at()).is_ok());
+    }
+
+    #[test]
+    fn a_daily_title_must_name_exactly_one_day() {
+        for ok in [
+            "%Y-%m-%d",
+            "%F",
+            "%B %-d, %Y (%A)",
+            "%e %b %Y",
+            "%_d.%0m.%y",
+            "%D",
+            "%x",
+            "%v",
+            "%C%y-%m-%d",
+            "%Y-%j",
+            "%y%-j",
+            "%Y week %U, %a",
+            "%Y-W%W-%u",
+            "%G-W%V-%u",
+            "%g/%V/%A",
+            "Log %F %%",
+        ] {
+            assert_eq!(check_title_format(ok), Ok(()), "{ok}");
+        }
+        for (bad, why) in [
+            ("%A", "has no year"),
+            ("%B %-d", "has no year"),
+            ("Work log", "has no year"),
+            ("%%d %%Y", "has no year"),
+            ("%C-%m-%d", "has no year"),
+            ("%Y", "no single day"),
+            ("%Y (%A)", "no single day"),
+            ("%Y-%m", "no single day"),
+            ("%d %Y", "no single day"),
+            ("%Y %U", "no single day"),
+            ("%G-%m-%d", "ISO week-based year"),
+            ("%G-%j", "ISO week-based year"),
+            ("%Y-W%V-%u", "ISO week (%V) but the calendar year"),
+            ("%F %H:%M", "time of day"),
+            ("%F %p", "time of day"),
+            ("%F %Z", "time zone"),
+            ("%F %z", "time zone"),
+            ("%F %s", "time of day"),
+            ("%F %.3f", "time of day"),
+            ("%c", "time of day"),
+            ("%+", "time of day"),
+            ("%Q %F", "not a date format"),
+            ("%F %", "not a date format"),
+        ] {
+            let err = check_title_format(bad).unwrap_err();
+            assert!(err.contains(why), "{bad}: {err}");
+            assert!(err.starts_with(&format!("[daily] title {bad:?} ")), "{err}");
+        }
     }
 
     #[test]

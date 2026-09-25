@@ -37,6 +37,7 @@ remctl = ""                     # path to remctl; default searches PATH
 
 # The daily note: `D` opens today's, `bjorn capture "text"` adds a line to it.
 # `title` and `tag` are strftime formats (%-d is the day without a leading 0).
+# `title` must name one day (a year and a day, no time), or Bjorn will not start.
 [daily]
 title = "%B %-d, %Y (%A)"       # "September 19, 2026 (Saturday)"; the note is found by it
 tag = "log/%Y/%m/%d"            # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace

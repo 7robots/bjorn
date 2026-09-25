@@ -130,6 +130,12 @@ the `## ` first line as the title and keeps it as written. If the note sits
 outside the workspace, the workspace is cleared to show it. A trashed or
 archived note with today's title is never reused; Bear makes a fresh one.
 
+Because the title is the only link, `[daily] title` must name exactly one
+day: a year with a month and day (`%Y-%m-%d`), a year and day of the year
+(`%Y-%j`), or an ISO week date (`%G-W%V-%u`), and no time of day. A title
+that repeats (`%A`, `%B %-d`) would quietly reuse last week's or last year's
+note, so Bjorn refuses it at start with an error naming the key.
+
 Capture from anywhere without opening the app:
 
 ```sh
@@ -204,7 +210,7 @@ remctl = ""                   # path to remctl; default searches PATH
 [[actions]]                   # shell commands for `!` and `a`; see Actions below
 
 [daily]                       # `D` and `bjorn capture`; title and tag are strftime formats
-title = "%B %-d, %Y (%A)"     # the note is found by this title
+title = "%B %-d, %Y (%A)"     # the note is found by this title, so it must name one day
 tag = "log/%Y/%m/%d"          # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace
 template = "daily"            # templates/daily.md, else the built-in layout
 capture_section = ""          # a heading line, e.g. "## Inbox"; "" adds at the end of the note

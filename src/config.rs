@@ -268,6 +268,11 @@ impl Config {
                 capture_section: text(section.get("capture_section"), "").trim().to_string(),
                 capture_format: or_default("capture_format", &defaults.capture_format),
             };
+            // A title that repeats or drifts during the day finds the wrong
+            // note without any error, so it stops the load instead.
+            if let Err(why) = crate::daily::check_title_format(&cfg.daily.title) {
+                anyhow::bail!("{}: {why}", target.display());
+            }
         }
         if let Some(Value::Table(section)) = data.get("templates") {
             let dir = text(section.get("dir"), "").trim().to_string();
@@ -530,6 +535,26 @@ mod tests {
         assert_eq!(cfg.templates_dir, home_dir().join("tpl"));
         let path = write(&dir, "[daily]\ntag = \"\"\n");
         assert_eq!(Config::load(Some(&path)).unwrap().daily.tag, "");
+    }
+
+    #[test]
+    fn a_daily_title_that_names_no_day_stops_the_load() {
+        let dir = tempfile::tempdir().unwrap();
+        for title in ["%A", "%B %-d", "%%d %Y", "Work log", "%F %H:%M"] {
+            let path = write(&dir, &format!("[daily]\ntitle = \"{title}\"\n"));
+            let err = format!("{:#}", Config::load(Some(&path)).unwrap_err());
+            assert!(
+                err.contains(&path.display().to_string())
+                    && err.contains(&format!("[daily] title {title:?} does not name one day")),
+                "{err}"
+            );
+        }
+        // An empty title falls back to the default, which names a day.
+        let path = write(&dir, "[daily]\ntitle = \" \"\n");
+        assert_eq!(
+            Config::load(Some(&path)).unwrap().daily.title,
+            DailyConfig::default().title
+        );
     }
 
     /// `config/config.toml.example` shows the defaults; loading it must give
