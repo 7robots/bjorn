@@ -460,3 +460,26 @@ async fn trashed_notes_never_use_up_the_backlink_cap() {
         "nothing is read from the trash: {ids:?}"
     );
 }
+
+#[tokio::test]
+async fn a_title_that_looks_like_an_option_is_a_title() {
+    let fake = Fake::new();
+    let client = fake.client();
+    let id = client
+        .create("--tags=x", &["real".to_string()], "")
+        .await
+        .unwrap();
+    let snap = client.snapshot().await.unwrap();
+    let note = snap.by_id(&id).unwrap();
+    assert_eq!(note.title, "--tags=x");
+    assert_eq!(note.tags, vec!["real"]);
+    let (again, _) = client.create_if_missing("--tags=x", &[], "").await.unwrap();
+    assert_eq!(again, id);
+    // Without `--` the fake refuses it, as bearcli does.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fake-bearcli"))
+        .args(["create", "-x"])
+        .env("BJORN_FAKE_BEAR_STATE", fake.state())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+}

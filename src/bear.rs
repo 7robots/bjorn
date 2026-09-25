@@ -1098,9 +1098,25 @@ impl BearClient {
     /// the title after it, so a title such as `--content=x` (from a wiki link
     /// in a note) stays a title.
     pub async fn create(&self, title: &str, tags: &[String], content: &str) -> Result<String> {
-        self.create_row(Some(title), tags, content)
+        self.create_row(Some(title), tags, content, false)
             .await
-            .map(|(id, _)| id)
+            .map(|(id, _, _)| id)
+    }
+
+    /// `create --if-not-exists`: the id and location of the note titled
+    /// `title` (Bear matches titles case-insensitively), made from `content`
+    /// only when there is none. The match can be a note in the Trash or the
+    /// Archive, hence the location. Content whose first line Bear reads as
+    /// that title, a `## ` heading included, is kept as it is.
+    pub async fn create_if_missing(
+        &self,
+        title: &str,
+        tags: &[String],
+        content: &str,
+    ) -> Result<(String, Location)> {
+        self.create_row(Some(title), tags, content, true)
+            .await
+            .map(|(id, _, location)| (id, location))
     }
 
     /// Create a note from `content` alone, letting Bear take the title from
@@ -1111,19 +1127,34 @@ impl BearClient {
         tags: &[String],
         content: &str,
     ) -> Result<(String, String)> {
-        self.create_row(None, tags, content).await
+        self.create_row(None, tags, content, false)
+            .await
+            .map(|(id, title, _)| (id, title))
     }
 
     /// `bearcli create`, with the body on stdin so none of it is read as an
-    /// escape. `title: None` leaves the title to Bear.
+    /// escape. `title: None` leaves the title to Bear. Returns the id, title
+    /// and location of the note made, or with `if_not_exists` of the one
+    /// already there.
     async fn create_row(
         &self,
         title: Option<&str>,
         tags: &[String],
         content: &str,
-    ) -> Result<(String, String)> {
+        if_not_exists: bool,
+    ) -> Result<(String, String, Location)> {
         let mut args: Vec<String> = vec!["create".into()];
-        args.extend(["--format", "json", "--fields", "id,title"].map(String::from));
+        if if_not_exists {
+            args.push("--if-not-exists".into());
+        }
+        // Only `--if-not-exists` can answer with a note somewhere other than
+        // Notes, so only it asks where the note is.
+        let fields = if if_not_exists {
+            "id,title,location"
+        } else {
+            "id,title"
+        };
+        args.extend(["--format", "json", "--fields", fields].map(String::from));
         let tag_list = tags
             .iter()
             .map(|t| normalize_tag(t))
@@ -1151,7 +1182,11 @@ impl BearClient {
         if !payload.is_object() || id.is_empty() {
             return Err(BearError::new("bearcli create returned no id"));
         }
-        Ok((id, text_of(payload.get("title"))))
+        Ok((
+            id,
+            text_of(payload.get("title")),
+            Location::parse(&text_of(payload.get("location"))),
+        ))
     }
 
     /// Add `content` to the end of a note, or of the section under the heading
@@ -1461,6 +1496,10 @@ mod tests {
         client.create_from_content(&[], "body").await.unwrap();
         client.title_and_location(id).await.unwrap();
         client.backlink_rows("-title").await.unwrap();
+        client
+            .create_if_missing("-day", &["-log".into()], "body")
+            .await
+            .unwrap();
         let calls = capture.0.lock().unwrap().clone();
         let expected: Vec<Vec<&str>> = vec![
             vec![
@@ -1555,6 +1594,17 @@ mod tests {
                 "json",
                 "--fields",
                 "id,title,location,content",
+            ],
+            vec![
+                "create",
+                "--if-not-exists",
+                "--format",
+                "json",
+                "--fields",
+                "id,title,location",
+                "--tags=-log",
+                "--",
+                "-day",
             ],
         ];
         assert_eq!(calls, expected);

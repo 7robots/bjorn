@@ -10,6 +10,7 @@
 //! holds back a `cat` of that note until the test removes it. While a
 //! `<state>.overwrite-fails-after` file exists, `overwrite` writes the note and
 //! then fails anyway, the way a bearcli timed out after Bear saved would.
+//! $BJORN_FAKE_BEAR_FAIL_READ makes one read fail (see `run`).
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -338,11 +339,25 @@ fn parse_fields(spec: Option<&str>, default: &[&str], extra: &[&str]) -> Vec<Str
     out
 }
 
+/// A note by id (any location) or by title. Like bearcli, a title only finds
+/// notes in Notes: one in the Trash or the Archive needs its id, and
+/// `create --if-not-exists` makes a fresh note beside it.
 fn find_note(state: &State, note_id: Option<&str>, title: Option<&str>) -> Option<usize> {
     state.notes.iter().position(|n| {
         note_id.is_some_and(|id| n.id == id)
-            || title.is_some_and(|t| n.title.to_lowercase() == t.to_lowercase())
+            || title.is_some_and(|t| {
+                in_location(n, "notes") && n.title.to_lowercase() == t.to_lowercase()
+            })
     })
+}
+
+/// bearcli's message for a lookup that found nothing.
+fn not_found(target: &Target) -> &'static str {
+    if target.note_id.is_none() && target.title.is_some() {
+        "Note not found (in notes; use the note ID for trash/archive)"
+    } else {
+        "Note not found"
+    }
 }
 
 fn strip_tag(tag: &str) -> String {
@@ -841,7 +856,7 @@ fn hold(id: &str) {
 
 fn cmd_cat(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
     let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
-        return Err(fail(ctx.fmt, "not_found", "Note not found"));
+        return Err(fail(ctx.fmt, "not_found", not_found(target)));
     };
     let note = &state.notes[i];
     hold(&note.id);
@@ -862,7 +877,7 @@ fn cmd_cat(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
 
 fn cmd_show(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
     let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
-        return Err(fail(ctx.fmt, "not_found", "Note not found"));
+        return Err(fail(ctx.fmt, "not_found", not_found(target)));
     };
     let fields = parse_fields(ctx.fields, &["id", "title", "tags"], &[]);
     let row = row_for(&state.notes[i], &fields);
@@ -979,22 +994,31 @@ fn cmd_create(
         emit_rows(&[row_for(&state.notes[i], &fields)], &fields, ctx.fmt);
         return Ok(());
     }
-    let mut all_tags: Vec<String> = Vec::new();
-    for t in tags.unwrap_or("").split(',') {
-        let t = strip_tag(t);
+    // Tags the content already carries are not added again.
+    let mut inline: Vec<String> = Vec::new();
+    for caps in TAG_RE.captures_iter(&content).flatten() {
+        let t = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .map(|m| m.as_str().trim())
+            .unwrap_or("");
         if !t.is_empty() {
-            with_ancestors(&mut all_tags, &t);
+            with_ancestors(&mut inline, t);
         }
     }
-    let heading = format!("# {title}");
-    let body = match content.strip_prefix(heading.as_str()) {
-        Some(rest) => rest.trim_start_matches('\n').to_string(),
-        None => content.clone(),
-    };
-    let leaf_tags: Vec<&String> = all_tags
+    let mut all_tags = inline.clone();
+    let mut added: Vec<String> = Vec::new();
+    for t in tags.unwrap_or("").split(',') {
+        let t = strip_tag(t);
+        if !t.is_empty() && !inline.contains(&t) {
+            with_ancestors(&mut all_tags, &t);
+            with_ancestors(&mut added, &t);
+        }
+    }
+    let leaf_tags: Vec<&String> = added
         .iter()
         .filter(|t| {
-            !all_tags
+            !added
                 .iter()
                 .any(|o| o != *t && o.starts_with(&format!("{t}/")))
         })
@@ -1023,16 +1047,32 @@ fn cmd_create(
         }
         full
     } else {
-        format!("{heading}\n")
-    };
-    if !derived {
-        if tag_line.is_empty() {
-            full.push('\n');
+        // Content whose first line Bear already reads as the title (a heading
+        // at any level, case-insensitive) is kept as it is; otherwise the
+        // title is written as a `# ` heading above it. Added tags go under the
+        // title. YAML front matter (a `---` block opening on the first line)
+        // stays on top; the title goes after it.
+        let (front, content) = crate::templates::split_front_matter(&content);
+        let (first, rest) = content.split_once('\n').unwrap_or((content, ""));
+        let first_title = first.trim_start_matches('#').trim();
+        let mut full = front.to_string();
+        if first_title.to_lowercase() == title.to_lowercase() {
+            full.push_str(&format!("{first}\n"));
+            if !tag_line.is_empty() {
+                full.push_str(&format!("{tag_line}\n"));
+            }
+            full.push_str(rest);
         } else {
-            full.push_str(&format!("{tag_line}\n\n"));
+            full.push_str(&format!("# {title}\n"));
+            if tag_line.is_empty() {
+                full.push('\n');
+            } else {
+                full.push_str(&format!("{tag_line}\n\n"));
+            }
+            full.push_str(content);
         }
-        full.push_str(&body);
-    }
+        full
+    };
     if !full.ends_with('\n') {
         full.push('\n');
     }
@@ -1184,6 +1224,10 @@ fn section_range(content: &str, section: &str) -> Result<(usize, usize), i32> {
     let heading = unescape(section).trim().to_string();
     let lines: Vec<&str> = content.split('\n').collect();
     let level = heading.len() - heading.trim_start_matches('#').len();
+    // Only a heading line is an address; bearcli finds nothing for plain text.
+    if !(1..=6).contains(&level) {
+        return Err(fail_text("Section not found", 1));
+    }
     let starts: Vec<usize> = lines
         .iter()
         .enumerate()
@@ -1445,6 +1489,22 @@ pub fn run(argv: Vec<String>) -> i32 {
         fmt: &cli.format,
         fields: cli.fields.as_deref(),
     };
+    // Failure injection for tests: while the file named by
+    // $BJORN_FAKE_BEAR_FAIL_READ exists, every listing (a `list` that is not a
+    // `--count` probe, or a `search`) fails. The file stays, so which reload
+    // takes the failure is not a race with the background poll; the test
+    // removes it when it wants reads to work again.
+    let listing = match &cmd {
+        Cmd::List { listing, .. } => !listing.count,
+        Cmd::Search { .. } => true,
+        _ => false,
+    };
+    if listing
+        && let Some(flag) = std::env::var_os("BJORN_FAKE_BEAR_FAIL_READ").filter(|v| !v.is_empty())
+        && std::path::Path::new(&flag).exists()
+    {
+        return fail(ctx.fmt, "injected", "Injected failure");
+    }
     let mut state = load_state();
     let outcome = match cmd {
         Cmd::List { listing, tag } => cmd_list(&ctx, &state, &listing, tag.as_deref()),

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -20,7 +21,8 @@ use crate::bear::{
     BearClient, BearError, Location, Note, NoteContent, Probe, Snapshot, display_tag,
     normalize_tag, recently_modified,
 };
-use crate::config::{Config, editor_available, resolve_editor};
+use crate::config::{Config, DEFAULT_DAILY_TEMPLATE, editor_available, resolve_editor};
+use crate::daily;
 use crate::editor::{self, EditorJob};
 use crate::export::{
     FORMATS, Format, default_export_path, export_note, extension_for, format_by_id,
@@ -32,9 +34,11 @@ use crate::reminders::{
     RemctlClient, Status, join as join_reminders, remctl_found, resolve_remctl,
 };
 use crate::search::{query_pattern, rewrite_subtags};
+use crate::templates::{self, Template};
 use crate::todos::{TodoScan, scan_rows};
 use crate::ui::modals::{
     Field, LinkRow, LinkTarget, Overlay, Pending, Severity, TextPurpose, Toast, filter_links,
+    filter_templates,
 };
 use crate::ui::note_list::{NoteList, ROW_HEIGHT};
 use crate::ui::note_view::{Reader, outline_filter};
@@ -58,6 +62,8 @@ pub const CONTENT_CACHE_BYTES: usize = 24 * 1024 * 1024;
 pub const PREFETCH_RADIUS: usize = 3;
 /// Read-aheads allowed in flight at once; bearcli is a process per call.
 pub const PREFETCH_INFLIGHT: usize = 2;
+/// What a screen says when the note behind a row cannot be shown any more.
+pub const GONE_FROM_THE_LIST: &str = "That note is no longer in the list — press r to refresh.";
 /// Notes kept in the back (and the forward) history.
 pub const HISTORY_LIMIT: usize = 100;
 /// Outgoing links listed by `L`; a note with more says how many are left out.
@@ -119,6 +125,11 @@ pub enum Msg {
         result: Result<Vec<String>, BearError>,
     },
     Created {
+        result: Result<String, BearError>,
+    },
+    /// Today's note was found or made: select it and show it, no editor.
+    DailyReady {
+        title: String,
         result: Result<String, BearError>,
     },
     EditContent {
@@ -331,6 +342,8 @@ pub struct App {
     session_gen: u64,
     /// A note just created, to open in the editor once the reload shows it.
     pending_edit: Option<String>,
+    /// A note to select and show once the reload has it (today's, after `D`).
+    pending_reveal: Option<String>,
     /// The triage screen while it is up; it covers the three columns.
     pub triage: Option<Triage>,
     pub remctl: Option<Arc<RemctlClient>>,
@@ -428,6 +441,7 @@ impl App {
             session_starting: None,
             session_gen: 0,
             pending_edit: None,
+            pending_reveal: None,
             triage: None,
             remctl,
             reminders_notice_shown: false,
@@ -573,6 +587,9 @@ impl App {
             Ok(snapshot) => snapshot,
             Err(err) => {
                 self.error("bearcli", &err);
+                // `D` asked for a note this reload was to show; the moment
+                // has passed, so a later reload must not jump to it.
+                self.pending_reveal = None;
                 if !self.loaded {
                     self.reader.clear(&format!("Could not read Bear: {err}"));
                 }
@@ -631,6 +648,20 @@ impl App {
             && let Some(note) = self.snapshot.by_id(&id).cloned()
         {
             self.edit_note(note);
+        }
+        if let Some(id) = self.pending_reveal.take() {
+            if self.reveal_note(&id) {
+                // Said only once the note is on screen. The title is Bear's,
+                // so it is shown without control characters.
+                let title: String = self
+                    .notes
+                    .current()
+                    .map(|n| n.title.chars().filter(|c| !c.is_control()).collect())
+                    .unwrap_or_default();
+                self.notify(&format!("Today: “{title}”"), Duration::from_secs(3));
+            } else {
+                self.notify(GONE_FROM_THE_LIST, Duration::from_secs(5));
+            }
         }
     }
 
@@ -742,6 +773,16 @@ impl App {
                     self.start_reload(None, Some(id), false);
                 }
                 Err(err) => self.error("Create failed", &err),
+            },
+            Msg::DailyReady { title, result } => match result {
+                Ok(id) => {
+                    // A second note by this title is what a race with another
+                    // process leaves behind; the reload below warns about it.
+                    self.note_written(&title);
+                    self.pending_reveal = Some(id);
+                    self.start_reload(None, None, false);
+                }
+                Err(err) => self.error("Daily note failed", &err),
             },
             Msg::EditContent { note, result } => match result {
                 Ok(before) => self.open_editor(note, before),
@@ -1440,7 +1481,7 @@ impl App {
             Pending::CreateLinked(title) => {
                 self.push_history();
                 let tags = self.new_note_tags();
-                self.create_note(title, tags);
+                self.create_note(title, tags, String::new());
             }
             Pending::Trash(note) => {
                 let client = self.client.clone();
@@ -1500,24 +1541,138 @@ impl App {
     }
 
     fn new_note(&mut self) {
+        self.new_note_from(None);
+    }
+
+    /// The new-note prompt, tags defaulting to the tag in view (else the
+    /// workspace), the title to the template's heading when there is one.
+    fn new_note_from(&mut self, template: Option<Template>) {
         let default_tags = self.new_note_tags();
+        let title = template
+            .as_ref()
+            .map(|t| {
+                t.title(
+                    &Local::now(),
+                    &self.selection.workspace,
+                    &split_tags(&default_tags),
+                )
+            })
+            .unwrap_or_default();
         self.overlay = Some(Overlay::NewNote {
-            title: Field::new(""),
+            title: Field::new(&title),
             tags: Field::new(&default_tags),
             field: 0,
+            template,
         });
     }
 
-    fn create_note(&mut self, title: String, tags: String) {
-        let tag_list: Vec<String> = tags
-            .split(',')
-            .map(normalize_tag)
-            .filter(|t| !t.is_empty())
-            .collect();
+    /// `N`: pick a template from the templates directory, then the same
+    /// title and tags prompt as `n`.
+    /// The daily template is left out: it is `D`'s, and its title is the date.
+    /// With daily notes off that is still `daily.md`, whose `{{title}}`
+    /// heading would make an untitled note from `N`.
+    fn open_templates(&mut self) {
+        let dir = &self.config.templates_dir;
+        let name = self
+            .config
+            .daily
+            .as_ref()
+            .map_or(DEFAULT_DAILY_TEMPLATE, |d| d.template.as_str());
+        let daily = templates::path_for(dir, name);
+        let mut listing = templates::list(dir);
+        listing
+            .templates
+            .retain(|t| !templates::same_file(&t.path, &daily));
+        self.overlay = Some(Overlay::Templates {
+            field: Field::default(),
+            index: 0,
+            templates: listing.templates,
+            skipped: listing.skipped,
+        });
+    }
+
+    /// `D`: today's note, made from the daily template the first time. One
+    /// already in the snapshot is shown without asking bearcli; otherwise
+    /// `create --if-not-exists` finds or makes it. Without a `[daily]` table
+    /// it only says how to turn daily notes on.
+    fn open_daily(&mut self) {
+        if self.config.daily.is_none() {
+            self.notify(daily::DAILY_OFF, Duration::from_secs(8));
+            return;
+        }
+        let daily = match daily::today(&self.config, &Local::now()) {
+            Ok(daily) => daily,
+            Err(message) => {
+                self.notify_titled(
+                    "Daily note",
+                    &message,
+                    Severity::Error,
+                    Duration::from_secs(10),
+                );
+                return;
+            }
+        };
+        let wanted = daily.title.to_lowercase();
+        let known = self
+            .snapshot
+            .notes
+            .iter()
+            .find(|n| n.location == Location::Notes && n.title.to_lowercase() == wanted)
+            .map(|n| n.id.clone());
+        if let Some(id) = known {
+            if !self.reveal_note(&id) {
+                self.notify(GONE_FROM_THE_LIST, Duration::from_secs(5));
+            }
+            return;
+        }
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let result = client.create(&title, &tag_list, "").await;
+            let result = daily::ensure(&client, &daily).await;
+            let _ = tx.send(Msg::DailyReady {
+                title: daily.title,
+                result,
+            });
+        });
+    }
+
+    /// Select `id` in the notes list and show it in the reader. When the list
+    /// in view does not hold it, widen to the view its location belongs in,
+    /// leaving the workspace only when the note is outside it.
+    ///
+    /// False means the jump did not happen, and the caller must say so rather
+    /// than report the note as shown. An id the snapshot does not hold is
+    /// refused before anything is touched, so the view and the cursor stay
+    /// where they were.
+    pub fn reveal_note(&mut self, id: &str) -> bool {
+        let Some(note) = self.snapshot.by_id(id).cloned() else {
+            return false;
+        };
+        if !self.notes.select_id(id) {
+            if !in_workspace(&note, &self.selection.workspace) {
+                self.set_workspace("");
+            }
+            self.action_view(match note.location {
+                Location::Trash => View::Trash,
+                Location::Archive => View::Archive,
+                _ => View::All,
+            });
+            if !self.notes.select_id(id) {
+                return false;
+            }
+        }
+        if let Some(current) = self.notes.current().cloned() {
+            self.schedule_preview(current, true, false);
+        }
+        true
+    }
+
+    fn create_note(&mut self, title: String, tags: String, content: String) {
+        let tag_list = split_tags(&tags);
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.create(&title, &tag_list, &content).await;
             let _ = tx.send(Msg::Created { result });
         });
     }
@@ -2572,6 +2727,8 @@ impl App {
             KeyCode::Char('/') => self.open_search(),
             KeyCode::Esc => self.clear_search(),
             KeyCode::Char('n') => self.new_note(),
+            KeyCode::Char('N') => self.open_templates(),
+            KeyCode::Char('D') => self.open_daily(),
             KeyCode::Char('e') => {
                 if let Some(note) = self.current_note().cloned() {
                     self.edit_note(note);
@@ -3084,6 +3241,7 @@ impl App {
                 mut title,
                 mut tags,
                 mut field,
+                template,
             } => match key.code {
                 KeyCode::Esc => self.overlay = None,
                 KeyCode::Tab | KeyCode::BackTab => {
@@ -3091,6 +3249,7 @@ impl App {
                         title,
                         tags,
                         field: 1 - field,
+                        template,
                     })
                 }
                 KeyCode::Enter => {
@@ -3099,23 +3258,107 @@ impl App {
                         if !title_text.is_empty() {
                             field = 1;
                         }
-                        self.overlay = Some(Overlay::NewNote { title, tags, field });
+                        self.overlay = Some(Overlay::NewNote {
+                            title,
+                            tags,
+                            field,
+                            template,
+                        });
                     } else if title_text.is_empty() {
                         self.overlay = Some(Overlay::NewNote {
                             title,
                             tags,
                             field: 0,
+                            template,
                         });
                     } else {
                         self.overlay = None;
-                        self.create_note(title_text, tags.value.trim().to_string());
+                        let content = template
+                            .map(|t| {
+                                t.content(
+                                    &Local::now(),
+                                    &title_text,
+                                    &self.selection.workspace,
+                                    &split_tags(&tags.value),
+                                )
+                            })
+                            .unwrap_or_default();
+                        self.create_note(title_text, tags.value.trim().to_string(), content);
                     }
                 }
                 _ => {
                     Self::field_key(if field == 0 { &mut title } else { &mut tags }, &key);
-                    self.overlay = Some(Overlay::NewNote { title, tags, field });
+                    self.overlay = Some(Overlay::NewNote {
+                        title,
+                        tags,
+                        field,
+                        template,
+                    });
                 }
             },
+            Overlay::Templates {
+                mut field,
+                index,
+                templates,
+                skipped,
+            } => {
+                let matched = filter_templates(&templates, &field.value).len();
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let delta = match key.code {
+                    KeyCode::Down | KeyCode::Tab => Some(1),
+                    KeyCode::Up | KeyCode::BackTab => Some(-1),
+                    KeyCode::Char('n') if ctrl => Some(1),
+                    KeyCode::Char('p') if ctrl => Some(-1),
+                    _ => None,
+                };
+                if let Some(delta) = delta {
+                    let index = if matched == 0 {
+                        0
+                    } else {
+                        (index as i32 + delta).rem_euclid(matched as i32) as usize
+                    };
+                    self.overlay = Some(Overlay::Templates {
+                        field,
+                        index,
+                        templates,
+                        skipped,
+                    });
+                    return;
+                }
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Enter => {
+                        let chosen = filter_templates(&templates, &field.value)
+                            .get(index)
+                            .map(|t| (*t).clone());
+                        match chosen {
+                            Some(template) => self.new_note_from(Some(template)),
+                            None => {
+                                self.overlay = Some(Overlay::Templates {
+                                    field,
+                                    index,
+                                    templates,
+                                    skipped,
+                                })
+                            }
+                        }
+                    }
+                    _ => {
+                        // Typing filters, so the highlight goes back to the top.
+                        let index = if Self::field_key(&mut field, &key) {
+                            0
+                        } else {
+                            index
+                        };
+                        self.overlay = Some(Overlay::Templates {
+                            field,
+                            index,
+                            templates,
+                            skipped,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -3947,6 +4190,14 @@ impl App {
             self.triage_load();
         }
     }
+}
+
+/// The new-note prompt's comma-separated tags, normalized, blanks dropped.
+fn split_tags(tags: &str) -> Vec<String> {
+    tags.split(',')
+        .map(normalize_tag)
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// Where `output` sits in `ActionOutput::ALL`, for the form's picker.

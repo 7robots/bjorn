@@ -18,6 +18,10 @@ impl Fake {
         }
     }
 
+    pub fn templates(&self) -> std::path::PathBuf {
+        self.dir.path().join("templates")
+    }
+
     pub fn state(&self) -> std::path::PathBuf {
         self.dir.path().join("bear.json")
     }
@@ -41,6 +45,8 @@ impl Fake {
             export_dir: self.dir.path().join("exports"),
             icon_style: "none".into(),
             path: Some(self.dir.path().join("config.toml")),
+            // Never the real ~/.config/bjorn/templates.
+            templates_dir: self.dir.path().join("templates"),
             ..Config::default()
         }
     }

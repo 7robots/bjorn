@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::actions::Action;
 use crate::bear::Note;
+use crate::templates::Template;
 use crate::wiki::WikiLink;
 
 /// What a confirmed dialog goes on to do.
@@ -221,11 +222,30 @@ pub enum Overlay {
         error: String,
     },
     /// Title and tags for a new note; `field` is 0 for the title, 1 for the tags.
+    /// `template` is the one picked with `N`, whose body the note starts from.
     NewNote {
         title: Field,
         tags: Field,
         field: usize,
+        template: Option<Template>,
     },
+    /// `N`: a search box over the templates directory, read when it opened.
+    Templates {
+        field: Field,
+        index: usize,
+        templates: Vec<Template>,
+        /// `*.md` files that could not be used (too big, not UTF-8, ...).
+        skipped: usize,
+    },
+}
+
+/// The templates whose name holds `query`, ignoring case, in listed order.
+pub fn filter_templates<'a>(templates: &'a [Template], query: &str) -> Vec<&'a Template> {
+    let query = query.trim().to_lowercase();
+    templates
+        .iter()
+        .filter(|t| query.is_empty() || t.name.to_lowercase().contains(&query))
+        .collect()
 }
 
 impl Overlay {
@@ -283,6 +303,7 @@ impl Overlay {
             Overlay::NewAction { .. } => "NewAction",
             Overlay::NewNote { .. } => "NewNote",
             Overlay::Links { .. } => "Links",
+            Overlay::Templates { .. } => "Templates",
         }
     }
 }

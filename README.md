@@ -30,6 +30,7 @@ cd bjorn
 bjorn                 # or: cargo run --release --bin bjorn
 bjorn --tag work      # start scoped to a tag subtree
 bjorn --demo          # sample notes through the built-in fake bearcli, no Bear needed
+bjorn capture "call Ana"   # add a line to today's daily note, no TUI (needs [daily])
 ```
 
 `git pull && ./install.sh` is the update path.
@@ -42,6 +43,7 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `j` `k` `↑` `↓` | move within a pane; in the sidebar the cursor runs from the views into the tags; in the reader they scroll | `esc` | clear the search and its highlights |
 | `enter` | move into the reader for the highlighted note, at the first match while searching | `1`–`7` | Notes, Untagged, Todo, Today, Pinned, Archive, Trash |
 | `n` | new note (title, tags), then edit | `d` | move the note to the trash, after a confirm |
+| `D` | today's daily note, made from the daily template the first time; off until the config has `[daily]` (see [Daily notes and templates](#daily-notes-and-templates)) | `N` | new note from a template: pick one, then title and tags as for `n` |
 | `e` | edit in `$VISUAL` / `$EDITOR` | `u` | restore from Trash or Archive |
 | `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle, PDF (`←` `→` pick, `enter` confirms) |
 | `b` | open in Bear.app | `!` / `a` | run the default action / open the action menu (see [Actions](#actions)) |
@@ -151,6 +153,105 @@ they are read back and rows show ⏰ for an open reminder or ✓ for one you
 completed in Reminders, ready to `x` in Bear. Nothing is written into Bear when
 a reminder is added.
 
+## Daily notes and templates
+
+Daily notes are off until the config has a `[daily]` table. Bear has no
+daily notes of its own (its Today view is notes modified today), so Bjorn
+does not make any unless asked. An empty table turns them on with the
+defaults:
+
+```toml
+[daily]
+```
+
+Without it, `D` shows a hint instead of making a note, and `bjorn capture`
+and `bjorn today` refuse with the same message and a non-zero exit, without
+calling bearcli. Templates (`N`) work either way.
+
+`D` opens today's note, making it the first time. By default it is titled
+with the date as a second-level heading and tagged with a dated nested tag:
+
+```markdown
+## September 19, 2026 (Saturday)
+#log/2026/09/19
+* People:
+* Topic:
+
+---
+```
+
+The note is found by its title: `D` selects it when the snapshot already
+has it, and otherwise calls `bearcli create --if-not-exists -- "<title>"`,
+which returns the existing note or makes one from the daily template. Asking
+twice from Bjorn never makes a second note; two processes asking in the same
+instant could, and the duplicate-title warning would then say so. Bear reads
+the `## ` first line as the title and keeps it as written. If the note sits
+outside the workspace, the workspace is cleared to show it. A trashed or
+archived note with today's title is never reused; Bear makes a fresh one.
+Rename the note's heading in Bear and it is no longer today's note: the next
+`D` or capture makes a second one under the configured title.
+
+Because the title is the only link, `[daily] title` must name exactly one
+day: a year with a month and day (`%Y-%m-%d`), a year and day of the year
+(`%Y-%j`), or an ISO week date (`%G-W%V-%u`), and no time of day. A title
+that repeats (`%A`, `%B %-d`) would quietly reuse last week's or last year's
+note, so Bjorn refuses it at start with an error naming the key. The check
+runs only while `[daily]` is on; a commented-out table is never read.
+
+Capture from anywhere without opening the app:
+
+```sh
+bjorn capture "call Ana about the budget"   # the words, joined with spaces
+pbpaste | bjorn capture                     # or stdin when there are none (up to 1 MiB)
+bjorn capture -- "$text"                    # text that may start with a dash
+bjorn --demo capture "try it"               # flags go before the subcommand
+bjorn today                                 # prints: <id><TAB><title>
+```
+
+`capture` adds `* 14:05 call Ana about the budget` at the end of today's
+note, making the note first if needed. It prints nothing on success and
+exits non-zero with the reason on stderr otherwise: blank text, over 1 MiB
+on stdin, or an unknown flag. Control characters other than tab and newline
+are dropped from the text. `--config`, `--demo` and `--tag` belong before
+`capture` or `today`; after the subcommand any word starting with `-` is an
+error rather than text, so a script passing arbitrary text (a commit message
+from a hook, say) should write `bjorn capture -- "$text"`. Set
+`capture_section = "## Inbox"` to collect captures under that heading
+instead; it is matched ignoring case, and added at the end of the note the
+first time. It must be a heading line (`#` to `######`, a space, a name).
+`{{workspace}}` in `capture_format` is the config's `workspace`, or the tag
+given with `--tag` before the subcommand.
+
+A multi-line capture stays one entry: its blank lines are dropped and the
+lines after the first are indented past the bullet, so a pasted `## Foo` or
+`---` is text in that entry, not a heading or a rule in the note. The note
+is the one for the day the capture runs: a capture at 00:05 goes to the new
+day's note. With no words, `capture` reads stdin, and in a git hook that is
+git's own (a pre-push hook gets ref lines), so give the text as an argument
+there, or add `</dev/null`.
+
+`N` makes a note from a template: a Markdown file in the templates
+directory (`[templates] dir`, default `~/.config/bjorn/templates/`). Pick
+one in the search box, then settle the title and tags as for `n`. When a
+template starts with a heading (after any YAML front matter, which stays on
+top), its text is the proposed title, and the note keeps that heading level.
+`{{date}}`, `{{time}}`, `{{date:%A}}` (any strftime format), `{{title}}`,
+`{{tag}}` (the note's tags as Bear writes them) and `{{workspace}}` are
+filled in; anything else in braces stays as written. Files over 256 KiB or
+not UTF-8 are skipped; symlinks are followed. Meeting, 1:1, decision record
+and daily examples ship in `config/templates/`:
+
+```sh
+mkdir -p ~/.config/bjorn/templates
+cp config/templates/*.md ~/.config/bjorn/templates/
+```
+
+A `daily.md` there replaces the built-in daily layout (and is left out of
+`N`'s list); `{{tag}}` in it is the dated tag. A `daily.md` that exists but
+cannot be read is reported rather than replaced by the built-in layout.
+`template` can also name another file: `sub/day` is inside the templates
+directory, an absolute or `~/` path is taken as it is.
+
 ## Configuration
 
 `~/.config/bjorn/config.toml` (or `$XDG_CONFIG_HOME/bjorn/config.toml`), or
@@ -177,7 +278,19 @@ due = "today"                 # due date for new reminders; "" for none
 remctl = ""                   # path to remctl; default searches PATH
 
 [[actions]]                   # shell commands for `!` and `a`, output to a toast or back into Bear; see Actions below
+
+# [daily]                     # turns on `D` and `bjorn capture` (off without it); strftime formats
+# title = "%B %-d, %Y (%A)"   # the note is found by this title, so it must name one day
+# tag = "log/%Y/%m/%d"        # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace
+# template = "daily"          # templates/daily.md, else the built-in layout
+# capture_section = ""        # a heading line, e.g. "## Inbox"; "" adds at the end of the note
+# capture_format = "* {{time}} {{text}}"
+
+[templates]
+dir = "~/.config/bjorn/templates"
 ```
+
+Every default is in [config/config.toml.example](config/config.toml.example).
 
 `mouse_pixels` and `--no-mouse-pixels` are accepted from older config files
 and ignored: the mouse always stays in cell mode.
