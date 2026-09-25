@@ -46,16 +46,16 @@ use crate::bear::Location;
 const TOKEN_OPEN: char = '\u{FDD0}';
 const TOKEN_CLOSE: char = '\u{FDD1}';
 
-/// Backlink candidates read per search. The phrase is specific, so this is a
+/// Backlink candidates read per search, and each phrase is searched in Notes
+/// and in the Archive separately. The phrase is specific, so this is a
 /// ceiling for pathological titles rather than a page size.
 pub const BACKLINK_LIMIT: usize = 200;
 
 /// A backlink phrase needs this many letters or digits after `[[`. Bear's
 /// phrase match is unreliable for very short ones (`"[[A"` finds nothing
 /// though links start with A, while `"[[1"` finds 15 notes and `"[["` none),
-/// so with fewer the search is `@wikilinks` over every location, which covers
-/// every note holding a `[[` (224 of 224 in a real library), and the body
-/// check narrows that down.
+/// so with fewer the search is `@wikilinks`, which covers every note holding a
+/// `[[` (224 of 224 in a real library), and the body check narrows that down.
 const MIN_PHRASE_CHARS: usize = 3;
 
 /// Title characters Bear is known to escape inside a link (`\/`, `\#`).
@@ -211,58 +211,97 @@ pub fn same_title(a: &str, b: &str) -> bool {
 
 /// The links on one line of markdown, as byte ranges with what they parse
 /// to. Code spans on the line hide what is inside them.
+///
+/// This runs on every line of a note each time it is drawn, so it is one
+/// pass over the line plus a few lookup tables, whatever the brackets and
+/// backticks in it: a line of four thousand `[` and as many `]`, or a run of
+/// unclosed `[[`, once took minutes. Each position asks its questions (where
+/// is the next `]]`, how many `[` are open before it, is there a `[[` inside,
+/// where does this code span close) of the tables instead of rescanning.
 pub fn scan_line(line: &str) -> Vec<(usize, usize, WikiLink)> {
+    if !line.contains("[[") {
+        return Vec::new();
+    }
     let bytes = line.as_bytes();
+    let n = bytes.len();
+    let pair_at = |i: usize, b: u8| i + 1 < n && bytes[i] == b && bytes[i + 1] == b;
+    // `next_close[p]` / `next_open[p]`: the first `]]` / `[[` at or after p;
+    // `closers[p]`: how many `]` in a row start at p.
+    let mut next_close = vec![n; n + 1];
+    let mut next_open = vec![n; n + 1];
+    let mut closers = vec![0; n + 1];
+    for p in (0..n).rev() {
+        next_close[p] = if pair_at(p, b']') {
+            p
+        } else {
+            next_close[p + 1]
+        };
+        next_open[p] = if pair_at(p, b'[') {
+            p
+        } else {
+            next_open[p + 1]
+        };
+        closers[p] = if bytes[p] == b']' {
+            closers[p + 1] + 1
+        } else {
+            0
+        };
+    }
+    // `depth[p]`: `[` minus `]` in `line[..p]`, so a slice's balance is a
+    // subtraction.
+    let mut depth = vec![0i64; n + 1];
+    for (p, b) in bytes.iter().enumerate() {
+        depth[p + 1] = depth[p]
+            + match b {
+                b'[' => 1,
+                b']' => -1,
+                _ => 0,
+            };
+    }
     let run_at = |i: usize| bytes[i..].iter().take_while(|b| **b == b'`').count();
+    // Every backtick run's start, by its length, in line order.
+    let mut runs: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+    let mut p = 0;
+    while p < n {
+        if bytes[p] == b'`' {
+            let run = run_at(p);
+            runs.entry(run).or_default().push(p);
+            p += run;
+        } else {
+            p += 1;
+        }
+    }
     let mut out = Vec::new();
     let mut i = 0;
-    while i < bytes.len() {
+    while i < n {
         if bytes[i] == b'`' {
-            // A code span closes on a run of exactly as many backticks.
+            // A code span closes on the next run of exactly as many backticks.
             let run = run_at(i);
-            let mut j = i + run;
-            let mut close = None;
-            while j < bytes.len() {
-                if bytes[j] == b'`' {
-                    let other = run_at(j);
-                    if other == run {
-                        close = Some(j + other);
-                        break;
-                    }
-                    j += other;
-                } else {
-                    j += 1;
-                }
-            }
+            let close = runs.get(&run).and_then(|starts| {
+                let k = starts.partition_point(|s| *s < i + run);
+                starts.get(k).map(|s| s + run)
+            });
             i = close.unwrap_or(i + run);
             continue;
         }
-        if bytes[i] == b'[' && bytes.get(i + 1) == Some(&b'[') {
-            if let Some(rel) = line[i + 2..].find("]]") {
-                let mut end = i + 2 + rel;
-                // A `]` after the `]]` closes a `[` in the title, while any
-                // is open: `[[Plan [v2]]]`, but `[see [[Plan]]](url)`.
-                let open = |inner: &str| inner.matches('[').count() > inner.matches(']').count();
-                while bytes.get(end + 2) == Some(&b']') && open(&line[i + 2..end]) {
-                    end += 1;
-                }
-                let inner = &line[i + 2..end];
-                if !inner.contains("[[")
-                    && let Some(link) = WikiLink::parse(inner)
-                {
-                    out.push((i, end + 2, link));
-                    i = end + 2;
-                    continue;
-                }
+        if pair_at(i, b'[') && next_close[i + 2] < n {
+            let first = next_close[i + 2];
+            // A `]` after the `]]` closes a `[` in the title, while any is
+            // open: `[[Plan [v2]]]`, but `[see [[Plan]]](url)`. Each one
+            // taken closes one more, so how many is a subtraction too.
+            let open = (depth[first] - depth[i + 2]).max(0) as usize;
+            let end = first + open.min(closers[first] - 2);
+            let nested = next_open[i + 2] + 2 <= end;
+            if !nested && let Some(link) = WikiLink::parse(&line[i + 2..end]) {
+                out.push((i, end + 2, link));
+                i = end + 2;
+                continue;
             }
-            i += 1;
-            continue;
         }
         i += 1;
     }
     out
 }
-
 /// `line` with any token character already in it shown as U+FFFD, so the
 /// only tokens the renderer meets are the ones `tokenize` made.
 pub fn neutralize(line: &str) -> Cow<'_, str> {
@@ -686,5 +725,122 @@ mod tests {
     fn titles_compare_without_case() {
         assert!(same_title("Garden Plan", "garden plan "));
         assert!(!same_title("Garden Plan", "Garden Plan 2027"));
+    }
+
+    /// The scanner as it was before it became linear: plain and obviously
+    /// right, and minutes long on a line of brackets. `scan_line` must agree
+    /// with it on every line.
+    fn reference_scan(line: &str) -> Vec<(usize, usize, WikiLink)> {
+        let bytes = line.as_bytes();
+        let run_at = |i: usize| bytes[i..].iter().take_while(|b| **b == b'`').count();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'`' {
+                let run = run_at(i);
+                let mut j = i + run;
+                let mut close = None;
+                while j < bytes.len() {
+                    if bytes[j] == b'`' {
+                        let other = run_at(j);
+                        if other == run {
+                            close = Some(j + other);
+                            break;
+                        }
+                        j += other;
+                    } else {
+                        j += 1;
+                    }
+                }
+                i = close.unwrap_or(i + run);
+                continue;
+            }
+            if bytes[i] == b'[' && bytes.get(i + 1) == Some(&b'[') {
+                if let Some(rel) = line[i + 2..].find("]]") {
+                    let mut end = i + 2 + rel;
+                    let open =
+                        |inner: &str| inner.matches('[').count() > inner.matches(']').count();
+                    while bytes.get(end + 2) == Some(&b']') && open(&line[i + 2..end]) {
+                        end += 1;
+                    }
+                    let inner = &line[i + 2..end];
+                    if !inner.contains("[[")
+                        && let Some(link) = WikiLink::parse(inner)
+                    {
+                        out.push((i, end + 2, link));
+                        i = end + 2;
+                        continue;
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn scanning_agrees_with_the_reference_on_tricky_brackets() {
+        for line in [
+            "[[[Draft] Plan]]",
+            "[[Plan [v2]]]]]",
+            "[[a [[b]]",
+            "[[[[x]]]]",
+            "[[x]]]]]",
+            "[[[[[[",
+            "]]]]]] [[a]]",
+            "[[a]] [[b] ]] [[ [c ]]]",
+            "[[x`y]] `[[z]]` ``[[w]]` [[v]]``",
+            "` [[a]] `` [[b]] ` [[c]]",
+            r"[[A\/B/C|x]] [[C \\/ D]] [[|only]] [[/Heading]]",
+            "[[é [ü]]] [[ñ]]",
+            "[[]] [[ ]] [[]]]",
+        ] {
+            assert_eq!(scan_line(line), reference_scan(line), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn scanning_agrees_with_the_reference_on_random_lines() {
+        // A fixed-seed xorshift, so a failure names a line that reproduces.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let alphabet = ['[', '[', ']', ']', '`', 'a', ' ', '|', '/', '\\', 'é'];
+        let mut linked = 0;
+        for _ in 0..20_000 {
+            let len = (next() % 41) as usize;
+            let line: String = (0..len)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                .collect();
+            let found = scan_line(&line);
+            assert_eq!(found, reference_scan(&line), "{line:?}");
+            linked += usize::from(!found.is_empty());
+        }
+        // Enough of the lines hold a link for the comparison to mean something.
+        assert!(linked > 500, "{linked}");
+    }
+
+    #[test]
+    fn a_line_of_brackets_scans_in_linear_time() {
+        for line in [
+            format!("{}{}", "[".repeat(4000), "]".repeat(4000)),
+            "[[".repeat(64_000),
+            format!("{}{}", "[[".repeat(32_000), "]".repeat(64_000)),
+            "[[a` ".repeat(20_000),
+            (1..400).map(|k| "`".repeat(k) + "[[x").collect::<String>(),
+        ] {
+            let started = std::time::Instant::now();
+            scan_line(&line);
+            let took = started.elapsed();
+            eprintln!("{} bytes: {took:?}", line.len());
+            // Milliseconds in a debug build; the bound leaves room for a slow CI.
+            assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+        }
     }
 }
