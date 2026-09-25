@@ -1306,7 +1306,10 @@ fn draw_links(frame: &mut Frame, area: Rect, view: LinksView) {
         .saturating_sub(shown.saturating_sub(1))
         .min(total - shown);
     let height = (shown + chrome) as u16;
-    let title = format!("Links · “{}”", fit_cells(&view.note.title, 40).trim_end());
+    let title = format!(
+        "Links · “{}”",
+        fit_cells(&crate::util::strip_control(&view.note.title), 40).trim_end()
+    );
     let inner = dialog(frame, area, wide, height, Some(&title));
 
     let mut lines = Vec::with_capacity(shown + 4);

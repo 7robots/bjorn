@@ -40,6 +40,7 @@ use crate::ui::note_list::{NoteList, ROW_HEIGHT};
 use crate::ui::note_view::{Reader, outline_filter};
 use crate::ui::sidebar::{Row, Sidebar};
 use crate::ui::triage::{Triage, TriageRow};
+use crate::util::strip_control;
 use crate::wiki::{self, Backlinks, WikiLink};
 
 /// Delay between the list cursor moving and the note being fetched and rendered.
@@ -2630,7 +2631,7 @@ impl App {
             // link says is dropped, and the link then resolves to what it made.
             let title = link.readings().swap_remove(0).title;
             self.overlay = Some(Overlay::Confirm {
-                message: format!("No note is called “{title}”. Create it?"),
+                message: format!("No note is called “{}”. Create it?", strip_control(&title)),
                 confirm_label: "Create".into(),
                 action: Pending::CreateLinked(title),
             });
@@ -2933,9 +2934,10 @@ impl App {
             }
             Some(_) => {}
         }
+        // The label and the heading come from the note's own text.
         LinkRow {
-            label,
-            detail: detail.join(" · "),
+            label: strip_control(&label),
+            detail: strip_control(&detail.join(" · ")),
             missing: target.is_none(),
             target: LinkTarget::Wiki(link),
         }
@@ -2975,8 +2977,8 @@ impl App {
                                     detail.push(format!("in the {}", b.location));
                                 }
                                 LinkRow {
-                                    label: b.title,
-                                    detail: detail.join(" · "),
+                                    label: strip_control(&b.title),
+                                    detail: strip_control(&detail.join(" · ")),
                                     target: LinkTarget::Note { id: b.id },
                                     missing: false,
                                 }

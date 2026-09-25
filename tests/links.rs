@@ -918,3 +918,51 @@ async fn a_link_with_a_bare_slash_to_nothing_offers_the_whole_title() {
         .await;
     assert!(h.app.resolve_title("A").is_none());
 }
+
+#[tokio::test]
+async fn control_characters_in_a_link_never_reach_a_row() {
+    let fake = Fake::new();
+    // Any call seeds the fake's library; then a link whose title and heading
+    // carry an escape sequence and a bell goes into one note.
+    fake.client().search_ids("seed", "all").await.unwrap();
+    let path = fake.state();
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for note in state["notes"].as_array_mut().unwrap() {
+        if note["id"] == "NOTE-GARDEN" {
+            note["content"] = "# Garden Plan\n\nSee [[Odd\u{1b}[2J Title/Sec\u{7}tion]].\n".into();
+        }
+    }
+    std::fs::write(&path, state.to_string()).unwrap();
+    let mut h = fake.harness();
+    h.load().await;
+    h.app.follow_note("NOTE-GARDEN");
+    h.until(|app| reader_on(app, "NOTE-GARDEN")).await;
+    h.press("L");
+    h.until(backlinks_loaded).await;
+    h.app.handle_msg(bjorn::app::Msg::Backlinks {
+        generation: h.app.backlinks_generation(),
+        note_id: "NOTE-GARDEN".into(),
+        result: Ok(bjorn::wiki::Backlinks {
+            notes: vec![bjorn::wiki::Backlink {
+                id: "NOTE-PLANNING".into(),
+                title: "Links\u{1b}]0;owned\u{7} in".into(),
+                location: bjorn::bear::Location::Notes,
+                sections: vec!["Head\ring".into()],
+            }],
+            capped: false,
+        }),
+    });
+    let (outgoing, backlinks) = link_lists(&h);
+    assert_eq!(labels(&outgoing), vec!["Odd[2J Title/Section"]);
+    assert_eq!(labels(&backlinks), vec!["Links]0;owned in"]);
+    assert_eq!(backlinks[0].detail, "› Heading");
+    let rows = outgoing.iter().chain(&backlinks);
+    assert!(
+        rows.flat_map(|r| r.label.chars().chain(r.detail.chars()))
+            .all(|c| !c.is_control()),
+        "{outgoing:?} {backlinks:?}"
+    );
+    h.draw();
+    assert!(!h.text().contains('\u{1b}'), "{}", h.text());
+}
