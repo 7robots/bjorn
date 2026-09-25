@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use base64::Engine;
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::Color;
 use regex::Regex;
 
@@ -433,6 +433,21 @@ pub fn data_uri(filename: &str, data: &[u8]) -> String {
     )
 }
 
+/// Whether a link target would run something rather than go somewhere.
+/// Browsers drop leading blanks and controls and any tab or newline inside a
+/// URL before they read its scheme, so `java\tscript:` is still one; the check
+/// does the same.
+fn is_script_url(url: &str) -> bool {
+    let scheme: String = url
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .take_while(|&c| c != ':')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    url.contains(':') && matches!(scheme.as_str(), "javascript" | "vbscript" | "data")
+}
+
 /// The note as an HTML fragment. `images` maps attachment filenames to bytes
 /// for embedding; `image_src` maps them to URLs to reference instead.
 pub fn render_body(
@@ -442,7 +457,19 @@ pub fn render_body(
 ) -> String {
     let prepared = prepare(content);
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
-    let events = Parser::new_ext(&prepared, options).map(|event| match event {
+    // A markdown link to `javascript:` and its kin keeps its text and loses
+    // the link. Links do not nest, so one flag pairs a dropped start with its
+    // end.
+    let mut dropped_link = false;
+    let events = Parser::new_ext(&prepared, options).filter_map(move |event| match event {
+        Event::Start(Tag::Link { ref dest_url, .. }) if is_script_url(dest_url) => {
+            dropped_link = true;
+            None
+        }
+        Event::End(TagEnd::Link) if dropped_link => {
+            dropped_link = false;
+            None
+        }
         Event::Start(Tag::Image {
             link_type,
             dest_url,
@@ -457,14 +484,14 @@ pub fn render_body(
             } else {
                 dest_url
             };
-            Event::Start(Tag::Image {
+            Some(Event::Start(Tag::Image {
                 link_type,
                 dest_url: src,
                 title,
                 id,
-            })
+            }))
         }
-        other => other,
+        other => Some(other),
     });
     let mut body = String::new();
     pulldown_cmark::html::push_html(&mut body, events);
@@ -485,7 +512,18 @@ pub fn render_body(
         .into_owned()
 }
 
-/// A complete, self-contained HTML document.
+/// The page's Content-Security-Policy. The note's own HTML reaches the page
+/// as written — Bear keeps it and so does the export — so the page itself has
+/// to refuse to run it: no script, no fetch, nothing loaded from anywhere.
+/// Images are `data:` because attachments are embedded; styles are inline
+/// because the sheet is. The checkbox tick is a `data:` SVG in the sheet,
+/// which `img-src` covers. `base-uri` and `form-action` do not fall back to
+/// `default-src`, so they are closed by name.
+pub const CSP: &str = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; \
+                       base-uri 'none'; form-action 'none'";
+
+/// A complete, self-contained HTML document. The policy comes first in the
+/// head: a meta policy only governs what the parser meets after it.
 pub fn render(
     content: &str,
     title: &str,
@@ -494,7 +532,9 @@ pub fn render(
     theme: &Theme,
 ) -> String {
     format!(
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n\
+         <meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">\n\
+         <meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{}</title>\n<style>\n{}\n</style>\n</head>\n<body>\n{}</body>\n</html>\n",
         escape(title),
@@ -590,6 +630,77 @@ See [REV](https://www.revrobotics.com) and ![the frame](Front%20bed.png).\n";
             )
             .contains("<title>A &lt;b&gt; &amp; c</title>")
         );
+    }
+
+    #[test]
+    fn the_page_policy_is_the_first_thing_in_the_head() {
+        let doc = render(
+            "<script>alert(1)</script>\n\n<img src=x onerror=\"alert(1)\">\n",
+            "<script>",
+            &HashMap::new(),
+            &HashMap::new(),
+            theme::current(),
+        );
+        let head = doc.split("<head>\n").nth(1).expect("a head");
+        assert!(
+            head.starts_with(&format!(
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">"
+            )),
+            "{doc}"
+        );
+        // Nothing may run or load: the note's own HTML is still in the page.
+        for directive in [
+            "default-src 'none'",
+            "img-src data:",
+            "style-src 'unsafe-inline'",
+            "base-uri 'none'",
+            "form-action 'none'",
+        ] {
+            assert!(CSP.contains(directive), "{directive}");
+        }
+        assert!(!CSP.contains("script-src") && !CSP.contains('"'));
+        // The sheet loads nothing the policy would refuse.
+        let sheet = stylesheet(theme::current());
+        assert!(!sheet.contains("@import") && !sheet.contains("@font-face"));
+        for url in sheet.split("url(").skip(1) {
+            assert!(url.trim_start_matches('"').starts_with("data:"), "{url}");
+        }
+        assert!(doc.contains("<title>&lt;script&gt;</title>"));
+    }
+
+    #[test]
+    fn a_link_that_would_run_a_script_keeps_only_its_text() {
+        for target in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            " javascript:alert(1)",
+            "java&#9;script:alert(1)",
+            "javascript&colon;alert(1)",
+            "vbscript:msgbox(1)",
+            "data:text/html,<script>alert(1)</script>",
+        ] {
+            let body = render_body(
+                &format!("Click [here]({target}) now."),
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            assert_eq!(body, "<p>Click here now.</p>\n", "{target}");
+        }
+        let body = render_body("<javascript:alert(1)>", &HashMap::new(), &HashMap::new());
+        assert!(!body.contains("href"), "{body}");
+        // An ordinary link, and the link after a dropped one, are untouched.
+        let body = render_body(
+            "[a](javascript:x) [b](https://example.com) [c](mailto:x@example.com) [d](#top)",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            body,
+            "<p>a <a href=\"https://example.com\">b</a> \
+             <a href=\"mailto:x@example.com\">c</a> <a href=\"#top\">d</a></p>\n"
+        );
+        // A note may still say the word.
+        assert!(!is_script_url("notes/javascript") && !is_script_url("javascript"));
     }
 
     #[test]
