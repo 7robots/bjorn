@@ -106,7 +106,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "L",
-                "the note's [[wiki links]] and the notes linking to it, under a search box; enter follows. A missing note is offered for creation. Backlinks read at most 200 candidates, and say so when the list may be incomplete",
+                "the note's [[wiki links]] and the notes linking to it, under a search box; enter follows. A missing note is offered for creation. Backlinks read at most 200 candidates per search (Notes and Archive), and say so when the list may be incomplete",
             ),
             (
                 "click",

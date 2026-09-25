@@ -113,14 +113,14 @@ that link to it, under a search box like the action menu's; `enter` follows.
 The backlinks come from a `bearcli search` for the phrase `[[Title`, with the
 title's `/` and `#` escaped as Bear writes them (a title needing that is
 searched for in both the single and the doubled form, and a title with a `/`
-also with the slash bare), run in the background,
-one search at a time. Bear matches a phrase as a prefix, so
+also with the slash bare), in Notes and in the Archive (never the trash), run
+in the background, one search at a time. Bear matches a phrase as a prefix, so
 Bjorn parses every candidate's body and keeps only real links to this title:
-not `[[Title 2]]`, not a mention inside code, nothing from the trash. At most
-200 candidates are read; when that cap is hit the list says it may be
-incomplete. A title too short or odd for a phrase (under three letters or
-digits before a `"`, `\` or `|`) is searched as `@wikilinks` instead, which
-covers every note holding a `[[`.
+not `[[Title 2]]`, not a mention inside code. Each search reads at most 200
+candidates; when one hits that cap the list says it may be incomplete. A
+title too short or odd for a phrase (under three letters or digits before a
+`"`, `\` or `|`) is searched as `@wikilinks` instead, which covers every note
+holding a `[[`.
 
 A link resolves to the note with that exact title, ignoring case; when several
 share it, an active note wins over an archived one, which wins over one in the

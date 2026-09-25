@@ -361,3 +361,39 @@ fn fake_remctl_round_trip() {
     let out = run(&["add", "--list", "Nope", "--", "x"]);
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[tokio::test]
+async fn trashed_notes_never_use_up_the_backlink_cap() {
+    let fake = Fake::new();
+    let client = fake.client();
+    client.search_ids("seed", "all").await.unwrap();
+    // More trashed notes linking to Sprint Planning than one search reads, all
+    // newer than the live ones, so a search over every location would fill
+    // its cap with them first.
+    let path = fake.state();
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let notes = state["notes"].as_array_mut().unwrap();
+    let trashed = notes
+        .iter()
+        .find(|n| n["id"] == "NOTE-TRASHED")
+        .unwrap()
+        .clone();
+    for k in 0..bjorn::wiki::BACKLINK_LIMIT + 50 {
+        let mut copy = trashed.clone();
+        copy["id"] = format!("TRASHED-{k}").into();
+        copy["modified"] = "2027-01-01T00:00:00Z".into();
+        notes.push(copy);
+    }
+    std::fs::write(&path, state.to_string()).unwrap();
+
+    let (rows, capped) = client.backlink_rows("Sprint Planning").await.unwrap();
+    assert!(!capped, "the trash did not count toward the cap");
+    let ids: Vec<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
+    assert!(ids.contains(&"NOTE-GARDEN"), "{ids:?}");
+    assert!(ids.contains(&"NOTE-ARCHIVED"), "{ids:?}");
+    assert!(
+        rows.iter().all(|r| r["location"] != "trash"),
+        "nothing is read from the trash: {ids:?}"
+    );
+}

@@ -909,40 +909,44 @@ impl BearClient {
             .collect())
     }
 
-    /// Candidate backlinks to `title`: every note, in any location, whose body
-    /// holds one of the phrases `wiki::backlink_queries` builds, with its
-    /// content. Each search reads at most `wiki::BACKLINK_LIMIT` notes; the
-    /// second flag says whether any hit that cap. Bear's phrase match is a
-    /// prefix match, so `wiki::backlinks` checks each body before any is shown.
+    /// Candidate backlinks to `title`: every note in Notes or the Archive
+    /// whose body holds one of the phrases `wiki::backlink_queries` builds,
+    /// with its content. Each location is searched on its own, so notes in
+    /// the trash (never a backlink) cannot use up the cap: each search reads
+    /// at most `wiki::BACKLINK_LIMIT` notes, and the second flag says whether
+    /// any hit it. Bear's phrase match is a prefix match, so `wiki::backlinks`
+    /// checks each body before any is shown.
     pub async fn backlink_rows(&self, title: &str) -> Result<(Vec<Value>, bool)> {
         let limit = crate::wiki::BACKLINK_LIMIT.to_string();
         let mut rows: Vec<Value> = Vec::new();
         let mut capped = false;
         for query in crate::wiki::backlink_queries(title) {
-            let found = Self::rows(
-                self.run(
-                    &[
-                        "search",
-                        "--query",
-                        &query,
-                        "--location",
-                        "all",
-                        "--limit",
-                        &limit,
-                        "--format",
-                        "json",
-                        "--fields",
-                        "id,title,location,content",
-                    ],
-                    true,
-                    None,
-                )
-                .await?,
-            );
-            capped |= found.len() >= crate::wiki::BACKLINK_LIMIT;
-            for row in found {
-                if !rows.iter().any(|r| r.get("id") == row.get("id")) {
-                    rows.push(row);
+            for location in ["notes", "archive"] {
+                let found = Self::rows(
+                    self.run(
+                        &[
+                            "search",
+                            "--query",
+                            &query,
+                            "--location",
+                            location,
+                            "--limit",
+                            &limit,
+                            "--format",
+                            "json",
+                            "--fields",
+                            "id,title,location,content",
+                        ],
+                        true,
+                        None,
+                    )
+                    .await?,
+                );
+                capped |= found.len() >= crate::wiki::BACKLINK_LIMIT;
+                for row in found {
+                    if !rows.iter().any(|r| r.get("id") == row.get("id")) {
+                        rows.push(row);
+                    }
                 }
             }
         }
