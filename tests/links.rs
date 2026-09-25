@@ -800,6 +800,38 @@ async fn backspace_goes_on_back_past_a_restored_search() {
 }
 
 #[tokio::test]
+async fn ctrl_o_and_alt_b_f_walk_the_history_not_the_outline_bear_or_folds() {
+    let fake = Fake::new();
+    let mut h = fake.harness();
+    h.load().await;
+    h.until(reader_on_planning).await;
+    // Reading Queue has a heading, so a plain `o` there would open the outline.
+    h.app.follow_note("NOTE-READING");
+    h.until(|app| reader_on(app, "NOTE-READING")).await;
+    assert!(!h.app.reader.headings.is_empty());
+    h.key(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert!(h.app.overlay.is_none(), "{:?}", h.app.overlay);
+    h.until(reader_on_planning).await;
+
+    // With a foldable tag highlighted, a plain `f` would fold it and a plain
+    // `b` would open the note in Bear.
+    h.app.sidebar.move_to_tag("home");
+    h.key(KeyCode::Char('f'), KeyModifiers::ALT);
+    h.until(|app| reader_on(app, "NOTE-READING")).await;
+    h.app.sidebar.move_to_tag("home");
+    h.key(KeyCode::Char('b'), KeyModifiers::ALT);
+    h.until(reader_on_planning).await;
+    h.settle().await;
+    assert!(!h.app.sidebar.is_expanded("home"), "nothing was folded");
+    assert!(
+        !fake.dir.path().join("bear.json.opened").exists(),
+        "nothing was opened in Bear"
+    );
+    assert!(h.app.overlay.is_none());
+    assert_eq!(h.app.forward.len(), 1);
+}
+
+#[tokio::test]
 async fn a_link_with_a_bare_slash_tries_the_whole_title_first() {
     let fake = Fake::new();
     let client = fake.client();
