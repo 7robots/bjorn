@@ -50,6 +50,7 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `t` | triage the workspace's open todos | `c` / click `▮▮▮` | hide the tag column, then the note column too, then show all three |
 | `]` / `[` | next / previous match in the reader while searching | `r` | refresh now |
 | `o` | outline: the note's headings, indented by level; type to filter, `enter` scrolls there | `}` / `{` | next / previous heading in the reader |
+| `L` | the note's wiki links and backlinks; `enter` follows (see [Wiki links](#wiki-links)) | `backspace` / `alt+→` | back to the note a link was followed from / forward again (`ctrl+o`, `alt+←`, `alt+b` go back; `alt+f` goes forward) |
 | `?` | help (`esc` `q` `?` close it) | `q` | quit, after a confirm |
 
 The **workspace** is a tag subtree that scopes the whole app: the tag tree
@@ -86,6 +87,51 @@ already has: the cursor's neighbours are read ahead, a cold start keeps the
 bodies the preview listing had to read anyway, and only a body that has to
 come from bearcli waits out a 120 ms debounce. Holding `j` down scrolls the
 reader with the list. Every `bearcli` and `remctl` call has a 30 s timeout.
+
+## Wiki links
+
+Bear's `[[Note title]]` links are drawn in the theme's link color, without the
+brackets; click one to follow it, in the text or in a table. `[[Note
+title/Heading]]` lands on that heading (one inside a quote too), and `[[Note
+title|shown text]]` shows the text after the bar. Bear escapes punctuation
+that belongs to the title with a backslash (`\/`, `\#`), so a `\` before any
+ASCII punctuation is one, and `[[/Heading]]` points into the note itself.
+Some links carry a doubled escape (`[[Cloud Arch \\/ EA/Apr 19]]`, for the
+note `Cloud Arch / EA`); rather than guess the rule, a link is read as
+written first and then with each doubled escape taken as one, and the first
+reading that names a note wins. A link that escapes no `/` is also read
+whole first: `[[A/B testing]]` is the note `A/B testing` if there is one, and
+otherwise the heading `B testing` in `A`. Only when no reading names a note
+is creating one offered, under the first reading's title (`A/B testing`, so
+nothing the link says is dropped). Whatever is between the brackets is the title, markdown
+or not (`[[Q&A]]`, a backtick, `*`); brackets in a title work as long as they
+pair up (`[[[Draft] Plan]]`), but a title holding `]]` cannot be linked.
+Brackets inside code, inline or fenced, are left as written.
+
+`L` lists the links in the note (the first 1,000) and, below them, the notes
+that link to it, under a search box like the action menu's; `enter` follows.
+The backlinks come from a `bearcli search` for the phrase `[[Title`, with the
+title's `/` and `#` escaped as Bear writes them (a title needing that is
+searched for in both the single and the doubled form, and a title with a `/`
+also with the slash bare), in Notes and in the Archive (never the trash), run
+in the background, one search at a time. Bear matches a phrase as a prefix, so
+Bjorn parses every candidate's body and keeps only real links to this title:
+not `[[Title 2]]`, not a mention inside code. Each search reads at most 200
+candidates; when one hits that cap the list says it may be incomplete. A
+title too short or odd for a phrase (under three letters or digits before a
+`"`, `\` or `|`) is searched as `@wikilinks` instead, which covers every note
+holding a `[[`.
+
+A link resolves to the note with that exact title, ignoring case; when several
+share it, an active note wins over an archived one, which wins over one in the
+trash, and then the newest. A title no note has offers to create the note,
+then opens it in the editor as `n` does. When the target is outside the
+current list the list widens to the view that holds it (Notes, Archive or
+Trash), and a workspace that excludes it is cleared, with a toast. `backspace`
+(or `ctrl+o`, `alt+←`, `alt+b`) goes back to where you were, list, workspace,
+search and scroll included; `alt+→` (or `alt+f`) goes forward again. While the
+search box is open, `backspace` edits the query instead. `enter` in triage
+counts as a jump too.
 
 ## Todo triage
 

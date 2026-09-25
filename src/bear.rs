@@ -909,6 +909,50 @@ impl BearClient {
             .collect())
     }
 
+    /// Candidate backlinks to `title`: every note in Notes or the Archive
+    /// whose body holds one of the phrases `wiki::backlink_queries` builds,
+    /// with its content. Each location is searched on its own, so notes in
+    /// the trash (never a backlink) cannot use up the cap: each search reads
+    /// at most `wiki::BACKLINK_LIMIT` notes, and the second flag says whether
+    /// any hit it. Bear's phrase match is a prefix match, so `wiki::backlinks`
+    /// checks each body before any is shown.
+    pub async fn backlink_rows(&self, title: &str) -> Result<(Vec<Value>, bool)> {
+        let limit = crate::wiki::BACKLINK_LIMIT.to_string();
+        let mut rows: Vec<Value> = Vec::new();
+        let mut capped = false;
+        for query in crate::wiki::backlink_queries(title) {
+            for location in ["notes", "archive"] {
+                let found = Self::rows(
+                    self.run(
+                        &[
+                            "search",
+                            "--query",
+                            &query,
+                            "--location",
+                            location,
+                            "--limit",
+                            &limit,
+                            "--format",
+                            "json",
+                            "--fields",
+                            "id,title,location,content",
+                        ],
+                        true,
+                        None,
+                    )
+                    .await?,
+                );
+                capped |= found.len() >= crate::wiki::BACKLINK_LIMIT;
+                for row in found {
+                    if !rows.iter().any(|r| r.get("id") == row.get("id")) {
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+        Ok((rows, capped))
+    }
+
     pub async fn cat(&self, note_id: &str) -> Result<NoteContent> {
         let payload = self
             .run(&["cat", note_id, "--format", "json"], true, None)
@@ -1016,7 +1060,9 @@ impl BearClient {
 
     // -- writes --------------------------------------------------------------
 
-    /// Create a note and return its id.
+    /// Create a note and return its id. Every option goes before `--` and
+    /// the title after it, so a title such as `--content=x` (from a wiki link
+    /// in a note) stays a title.
     pub async fn create(&self, title: &str, tags: &[String], content: &str) -> Result<String> {
         self.create_row(Some(title), tags, content)
             .await
@@ -1043,9 +1089,6 @@ impl BearClient {
         content: &str,
     ) -> Result<(String, String)> {
         let mut args: Vec<String> = vec!["create".into()];
-        if let Some(title) = title {
-            args.push(title.into());
-        }
         args.extend(["--format", "json", "--fields", "id,title"].map(String::from));
         let tag_list = tags
             .iter()
@@ -1056,6 +1099,10 @@ impl BearClient {
         if !tag_list.is_empty() {
             // One argument, so a tag that starts with `-` is never an option.
             args.push(format!("--tags={tag_list}"));
+        }
+        if let Some(title) = title {
+            args.push("--".into());
+            args.push(title.into());
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let payload = {

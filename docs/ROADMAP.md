@@ -45,6 +45,12 @@ plan lives in `docs/plans/bjorn-rust.md`.
 - An action can take the window and the keyboard (`interactive = true`), running
   in a pty like the editor does, for commands that ask their own questions
   rather than printing one line and leaving.
+- Wiki links: `[[Title]]`, `[[Title/Heading]]` and `[[Title|shown text]]` are
+  drawn as links and followed by a click or from the `L` list, which also
+  shows the notes linking in (a `bearcli search` for `[[Title` in Notes and
+  the Archive, at most 200 candidates per search, each hit's body checked, so
+  prefixes and mentions in code are dropped). A missing title offers to create the note; `backspace` / `alt+→`
+  walk back and forward.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog

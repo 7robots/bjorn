@@ -55,6 +55,22 @@ pub fn first_line(text: &str) -> String {
         .to_string()
 }
 
+/// Text from a note, safe to put in a single-line row or a toast: control
+/// characters (Unicode's Cc category, so C0 and C1 — `\r`, `\n`, `\u{1b}` and
+/// the rest) are dropped, and a tab becomes a space.
+///
+/// A note's title and body are whatever the user, or whatever wrote into Bear,
+/// put there; a stray carriage return or escape in a heading would otherwise
+/// be drawn straight into the terminal. Printing characters are left alone,
+/// zero-width ones included: a joiner is how an emoji or a script is spelled,
+/// not a control code, and the renderer measures it correctly.
+pub fn strip_control(text: &str) -> String {
+    text.chars()
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 /// bearcli's timestamp shape: `2026-09-08T13:33:55Z`.
 pub fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -63,6 +79,16 @@ pub fn now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_characters_never_reach_a_row() {
+        assert_eq!(strip_control("a\u{1b}[31mb\r\nc\td"), "a[31mbc d");
+        assert_eq!(strip_control("plain text"), "plain text");
+        assert_eq!(strip_control("résumé ☑"), "résumé ☑");
+        // A zero-width joiner is text, not a control code: it is what holds a
+        // family emoji together, and it stays.
+        assert_eq!(strip_control("👩\u{200d}🚀"), "👩\u{200d}🚀");
+    }
 
     #[test]
     fn tilde_expands_only_at_the_front() {

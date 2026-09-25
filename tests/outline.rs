@@ -322,3 +322,50 @@ async fn cursor_keys_in_the_filter_keep_the_highlight() {
         assert_eq!(outline_index(&h), before, "{key} moved the highlight");
     }
 }
+
+#[tokio::test]
+async fn a_heading_with_a_wiki_link_shows_the_link_text_in_the_outline_and_footer() {
+    let fake = Fake::new();
+    let filler: String = (1..=60).map(|i| format!("- filler {i}\n")).collect();
+    let content = format!(
+        "# Links Test\n\n## Plan for [[Garden Plan]]\nfirst\n\n{filler}\n\
+         ## See [[Reading Queue|the list]] and [[New\\/Modern DNS/ESXi]]\nsecond\n\n{filler}"
+    );
+    let mut h = reader_with(&fake, &content).await;
+    let tokens = |s: &str| s.contains(['\u{FDD0}', '\u{FDD1}']) || s.contains("[[");
+    assert_eq!(
+        texts(&h),
+        vec![
+            "Links Test",
+            "Plan for Garden Plan",
+            "See the list and New/Modern DNS › ESXi"
+        ]
+    );
+    // As the reader draws them.
+    let screen = h.text();
+    assert!(screen.contains("Plan for Garden Plan"), "{screen}");
+
+    h.press("o");
+    let outline = dialog(&h);
+    assert!(outline.contains("Plan for Garden Plan"), "{outline}");
+    assert!(
+        outline.contains("See the list and New/Modern DNS › ESXi"),
+        "{outline}"
+    );
+    assert!(!tokens(&outline), "{outline}");
+    h.press("escape");
+
+    let meta_row = |h: &Harness| {
+        let body = h.app.rects.reader_body;
+        h.row(body.y + body.height)
+    };
+    // The footer shortens a long section name to fit, so match its start.
+    h.press("}");
+    let footer = meta_row(&h);
+    assert!(footer.contains("§ Plan for Garden"), "{footer}");
+    assert!(!tokens(&footer), "{footer}");
+    h.press("}");
+    let footer = meta_row(&h);
+    assert!(footer.contains("§ See the list and"), "{footer}");
+    assert!(!tokens(&footer), "{footer}");
+}
