@@ -33,7 +33,9 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 bjorn capture "call Ana"   # add a line to today's daily note, no TUI (needs [daily])
 ```
 
-`git pull && ./install.sh` is the update path.
+`git pull && ./install.sh` is the update path. It also installs the man page:
+`man bjorn` is the full reference — every flag, key, config key and file — and
+its source is [docs/bjorn.1](docs/bjorn.1) if you would rather read it here.
 
 ## Keys
 
@@ -432,14 +434,18 @@ failed command never write. An action marked `interactive` instead takes the win
 keyboard in a pseudo-terminal until its command exits, for the ones that ask
 their own questions. Full reference: [docs/actions.md](docs/actions.md).
 
-A PDF is one of those commands. The HTML export carries a print stylesheet —
-A4, a light page whatever the theme is, the theme's own colors on the links
-and the list markers — so `weasyprint` or headless Chrome turns an exported
-note into a PDF that reads like Bear's own: [recipe](docs/actions.md#a-pdf).
-The page is the note as written, inline HTML included; a policy in the page
-stops it running in a browser or in Chrome, but WeasyPrint ignores that and
-fetches the files and URLs the note's HTML points at, so keep WeasyPrint to
-notes you wrote yourself.
+A PDF is built in: `x` then `p` writes one, and `format = "pdf"` hands one to
+an action. It reads like Bear's own — A4, a light page whatever the theme is,
+the theme's own colors on the links and the list markers. Bjorn draws no page
+itself; it prints the HTML rendering with the first converter it finds —
+WeasyPrint on `PATH`, then a Chromium browser (`chromium`/`google-chrome` on
+`PATH`, then Chrome, Chromium, Brave, Edge or Vivaldi in `/Applications` or
+`~/Applications`), headless, with a throwaway profile and no network. macOS
+ships neither. Before printing, the note's body is parsed and rebuilt from an
+allowlist, so a note's inline HTML cannot make the converter fetch a remote URL
+or bake a local file into the PDF. Piping `format = "html"` to `weasyprint` or
+Chrome yourself skips that filter; use `pdf`.
+Details: [A PDF](docs/actions.md#a-pdf).
 
 Publishing to a [Hugo](https://gohugo.io) site is an action too:
 [`contrib/hugo-publish`](contrib/hugo-publish) writes the note as a post
@@ -447,17 +453,6 @@ Publishing to a [Hugo](https://gohugo.io) site is an action too:
 wiki links and local links off the site, and never replaces a file it did
 not write. Bjorn itself stays free of Hugo code and network calls. Setup and
 what it guards: [Publish to Hugo](docs/actions.md#publish-to-hugo).
-
-A PDF is built in: `x` then `p` writes one, and `format = "pdf"` hands one to
-an action. Bjorn draws no page itself; it prints the HTML rendering with the
-first converter it finds — WeasyPrint on `PATH`, then a Chromium browser
-(`chromium`/`google-chrome` on `PATH`, then Chrome, Chromium, Brave, Edge or
-Vivaldi in `/Applications` or `~/Applications`), headless, with a throwaway
-profile and no network. macOS ships neither. Before printing, the note's body
-is parsed and rebuilt from an allowlist, so a note's inline HTML cannot make
-the converter fetch a remote URL or bake a local file into the PDF. Piping
-`format = "html"` to `weasyprint` or Chrome yourself skips that filter; use
-`pdf`. Details: [A PDF](docs/actions.md#a-pdf).
 
 ## Development
 

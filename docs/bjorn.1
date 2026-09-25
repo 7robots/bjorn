@@ -1,0 +1,1477 @@
+.TH BJORN 1 "2026-09-25" "bjorn 0.1.0" "General Commands Manual"
+.SH NAME
+bjorn \- terminal front end for the Bear note app
+.SH SYNOPSIS
+.B bjorn
+.RI [ options ]
+.br
+.B bjorn \-\-list\-themes
+.br
+.B bjorn
+.RB [ \-\-config
+.IR path ]
+.RB [ \-\-demo ]
+.B capture
+.RB [ \-\- ]
+.RI [ text ...]
+.br
+.B bjorn
+.RB [ \-\-config
+.IR path ]
+.RB [ \-\-demo ]
+.B today
+.SH DESCRIPTION
+.B bjorn
+is a terminal client for Bear (https://bear.app), written in Rust with
+ratatui. Every read and every write goes through
+.BR bearcli ,
+the command line tool that ships inside Bear.app, run as a subprocess; Bjorn
+never opens Bear's database and never makes a network call of its own. That is
+why it works with Bear open or closed, and why anything that has to reach the
+network \(em a model, an upload, a deploy \(em is an
+.I action
+you configure rather than something built into the binary.
+.PP
+The screen is three columns, like the app: smart views and a nested tag tree on
+the left, the notes list in the middle, the rendered note on the right.
+.B tab
+cycles them and
+.B c
+hides them one at a time. Editing is delegated to
+.BR $VISUAL ,
+then
+.BR $EDITOR ,
+then
+.BR vim ,
+which runs in a pseudo\-terminal drawn inside the reader pane so the other two
+columns stay live. Writes back are hash\-guarded: if the note changed in Bear
+while you were editing, nothing is written and your version is kept in a temp
+file.
+.PP
+Views are computed from one
+.B bearcli list
+snapshot, so the counts in the sidebar and the notes list always agree. A
+background poll (see
+.IR poll_seconds )
+runs two cheap probes together and reloads only when something changed. Every
+.B bearcli
+and
+.B remctl
+call has a 30 second timeout.
+.SH OPTIONS
+.TP
+.BI \-\-tag " TAG"
+Start scoped to this tag as the workspace, overriding
+.I workspace
+in the config file. A leading
+.B #
+is optional.
+.TP
+.BI \-\-config " PATH"
+Read this config file instead of
+.IR $XDG_CONFIG_HOME/bjorn/config.toml .
+A leading
+.B ~
+is expanded.
+This is also the file the action menu writes to.
+.TP
+.B \-\-demo
+Run against a built\-in fake
+.B bearcli
+seeded with sample notes, so nothing touches your library and Bear need not be
+installed. Reminders are forced on and backed by a fake
+.BR remctl ,
+and the preview cache gets its own file
+.RI ( previews\-demo.json )
+so the sample library never stands in for the real one.
+.TP
+.BI \-\-theme " NAME"
+Draw with this palette, overriding
+.I theme
+in the config file. A name typed here was typed just now, so an unknown one is
+an error that lists the names. An unknown name in the
+config file is not: it falls back to the default with a warning inside the app.
+.TP
+.B \-\-list\-themes
+Print the names
+.B \-\-theme
+accepts, one per line, and exit. This runs before the config file is read.
+.TP
+.B \-\-no\-mouse\-pixels
+Accepted and ignored. The Rust build never negotiates pixel mouse reporting;
+the mouse always stays in cell mode. The config key
+.I mouse_pixels
+is accepted and ignored in the same way.
+.TP
+.BR \-h ", " \-\-help
+Print the usage summary and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH COMMANDS
+Both commands work on today's daily note and need a
+.B [daily]
+table in the config (see
+.BR "DAILY NOTES AND TEMPLATES" ).
+Without one they print
+.I Daily notes are off \(em add a [daily] section to config.toml
+on standard error and exit 1, before reading standard input or calling
+.BR bearcli .
+.BR \-\-config ,
+.B \-\-demo
+and
+.B \-\-tag
+go before the command; after it, any word starting with
+.B \-
+is an error rather than text.
+.TP
+.B capture \fR[\fB\-\-\fR] [\fItext\fR ...]
+Add a line to today's daily note, making the note first if needed. The words
+are joined with spaces; with none, the text is read from standard input, up to
+1 MiB. The line is
+.I capture_format
+filled in, by default
+.BR "* 14:05 text" ,
+added at the end of the note or under
+.IR capture_section .
+Control characters other than tab and newline are dropped. A multi\-line
+capture stays one entry: blank lines are dropped and the lines after the first
+are indented past the bullet, so a pasted heading or rule stays text. Prints
+nothing on success. Write
+.B bjorn capture \-\- \(dq$text\(dq
+for text that might start with a dash.
+.TP
+.B today
+Print today's daily note as
+.IR id <TAB> title ,
+making it first if needed.
+.SH KEYS
+These are the bindings the in\-app help
+.RB ( ? )
+lists, in the order it groups them. Letters typed into a search box, a filter
+or a form go to that box, which is why the menus use
+.B ctrl
+for their commands.
+.SS Move
+.TP
+.B tab / ⇧tab
+cycle the panes
+.TP
+.B j k ↑ ↓
+move within a pane; in the reader they scroll
+.TP
+.B g / G
+first / last row
+.RB ( Home
+and
+.B End
+do the same;
+.B PageUp
+and
+.B PageDown
+page the reader)
+.TP
+.B enter
+open the highlighted note in the reader, at the first match while searching
+.TP
+.B 1 – 7
+Notes, Untagged, Todo, Today, Pinned, Archive, Trash
+.TP
+.B c
+cycle the columns: hide tags, then notes too, then show all three (or click
+▮▮▮ in the note header)
+.TP
+.B r
+refresh from Bear now
+.SS Search
+.TP
+.B /
+search with Bear syntax:
+.BR @todo ", " #tag ", " \(dqphrase\(dq ", " \-term .
+.B @
+and
+.B #
+complete as you type;
+.B tab
+or
+.B →
+accepts. A bare sub\-tag is searched as
+.B #*/name
+.TP
+.B esc
+clear the search and its highlights
+.TP
+.B ] / [
+next / previous match in the reader
+.SS Sections
+.TP
+.B o
+outline: the note's headings, indented by level, the current one highlighted
+.IP
+In the outline: type to filter ·
+.B "↑ ↓ tab ctrl+n/p"
+pick ·
+.B enter
+scrolls there ·
+.B esc
+closes
+.TP
+.B } / {
+next / previous heading in the reader
+.SS Notes
+.TP
+.B n
+new note (title, tags), then edit
+.TP
+.B N
+new note from a template in the templates directory
+.RI ( "[templates] dir" ,
+default
+.IR ~/.config/bjorn/templates ):
+pick one, then settle the title and tags as for
+.B n
+.TP
+.B D
+open today's daily note, making it from the daily template the first time.
+Off until the config has a
+.B [daily]
+table; without one,
+.B D
+shows how to turn it on and makes nothing
+.TP
+.B e
+edit in
+.BR $VISUAL " / " $EDITOR .
+Hash\-guarded: if the note changed in Bear meanwhile, nothing is written and
+your version is kept in a temp file
+.TP
+.B d
+move the note to the trash (asks first)
+.TP
+.B u
+restore from Trash or Archive
+.TP
+.B p
+toggle the global pin
+.TP
+.B b
+open the note in Bear.app
+.TP
+.B x
+export as Markdown
+.RB ( m ),
+HTML
+.RB ( h ),
+plain text
+.RB ( t ),
+RTF
+.RB ( r ),
+TextBundle
+.RB ( b )
+or PDF
+.RB ( p );
+.B ← →
+pick,
+.I export_format
+in the config sets the default; a PDF needs a converter (see
+.BR EXPORT )
+.SS Actions
+.TP
+.B !
+run the default action on the note, or open the menu if none is set
+.TP
+.B a
+the action menu: your
+.B [[actions]]
+under a search box, ★ on the default, the highlighted command shown in
+full
+.IP
+In the menu:
+.B enter
+runs ·
+.B + New action
+adds one ·
+.B ctrl+e
+edits ·
+.B ctrl+d
+deletes (asks first) ·
+.B esc
+closes
+.SS Links
+.TP
+.B L
+the note's
+.B [[wiki links]]
+and the notes linking to it, under a search box;
+.B enter
+follows. A missing note is offered for creation. Backlinks read at most 200
+candidates per search (Notes and Archive), and say so when the list may be
+incomplete
+.TP
+.B click
+a link in the reader (or a table) follows it;
+.B [[Title/Heading]]
+lands on the heading
+.TP
+.B backspace
+back to the note you followed a link from, list and scroll included (also
+.BR ctrl+o ,
+.BR alt+← ,
+.BR alt+b );
+edits the query while the search box is open
+.TP
+.B alt+→
+forward again (also
+.BR alt+f )
+.SS Tags and workspace
+.TP
+.B w
+make the highlighted tag the workspace; again on it to leave
+.TP
+.B W
+clear the workspace
+.TP
+.B f
+fold / unfold the highlighted tag's subtree
+.TP
+.B F
+fold every tag, or unfold them all when all are folded
+.SS Triage
+.TP
+.B t
+every open todo in the workspace, grouped by note
+.TP
+.B space
+mark the row
+.TP
+.B x
+tick the marked (or highlighted) todos in Bear
+.TP
+.B enter / b
+go to the note / open it in Bear at that section
+.TP
+.B / · r
+filter · reload
+.TP
+.B a
+add the marked todos to Apple Reminders (needs
+.B [reminders] enabled = true
+); rows show ⏰ once added and ✓ when completed there
+.TP
+.B esc / q
+close triage
+.SS Everywhere
+.TP
+.B ?
+open this help;
+.BR esc ", " q " or " ?
+closes it, and
+.BR j " " k " " ↑ " " ↓
+scroll it
+.TP
+.B q
+quit, after a confirm
+.SH VIEWS AND THE WORKSPACE
+The sidebar's seven smart views are
+.BR Notes ,
+.BR Untagged ,
+.BR Todo ,
+.BR Today ,
+.BR Pinned ,
+.B Archive
+and
+.BR Trash ,
+reachable with
+.B 1
+to
+.BR 7 .
+.B Pinned
+means any pin, global or inside a tag;
+.B Today
+means modified today, local time. They are computed from the same
+.B bearcli list
+snapshot the notes list is drawn from, so the counts always agree.
+.PP
+The
+.B workspace
+is a tag subtree that scopes the whole app: the tag tree shows only it, the
+smart views count only inside it, search results are filtered to it, todo
+triage reads only it, and new notes default to it.
+.B w
+on a tag makes it the workspace and
+.B w
+again on the same tag leaves;
+.B W
+clears it. It can also be set for a run with
+.B \-\-tag
+or permanently with
+.I workspace
+in the config file. When you follow a link to a note the workspace excludes,
+the workspace is cleared so the note can be shown, with a toast saying so.
+.SH SEARCH
+.B /
+opens the search box and the query goes to
+.B bearcli search
+unchanged, so Bear's whole syntax works and plain terms match body text, not
+just titles. While you type,
+.B @
+completes bearcli's operators
+.RB ( @todo ,
+.BR @title ,
+.BR @last7days ,
+.BR @date( \&...)
+and
+.B #
+completes your tags, the workspace's first, as ghost text that
+.B tab
+or
+.B →
+accepts. A one\-line cheat sheet sits under the box.
+.PP
+Bear matches
+.B #name
+against full tag paths only, so a bare sub\-tag
+.RB ( #Build
+for
+.BR #kybernetes/Build )
+is completed and searched as
+.BR #*/Build ,
+Bear's sub\-tag form.
+.PP
+.B enter
+runs the search and moves to the results; the box stays open with the query,
+dimmed, until you press
+.B /
+or click it to edit again. While a search is active the reader highlights the
+terms, including inside fenced code and table cells, the header counts the
+matching blocks,
+.B ]
+and
+.B [
+step through them, and
+.B enter
+on a note lands on its first match.
+.B esc
+clears the search and its highlights.
+.SH WIKI LINKS
+Bear's
+.B [[Note title]]
+links are drawn in the theme's link color, without the brackets; click one to
+follow it, in the text or in a table.
+.B [[Note title/Heading]]
+lands on that heading, and
+.B [[Note title|shown text]]
+shows the text after the bar. Bear escapes punctuation that belongs to the
+title with a backslash
+.RB ( \e/ ", " \e# ),
+so a
+.B \e
+before any ASCII punctuation is one, and
+.B [[/Heading]]
+points into the note itself. Some links carry a doubled escape
+.RB ( "[[Cloud Arch \e\e/ EA/Apr 19]]" ,
+for the note
+.IR "Cloud Arch / EA" );
+a link is read as written first and then with each doubled escape taken as one,
+and the first reading that names a note wins. Whatever is between the brackets
+is the title, markdown or not; brackets in a title work as long as they pair up
+.RB ( "[[[Draft] Plan]]" ),
+but a title holding
+.B ]]
+cannot be linked. Brackets inside code, inline or fenced, are left as written.
+.PP
+A link resolves to the note with that exact title, ignoring case; when several
+share it, an active note wins over an archived one, which wins over one in the
+trash, and then the newest. A title no note has offers to create the note and
+then opens it in the editor, as
+.B n
+does.
+.PP
+.B L
+lists the links in the note (the first 1,000) and, below them, the notes that
+link to it, under a search box;
+.B enter
+follows. Backlinks come from a
+.B bearcli search
+for the phrase
+.BR [[Title ,
+with the title's
+.B /
+and
+.B #
+escaped as Bear writes them, run in the background one search at a time. A
+title with a
+.B /
+or a
+.B #
+is also searched with the escape doubled, and one with a
+.B /
+with the slash bare, since links are written all three ways. Each phrase is
+searched in Notes and in the Archive separately. Bear
+matches a phrase as a prefix, so every candidate's body is parsed and only real
+links to this title are kept: not
+.BR "[[Title 2]]" ,
+not a mention inside code, nothing from the trash. At most 200 candidates are
+read per search, and the list says so when that cap is hit. A title too short
+or odd for a phrase (under three letters or digits before a
+.BR \(dq ", " \e " or " | )
+is searched as
+.B @wikilinks
+instead, which covers every note holding a
+.BR [[ .
+.PP
+Following a link records where you were.
+.B backspace
+(or
+.BR ctrl+o ,
+.BR alt+← ,
+.BR alt+b )
+goes back, list, workspace, search and scroll included;
+.B alt+→
+(or
+.BR alt+f )
+goes forward again. While the search box is open,
+.B backspace
+edits the query instead.
+.B enter
+in triage counts as a jump too.
+.SH TODO TRIAGE
+.B t
+opens a screen listing every open
+.B "- [ ]"
+item from the
+.B @todo
+notes in the workspace (all notes when none is set), grouped by note with the
+section each item sits under.
+.B space
+marks rows,
+.B x
+ticks the marked (or highlighted) items in Bear through
+.BR "bearcli edit" ,
+.B enter
+jumps to the note,
+.B b
+opens it in Bear.app at that section,
+.B /
+filters,
+.B r
+reloads, and
+.B esc
+or
+.B q
+closes.
+.PP
+With
+.B [reminders] enabled = true
+and
+.B remctl
+(https://github.com/7robots/remctl) on
+.BR $PATH ,
+.B a
+also pushes the marked items to Apple Reminders, into
+.I list
+with the due date
+.IR due .
+Each reminder's notes carry the note's
+.B bear://
+link and a
+.B "bear\-todo: <key>"
+line, the same scheme remtui uses, so reminders it created are recognized. On
+every load they are read back and rows show ⏰ for an open reminder
+or ✓ for one completed in Reminders, ready to
+.B x
+in Bear. Nothing is written into Bear when a reminder is added.
+.SH DAILY NOTES AND TEMPLATES
+Bear has no daily notes of its own; its Today view is notes modified today.
+Bjorn makes them only when the config has a
+.B [daily]
+table, and an empty one turns them on with the defaults.
+.PP
+.B D
+opens today's note, making it the first time. By default it is titled with the
+date as a second\-level heading and tagged with a dated nested tag:
+.PP
+.EX
+## September 19, 2026 (Saturday)
+#log/2026/09/19
+* People:
+* Topic:
+
+\-\-\-
+.EE
+.PP
+The note is found by its title: Bjorn selects it when the snapshot already has
+it, and otherwise runs
+.BR "bearcli create \-\-if\-not\-exists" ,
+which returns the existing note or makes one. Asking twice never makes a second
+note; two processes asking in the same instant could, and the duplicate\-title
+warning then says so. A trashed or archived note with today's title is never
+reused. Renaming the note's heading in Bear makes it no longer today's note,
+and the next
+.B D
+or capture makes another.
+.PP
+Because the title is the only link,
+.I title
+must name exactly one day: a year with a month and day
+.RB ( %Y\-%m\-%d ),
+a year and day of the year
+.RB ( %Y\-%j ),
+or an ISO week date
+.RB ( %G\-W%V\-%u ),
+and no time of day. A title that repeats
+.RB ( %A ", " "%B %\-d" )
+would reuse last week's or last year's note, so Bjorn refuses it at start. The
+check runs only while
+.B [daily]
+is on.
+.PP
+A capture belongs to the day it runs: one at 00:05 goes to the new day's note.
+In a git hook,
+.B capture
+with no words reads git's own standard input, so pass the text as an argument
+or add
+.BR </dev/null .
+.PP
+.B N
+makes a note from a template: a Markdown file in the templates directory. When
+a template starts with a heading (after any YAML front matter, which stays on
+top), its text is the proposed title. These placeholders are filled in, and
+anything else in braces stays as written:
+.TP
+.B {{date}} {{time}}
+today's date and the time now
+.TP
+.B {{date:\fIformat\fB}}
+today formatted with any strftime format, e.g.
+.B {{date:%A}}
+.TP
+.B {{title}} {{tag}} {{workspace}}
+the note's title, its tags as Bear writes them, and the workspace
+.PP
+Files over 256 KiB or not UTF\-8 are skipped. A
+.I daily.md
+in the directory replaces the built\-in daily layout and is left out of
+.BR N 's
+list;
+.B {{tag}}
+in it is the dated tag. Meeting, one\-on\-one, decision and daily examples ship
+in
+.IR config/templates/ .
+.SH EXPORT
+.B x
+writes the note under the cursor to a file you pick, in the format chosen in
+the picker; an action's
+.I format
+renders the note the same way before its command sees it. Locked notes are
+refused.
+.PP
+The picker offers Markdown
+.RB ( m ),
+HTML
+.RB ( h ),
+plain text
+.RB ( t ),
+RTF
+.RB ( r ),
+TextBundle
+.RB ( b )
+and PDF
+.RB ( p );
+.B \(<- \(->
+move between them,
+.I export_format
+preselects one and
+.I export_dir
+is the folder proposed. RTF is written by macOS
+.BR textutil (1)
+from the HTML rendering; a note with images becomes an
+.I .rtfd
+package so the pictures travel with it.
+.SS HTML
+The page is self\-contained: the stylesheet is inline and every attachment is
+embedded as a
+.B data:
+URI. Links and list markers wear the theme's link and bullet colors, mixed
+toward the page until they read at 4.5:1; the rest of the page stays neutral,
+light or dark as the browser asks, and always light when printed, on A4.
+Bear's own marks come across: a colored highlight, a
+.B "> [!NOTE]"
+callout as a panel, a
+.B [[note]]
+link as its target in the accent color, a ticked task grayed out.
+.B $math$
+and the icon Bear draws inside a callout are not drawn.
+.PP
+The note's own inline HTML reaches the page as written, so the page carries a
+Content\-Security\-Policy that refuses to run it in a browser: no scripts,
+nothing fetched from anywhere, images only from
+.B data:
+URIs, styles only inline, and no
+.B <base>
+or form submission. A converter that ignores the policy (WeasyPrint does) still
+fetches what the note's HTML points at, which is why the built\-in PDF filters
+the note first.
+.SS PDF
+.B p
+in the picker, or
+.B "format = \(dqpdf\(dq"
+on an action, prints the note to a PDF.
+.B bearcli
+does not export and nothing in Bjorn draws a page, so the HTML rendering, on A4
+and always on a white page, is printed by a converter already on the machine.
+Bjorn uses the first of these it finds:
+.IP 1. 4
+.BR weasyprint (1)
+on
+.BR PATH .
+It runs no scripts and needs no browser.
+.IP 2. 4
+A Chromium browser, run headless:
+.BR chromium ,
+.B google\-chrome
+or
+.B google\-chrome\-stable
+on
+.BR PATH ,
+then Google Chrome, Chromium, Brave Browser, Microsoft Edge or Vivaldi in
+.I /Applications
+or
+.IR ~/Applications .
+It gets a throwaway profile, so the print never sees your cookies and does not
+fail because the browser is already open, and no network: no hostname
+resolves and anything else meets a dead proxy.
+.PP
+macOS ships neither; without one the export says so and writes nothing. The
+converter gets 60 seconds before it is killed, and an action's own
+.I timeout
+starts only once the PDF is written.
+.PP
+The built\-in PDF filters the note's HTML; piping a
+.B "format = \(dqhtml\(dq"
+action to a converter yourself does not. A note's inline HTML reaches the page
+as written, and a converter fetches what the page points at: a remote image
+tells somebody the note was printed, and a local one bakes a file off the disk
+into the PDF. So before printing, Bjorn parses the note's body and rebuilds it
+from an allowlist: no scripts, styles, frames, objects or SVG, no relative or
+.B bear:
+links, and an image only when it is a PNG, JPEG, GIF, WebP, BMP or TIFF already
+embedded as a
+.B data:
+URI, which every attachment is by then. An attachment in another format (SVG,
+HEIC, a PDF) prints as an empty frame.
+.SH ACTIONS
+An action is a shell command Bjorn runs against the note under the cursor.
+Export writes the note to a file you chose; an action hands that same file to a
+command of yours and reports what it said. What the command prints can also go
+back into Bear.
+.B !
+runs the default action;
+.B a
+opens the menu. A query in the menu matches a name by its letters in order, so
+.B pts3
+finds
+.IR "Publish to S3" ,
+and a command by plain substring, so
+.B curl
+finds an action by what it runs. Locked notes are refused, as they are for
+export.
+.PP
+Integrations live here rather than in the binary: a model through
+.BR llm ,
+.B claude
+or
+.BR curl ,
+and publishing to a Hugo site through
+.I contrib/hugo\-publish
+(see
+.BR EXAMPLES ).
+.SS Config keys
+Actions live in the config file as an array of tables,
+.BR [[actions]] ,
+in the order they are written. An entry without a
+.I command
+is skipped rather than raised, so a half\-written action never stops the app.
+.TP
+.I name
+The name the menu shows and the toast reports. Default: the command.
+.TP
+.I command
+Required. Run through
+.BR "sh \-c" ,
+so pipes,
+.B &&
+and redirection all work.
+.TP
+.I format
+How the note is rendered first:
+.BR md ", " html ", " txt ", " rtf ", " textbundle ", " pdf .
+Any other value stops the action before it runs, so a typo is never handed a
+Markdown file instead.
+.B pdf
+is printed and filtered as described under
+.BR EXPORT ;
+.B html
+is the unfiltered page.
+Default:
+.BR md .
+.TP
+.I confirm
+Ask before running. Worth setting on anything that publishes, deletes or costs
+money. Default:
+.BR false .
+.TP
+.I prompt
+Ask for one line of text first and pass it as
+.BR $BJORN_ACTION_INPUT ;
+the value is the prompt's title. A blank or non\-string one is no prompt at all.
+Default: none.
+.TP
+.I interactive
+Give the command the window and the keyboard in a pseudo\-terminal instead of
+capturing its output. Default:
+.BR false .
+.TP
+.I timeout
+Seconds before a captured command is killed and reported. Not applied to an
+.I interactive
+action. Default:
+.BR 300 .
+.TP
+.I output
+Where stdout goes:
+.B toast
+(its first line),
+.B append
+(to the end of the note, or of
+.IR section ),
+.B new\-note
+or
+.B replace
+(the note's whole text). Any other value stops the action before it runs, so a
+typo neither writes nor runs. Default:
+.BR toast .
+.TP
+.I section
+With
+.BR "output = \(dqappend\(dq" :
+the heading to add under, written as it is in the note
+.RB ( \(dq##\ Summary\(dq ).
+Blank or absent appends to the end of the note. Set on any other
+.IR output ,
+it stops the action from running. Default: none.
+.TP
+.I default
+The action
+.B !
+runs. With exactly one action configured, that one is the default whether or
+not it says so; setting a new one flips the older entry's
+.BR "default = true" .
+Default:
+.BR false .
+.SS What the command gets
+The note is rendered exactly as export renders it and written to a temp
+directory, which is also the command's working directory. The file is named
+after the note
+.RI ( "Sprint Planning.md" )
+and is deleted as soon as the command ends.
+.TP
+.B stdin
+The note's text in the chosen format. A TextBundle is a folder, so stdin gets
+its
+.IR text.md ,
+and
+.B pdf
+puts the PDF's own bytes there, which a command that expects text should not
+read.
+An
+.I interactive
+action is the exception: its stdin is the terminal, so it reads the note from
+.BR \(dq$BJORN_NOTE_FILE\(dq .
+.TP
+.B $BJORN_NOTE_FILE
+The full path to that file. Quote it; titles have spaces.
+.TP
+.B $BJORN_ACTION_INPUT
+What
+.I prompt
+collected; empty when there is no prompt, and empty when the prompt was
+answered with nothing.
+.TP
+.B $BJORN_NOTE_TITLE
+The note's title.
+.TP
+.B $BJORN_NOTE_ID
+The note's Bear id.
+.TP
+.B $BJORN_NOTE_TAGS
+The note's tags, comma\-separated.
+.TP
+.B $BJORN_NOTE_CREATED
+Creation time, RFC 3339.
+.TP
+.B $BJORN_NOTE_MODIFIED
+Modification time, RFC 3339.
+.TP
+.B $BJORN_NOTE_PINNED
+.B 0
+or
+.BR 1 .
+.TP
+.B $BJORN_NOTE_FORMAT
+The
+.I format
+the note was rendered in.
+.TP
+.B $BJORN_ACTION
+The action's name.
+.PP
+The command inherits Bjorn's own environment too, so
+.BR $PATH ,
+.B $AWS_PROFILE
+and anything else your shell exported when you launched Bjorn is there. It does
+not read your
+.IR ~/.zshrc :
+it is
+.BR "sh \-c" ,
+not a login shell. If an action needs a shell function or an alias, put it in a
+script and call the script. The variables reach the command through its
+environment, never spliced into the command text, so a
+.B ;
+or a
+.B $(\&...)
+inside one is inert \(em unless you leave it unquoted, or hand it to something
+that evaluates its input
+.RB ( eval ,
+.BR "sh \-c \(dq$VAR\(dq" ,
+.BR "$(( VAR ))" ).
+.SS Output modes
+By default the command's output is a toast: its first line, and the rest is
+dropped
+.RB ( Done.
+when it printed nothing). Exit status 0 is success; anything else is an error
+toast with the exit code and the first line of stderr.
+.I output
+sends all of it back into Bear instead, through the same
+.B bearcli
+every other write uses.
+.B append
+adds it to the end of the note, or of
+.IR section ;
+a section the note does not have is an error and nothing is written.
+.B new\-note
+makes a note of the output, titled from its first line (after any YAML front
+matter) and tagged the way
+.B n
+tags one.
+.B replace
+writes the output over the note's whole text: it always asks first, whether or
+not the action says
+.BR "confirm = true" ,
+it is hash\-guarded the way the editor is, and it needs
+.BR "format = \(dqmd\(dq" .
+Bear cannot undo it, so the text the note had is saved to a temp file first and
+the toast says where.
+.PP
+Output goes to Bear as it was printed, without the blank lines around it, with
+.B \er\en
+turned into
+.B \en
+and control characters other than tab and newline taken out.
+.SS Interactive actions
+.B "interactive = true"
+gives the command the window and the keyboard in a pseudo\-terminal, titled
+with the action's name, until it exits \(em the same machinery the editor uses.
+It gets the same note and environment a captured action gets, with two
+differences: stdin belongs to the terminal rather than to the note, and
+.I timeout
+does not apply, since the command is waiting on you. If Bjorn exits first, the
+command is killed. One interactive action runs at a time. A captured action, by
+contrast, runs in a process group of its own, away from the terminal, so a
+command that tries to prompt there (an ssh passphrase, a login) gets no answer
+and waits out its timeout; give those
+.BR "interactive = true" .
+.SS What stops a write
+.TP
+A non\-zero exit, a timeout or a failure to start.
+The toast reports it and says nothing was written.
+.TP
+Empty output.
+A command that printed nothing, or only blank lines, never makes an empty note
+or wipes one.
+.TP
+More than 1 MB.
+Refused rather than cut short; the first megabyte is kept in a temp file.
+.TP
+Output that is not UTF\-8 text.
+Kept in a temp file as it came.
+.TP
+A note that went to the trash while the command ran.
+Checked just before the write; the output is kept.
+.TP
+An entry that cannot work.
+A
+.I format
+or an
+.I output
+value Bjorn does not know, an
+.I interactive
+action with an
+.IR output ,
+.B replace
+with a format other than
+.BR md ,
+a
+.I section
+on anything but
+.BR append .
+The action does not run at all and a toast says why, and the add and edit form
+will not save it.
+.PP
+When Bear refuses a write, the output is kept in a temp file and the toast says
+where
+.RI ( .../bjorn\-output\-XXXX/Summarize.md ),
+so an answer that took a minute and cost money does not have to be asked for
+again. The folder is readable only by you, and it lives under
+.BR $TMPDIR .
+.PP
+An LLM command reads the note, and a note can hold text written to steer it.
+Run such commands with their tools turned off, so the worst a steered answer
+can do is be wrong.
+.SH THEMES
+The palette comes from
+.I theme
+in the config file, or
+.B \-\-theme
+on the command line;
+.B \-\-list\-themes
+prints the names and
+.B ?
+inside the app lists them and marks the one in use. Three are hand\-tuned:
+.B red\-graphite\-dark
+(the default),
+.B red\-graphite
+and
+.BR textual\-dark .
+Every other theme Bear ships is built in too, under its Bear name in lower case
+with hyphens for spaces \(em
+.BR academia ", " atom ", " ayu ", " dracula ", " gruvbox ", " nord ,
+.BR rose\-pine ", " solarized\-dark ", " tokyo\-night
+and the rest. Their colors are generated from Bear's own theme files by
+.I tools/bear_theme.py
+and committed to the repository; no build step or code path reads Bear.app, so
+a Bear update cannot break a shipped Bjorn.
+.SH CONFIGURATION
+.IR "${XDG_CONFIG_HOME:\-~/.config}/bjorn/config.toml" ,
+or the file named with
+.BR \-\-config .
+Every key is optional and the values below are the defaults.
+.PP
+The file is edited as
+.IR text ,
+never rewritten: adding, editing or deleting an action from the menu splices
+the lines it has to change, so your comments, blank lines and commented\-out
+templates stay exactly as they were. Every such write parses the file before
+and after and reads the entries back through Bjorn's own parser, and refuses
+unless the result is exactly what was intended.
+.SS Top level
+.TP
+.I editor
+The editor command. Default: empty, which means
+.BR $VISUAL ,
+then
+.BR $EDITOR ,
+then
+.BR vim .
+.TP
+.I export_dir
+Where
+.B x
+proposes to write. Default:
+.IR ~/Downloads .
+.TP
+.I export_format
+Preselected in the export picker:
+.BR md ", " html ", " txt ", " rtf ", " textbundle ", " pdf .
+Default:
+.BR md .
+.TP
+.I poll_seconds
+Seconds between background refresh probes;
+.B 0
+disables the poll. Default:
+.BR 5 .
+.TP
+.I workspace
+Start scoped to this tag. Default: empty.
+.TP
+.I bearcli
+Path to
+.BR bearcli .
+Default: empty, which searches
+.B $PATH
+and then inside Bear.app.
+.TP
+.I icon_style
+.BR auto ", " nerd ", " emoji ", " lucide ", " none .
+Default:
+.BR auto ,
+which picks Nerd Font glyphs under Ghostty or WezTerm or when a Nerd Font is
+installed, and emoji otherwise.
+.TP
+.I theme
+The palette name. Default:
+.BR red\-graphite\-dark .
+An unknown name falls back to the default with a warning.
+.TP
+.I mouse_pixels
+Accepted and ignored; the mouse always stays in cell mode. Default:
+.BR true .
+.TP
+.B [icons]
+A table mapping a top\-level tag to a Lucide icon name or
+.BR emoji:<glyph> .
+Default: empty, which uses the built\-in table in
+.IR src/icons.rs .
+.SS [reminders]
+.TP
+.I enabled
+Let triage push todos to Apple Reminders. Default:
+.BR false .
+.TP
+.I list
+The target list, for example
+.BR Bear .
+Default: empty, which is remctl's own default.
+.TP
+.I due
+The due date for new reminders;
+.B \(dq\(dq
+for none. Default:
+.BR today .
+.TP
+.I remctl
+Path to
+.BR remctl .
+Default: empty, which searches
+.BR $PATH .
+.SS [daily]
+Present, even empty, turns daily notes on; absent, they are off. See
+.BR "DAILY NOTES AND TEMPLATES" .
+.TP
+.I title
+strftime format of the note's title, which is how the note is found; it must
+name one day. Default:
+.BR "%B %\-d, %Y (%A)" .
+.TP
+.I tag
+strftime format of the dated tag;
+.B \(dq\(dq
+for none. Default:
+.BR log/%Y/%m/%d .
+.TP
+.I template
+The daily template: a name inside the templates directory, or an absolute or
+.B ~/
+path. Default:
+.BR daily ,
+and the built\-in layout when that file does not exist.
+.TP
+.I capture_section
+A heading such as
+.B \(dq## Inbox\(dq
+that captures go under, matched ignoring case and made at the end of the note
+when missing. Default: empty, the end of the note.
+.TP
+.I capture_format
+The line a capture adds;
+.BR {{time}} ,
+.BR {{text}} ,
+.B {{date}}
+and
+.B {{workspace}}
+are filled in. Default:
+.BR "* {{time}} {{text}}" .
+.SS [templates]
+.TP
+.I dir
+The templates directory
+.B N
+reads. Default:
+.IR ~/.config/bjorn/templates .
+.SS [[actions]]
+An array of tables; see
+.B ACTIONS
+above for
+.IR name ,
+.IR command ,
+.IR format ,
+.IR confirm ,
+.IR prompt ,
+.IR interactive ,
+.IR timeout ,
+.IR output ,
+.I section
+and
+.IR default .
+.SH ENVIRONMENT
+.TP
+.B $VISUAL
+The editor to run for
+.BR e ,
+used when
+.I editor
+is not set in the config file.
+.TP
+.B $EDITOR
+The fallback when
+.I editor
+and
+.B $VISUAL
+are both unset. With none of the three,
+.B vim
+is used.
+.TP
+.B $BJORN_BEARCLI
+The
+.B bearcli
+to run. It overrides the
+.I bearcli
+config key, which is otherwise the first thing tried; then
+.BR $PATH ,
+then inside Bear.app.
+.TP
+.B $BJORN_REMCTL
+The
+.B remctl
+to run, overriding
+.IR "[reminders] remctl" .
+.TP
+.B $XDG_CONFIG_HOME
+The base for the config directory; without it,
+.IR ~/.config .
+.TP
+.B $XDG_CACHE_HOME
+The base for the cache directory; without it,
+.IR ~/.cache .
+.TP
+.B $XDG_DATA_HOME
+Used by
+.I install.sh
+for the binaries and the man page; without it,
+.IR ~/.local/share .
+.TP
+.B $HOME
+Resolves
+.B ~
+in the config file and in every default path.
+.TP
+.B $PATH
+Searched for
+.BR bearcli ,
+.B remctl
+and an editor command that is not an absolute path. It is also inherited by
+every action.
+.TP
+.B $TMPDIR
+Where the rendered note an action gets, an unwritten action output and an
+editor's rescued text are kept.
+.TP
+.B $TERM_PROGRAM
+Read once at start\-up to decide whether
+.B "icon_style = \(dqauto\(dq"
+draws Nerd Font glyphs.
+.TP
+.B $BJORN_FAKE_BEAR_STATE
+.TQ
+.B $BJORN_FAKE_REMCTL_STATE
+Read by the bundled fakes that
+.B \-\-demo
+and the test suite run. They have no effect on a real run.
+.SH FILES
+.TP
+.I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/config.toml
+The config file. Edited as text, so comments survive.
+.TP
+.I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/templates/
+Note templates for
+.BR N ,
+and
+.I daily.md
+for
+.BR D ,
+unless
+.I [templates] dir
+names another directory.
+.TP
+.I ${XDG_CACHE_HOME:\-~/.cache}/bjorn/previews.json
+The notes list's body previews, keyed by note id and modification stamp.
+Derived state only: deleting it costs one slow start.
+.TP
+.I ${XDG_CACHE_HOME:\-~/.cache}/bjorn/previews\-demo.json
+The same, for
+.B \-\-demo
+runs, so the sample library never stands in for the real one.
+.TP
+.I ${XDG_DATA_HOME:\-~/.local/share}/bjorn/bin/
+Where
+.I install.sh
+puts the built binaries;
+.I ~/bin/bjorn
+is a symlink to the one here.
+.TP
+.I ${XDG_DATA_HOME:\-~/.local/share}/man/man1/bjorn.1
+Where
+.I install.sh
+puts this page.
+.SH EXAMPLES
+Start scoped to a tag, so the tag tree, the counts, the searches and new notes
+all stay inside it:
+.PP
+.EX
+bjorn \-\-tag work
+.EE
+.PP
+Try it without Bear, against the built\-in sample library:
+.PP
+.EX
+bjorn \-\-demo
+.EE
+.PP
+Send the note through an LLM CLI and append the answer under its own
+heading. Give the command whatever option your CLI has for running with no
+tools, since the note's text is the prompt:
+.PP
+.EX
+[[actions]]
+name = "Summarize"
+command = 'llm "Summarize this note in five bullet points."'
+output = "append"
+section = "## Summary"
+.EE
+.PP
+Make a note out of a GitHub issue; the prompt asks which one, and the
+command's first line becomes the note's title:
+.PP
+.EX
+[[actions]]
+name = "Issue to note"
+command = '''gh issue view "$BJORN_ACTION_INPUT" \-\-json title,body \e
+  \-\-jq '"# \e(.title)\en\en\e(.body)"' '''
+prompt = "Issue number"
+output = "new\-note"
+.EE
+.PP
+Publish a note to a Hugo site. Bjorn has no Hugo code of its own;
+.I contrib/hugo\-publish
+in the source tree is a script run as an action, which writes the note into the
+site on your disk as a post and stops. A draft unless the entry says
+.BR \-\-live ;
+see
+.I docs/actions.md
+for its flags and what it refuses:
+.PP
+.EX
+[[actions]]
+name = "Hugo: save draft"
+command = 'hugo\-publish \-\-site ~/sites/blog \-\-tag\-prefix blog/ \-\-bundle'
+format = "textbundle"
+
+[[actions]]
+name = "Hugo: publish live"
+command = 'hugo\-publish \-\-site ~/sites/blog \-\-tag\-prefix blog/ \-\-bundle \-\-live'
+format = "textbundle"
+confirm = true
+.EE
+.PP
+Turn on daily notes and capture from the shell:
+.PP
+.EX
+# ~/.config/bjorn/config.toml
+[daily]
+capture_section = "## Inbox"
+.EE
+.PP
+.EX
+bjorn capture "call Ana about the budget"
+pbpaste | bjorn capture
+bjorn capture \-\- "$text" </dev/null   # in a git hook
+bjorn today
+.EE
+.PP
+Choose a palette for one run, or for good:
+.PP
+.EX
+bjorn \-\-list\-themes
+bjorn \-\-theme nord
+.EE
+.PP
+.EX
+# ~/.config/bjorn/config.toml
+theme = "tokyo\-night"
+.EE
+.SH EXIT STATUS
+.TP
+.B 0
+Success. The interactive app exits 0 when you quit it, and
+.B \-\-list\-themes
+when it has printed the names.
+.TP
+.B 1
+An error, with the reason on standard error; for example
+.B \-\-theme
+named a theme that does not exist, the config file does not parse, or the
+terminal could not be put into raw mode.
+For
+.B capture
+and
+.BR today ,
+also: daily notes are off, the text is blank or over 1 MiB, or
+.B bearcli
+failed.
+.TP
+.B 2
+The command line itself was wrong \(em an unknown flag or a missing argument.
+.PP
+An action's own exit status is reported in a toast and never becomes Bjorn's.
+.SH SEE ALSO
+.BR bearcli (1),
+.BR remctl (1),
+.BR textutil (1),
+.BR weasyprint (1)
+.PP
+Bjorn: https://github.com/7robots/bjorn
+.br
+Bear: https://bear.app
+.br
+remctl: https://github.com/7robots/remctl
+.SH LIMITATIONS
+.IP \(bu 2
+.B macOS only, and Bear must be installed.
+Everything goes through
+.BR bearcli ,
+which ships inside Bear.app, and the editor, the pty, Apple Reminders and the
+export writers are all built against macOS.
+.IP \(bu 2
+.B The binary makes no network calls.
+There is no HTTP client in it. Anything that has to reach the network \(em a
+model, an upload, a deploy, a commit \(em is an action you configure, running
+with your credentials and your environment. Bjorn does not sandbox an action
+and does not parse it.
+.IP \(bu 2
+.B Backlinks are capped.
+.B L
+reads at most 200 candidate notes per search and lists the first 1,000 links in
+the note;
+when the cap is hit the list says it may be incomplete.
+.IP \(bu 2
+.B Change detection is a poll.
+There is no push from Bear, so a change made in Bear appears within
+.I poll_seconds
+rather than at once.
+.B r
+forces it.
+.IP \(bu 2
+.B Some things bearcli has no command for.
+Permanent delete from the trash, renaming or deleting a tag, archiving from the
+TUI, and saving attachments are all missing for that reason.
