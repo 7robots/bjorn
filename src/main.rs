@@ -25,7 +25,7 @@ struct Cli {
     /// start scoped to this tag as the workspace (overrides config)
     #[arg(long, value_name = "TAG")]
     tag: Option<String>,
-    /// config file to read instead of the default
+    /// config file to read instead of the default; `.theme` files are then read from `themes/` beside it
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
     /// run against a built-in fake bearcli with sample notes
@@ -74,9 +74,20 @@ impl Drop for TerminalGuard {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Before anything looks past the built-in themes: `--config` brings the
+    // themes directory beside it, for `--list-themes` as much as for the app.
+    bjorn::ui::theme::use_config(cli.config.as_deref());
     if cli.list_themes {
         for name in bjorn::ui::theme::names() {
             println!("{name}");
+        }
+        // On stderr, so the names on stdout stay a clean list.
+        for skipped in bjorn::ui::theme::skipped() {
+            eprintln!(
+                "bjorn: skipped {}: {}",
+                skipped.path.display(),
+                skipped.problem
+            );
         }
         return Ok(());
     }
@@ -87,6 +98,11 @@ async fn main() -> anyhow::Result<()> {
     // unknown name there falls back to the default with a warning in the app.
     if let Some(theme) = cli.theme.as_deref() {
         if bjorn::ui::theme::lookup(theme).is_none() {
+            // A file by that name that did not load: say why, rather than
+            // suggest adding the file that is already there.
+            if let Some(why) = bjorn::ui::theme::why_not(theme) {
+                anyhow::bail!("theme {theme:?}: {why}");
+            }
             anyhow::bail!(
                 "unknown theme {:?}; try one of: {} (or add a .theme file to {})",
                 theme,

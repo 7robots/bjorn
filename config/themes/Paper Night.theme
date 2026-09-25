@@ -1,0 +1,12 @@
+{
+  "meta": { "base theme": "Paper" },
+  "base": {
+    "background color": "#22201C",
+    "background secondary color": "#2C2924",
+    "background tertiary color": "#3A362F",
+    "text color": "#E4DDCF",
+    "text secondary color": "#A39A8A",
+    "accent color": "#E0A458",
+    "stroke color": "#3A362F"
+  }
+}

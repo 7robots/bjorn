@@ -181,18 +181,23 @@ than stopping the app. An unknown `--theme` on the command line is an error.
 #### Your own themes
 
 Bjorn also reads Bear's `.theme` format from `~/.config/bjorn/themes/` (or
-`$XDG_CONFIG_HOME/bjorn/themes/`). Drop a file there and name it with
-`--theme` or `theme =`: `My Nord.theme` is `my-nord`. The file is JSON with
-`base`, `sidebar`, `notes` and `editor` sections; a value may be a
-`$section.key` reference, and `meta."base theme"` names a theme in the same
-directory to inherit from. Only `base.background color`, `base.text color` and
-`base.accent color` are required.
+`$XDG_CONFIG_HOME/bjorn/themes/`; with `--config`, from `themes/` beside that
+file). Drop a file there and name it with `--theme` or `theme =`:
+`My Nord.theme` is `my-nord`. Symlinks are followed, so a dotfile manager can
+link files into place. The file is JSON with `base`, `sidebar`, `notes` and
+`editor` sections; a value may be a `$section.key` reference, and
+`meta."base theme"` names a theme to inherit from, looked up in the same
+directory first and then among the built-in themes. Only
+`base.background color`, `base.text color` and `base.accent color` are
+required. `--list-themes` reports on stderr any file it skipped and why, and
+`--theme` naming a file that did not load says what is wrong with it.
 
-[`config/themes/`](config/themes) holds every theme Bear ships (Shiny Frog's
-files, listed with their hashes in [its README](config/themes/README.md)), as a
-starting point: copy one in, rename it (a built-in name always wins over a file) and
-edit. They are the same files `palettes.rs` is generated from, and a test
-checks that each one draws exactly like its built-in.
+Bear's own theme files are Shiny Frog's and are not in this repository, but
+you can copy any of them out of Bear.app as a starting point; see
+[`config/themes/`](config/themes/README.md) for the path, a manifest of their
+hashes, and a few themes written for Bjorn. Give the copy a new name: a
+built-in name always wins over a file.
+
 [`config/config.toml.example`](config/config.toml.example) is a commented
 config file with every key at its default.
 
@@ -284,3 +289,7 @@ The plan and its status live in `docs/plans/bjorn-rust.md`; deferred work in
 
 Bjorn exists because of [Shiny Frog](https://shinyfrog.net) and Bear, and
 `bearcli` is what makes a terminal client possible at all. Thank you.
+
+Most of the built-in themes are color palettes derived from
+Bear's theme designs, which are Shiny Frog's. Their theme files are not
+included in this repository.

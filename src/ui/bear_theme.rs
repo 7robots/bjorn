@@ -7,31 +7,116 @@
 //! values are laid over that theme's before any reference is resolved, so a
 //! base theme's `$base.accent color` picks up the child's accent.
 //!
+//! A base theme is looked for in the same directory first, then among the
+//! built-in themes (`built_in_document`), so a file copied out of Bear.app
+//! works on its own even though Bear's own files are not shipped here.
+//!
 //! Each file becomes one `Theme`, named after the file (`Rosé Pine.theme` is
 //! `rose-pine`). The mapping onto Bjorn's palette is the one
 //! `tools/bear_theme.py` uses to generate `palettes.rs`, so a theme file
 //! dropped in the directory draws exactly as it would built in; the test
-//! `repo_theme_files_match_the_built_in_palettes` holds the two together.
+//! `bear_theme_files_match_the_built_in_palettes` holds the two together
+//! wherever Bear.app is installed.
 //!
-//! Loading only reads: files are opened with `read(true)` alone, only regular
-//! `*.theme` files at the top of the directory are touched (no symlinks, no
-//! recursion), and each is capped at `MAX_BYTES`. A broken file is skipped.
+//! Loading only reads: files are opened with `read(true)` alone, only
+//! `*.theme` entries at the top of the directory are touched (no recursion),
+//! and each is capped at `MAX_BYTES`. A symlink is followed, since dotfile
+//! managers such as stow and chezmoi link files into place, but what it
+//! points at must be a regular file within the cap too. A file that does not
+//! load is set aside with the reason (`Skipped`), for `--list-themes` and
+//! `--theme` to report.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ratatui::style::Color;
 use serde_json::{Map, Value};
 
+use crate::ui::palettes;
 use crate::ui::theme::Theme;
 
-/// References and `base theme` chains deeper than this are treated as broken.
+/// References and `base theme` chains deeper than this are treated as loops.
 const MAX_DEPTH: usize = 16;
 
 /// Bear's theme files are about 5 KB; anything past this is not one.
 const MAX_BYTES: u64 = 256 * 1024;
+
+/// Why a theme file did not load, worded to follow its path on one line.
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+pub enum Problem {
+    #[error("cannot read it: {0}")]
+    Unreadable(String),
+    #[error("not a regular file")]
+    NotAFile,
+    #[error("larger than {MAX_BYTES} bytes")]
+    TooLarge,
+    #[error("the file name gives no theme name")]
+    NoName,
+    #[error("bad JSON: {0}")]
+    BadJson(String),
+    #[error("bad JSON: the file is not a JSON object")]
+    NotAnObject,
+    #[error("missing color `{0}`")]
+    MissingColor(String),
+    #[error("`{key}` refers to `${target}`, which is not there")]
+    DanglingReference { key: String, target: String },
+    #[error("`{0}` is not a color: {1}")]
+    BadColor(String, String),
+    #[error("reference loop: `{0}` never reaches a color")]
+    ReferenceLoop(String),
+    #[error("base theme {0:?} not found (no such file here, and no built-in theme by that name)")]
+    BaseNotFound(String),
+    #[error("base theme {0:?} did not load: {1}")]
+    BaseBroken(String, Box<Problem>),
+    #[error("base theme {0:?} leads back to this theme")]
+    BaseLoop(String),
+    #[error("`{0}` is already the name of {1}, which comes first")]
+    Duplicate(String, String),
+    #[error("`{0}` is a built-in theme, and a built-in name always wins")]
+    BuiltIn(String),
+}
+
+impl Problem {
+    /// True when the color simply is not there, as opposed to being broken:
+    /// an optional key that is absent falls back to a color the theme has.
+    fn is_absent(&self) -> bool {
+        matches!(
+            self,
+            Problem::MissingColor(_) | Problem::DanglingReference { .. }
+        )
+    }
+}
+
+/// A `.theme` file that is not offered, and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Skipped {
+    pub path: PathBuf,
+    pub problem: Problem,
+}
+
+impl Skipped {
+    /// The theme name the file would have gone by.
+    pub fn name(&self) -> String {
+        slug(
+            &self
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_default(),
+        )
+    }
+}
+
+/// What a directory of theme files came to.
+#[derive(Clone, Debug, Default)]
+pub struct Loaded {
+    /// Every theme that loaded, sorted by name.
+    pub themes: Vec<Theme>,
+    /// Every `.theme` file that did not, in file name order.
+    pub skipped: Vec<Skipped>,
+}
 
 /// The name a theme file goes by: lowercase, words joined by `-`, accents
 /// folded away (`Rosé Pine` is `rose-pine`, `D.Boring` is `d-boring`). macOS
@@ -64,68 +149,298 @@ pub fn slug(name: &str) -> String {
     folded.split_whitespace().collect::<Vec<_>>().join("-")
 }
 
-/// Every theme in `dir` that parses, sorted by name. A missing directory or a
-/// broken file is skipped rather than reported: these are extras on top of
-/// the built-in themes.
-pub fn load_dir(dir: &Path) -> Vec<Theme> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut raw: HashMap<String, Value> = HashMap::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("theme") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if let Some(value @ Value::Object(_)) = read_json(&path) {
-            raw.insert(stem.to_string(), value);
-        }
-    }
-
-    let mut themes: Vec<Theme> = raw
-        .keys()
-        .filter_map(|name| to_theme(&slug(name), &merged(&raw, name, 0)?))
-        .collect();
-    themes.sort_by(|a, b| a.name.cmp(b.name));
-    themes.dedup_by(|a, b| a.name == b.name);
-    themes
+/// One `.theme` file, read but not yet merged with its base.
+struct File {
+    stem: String,
+    path: PathBuf,
+    doc: Result<Value, Problem>,
 }
 
-/// One theme file, opened read-only. A symlink, a non-file or an oversized
-/// file is refused before it is opened.
-fn read_json(path: &Path) -> Option<Value> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.file_type().is_file() || meta.len() > MAX_BYTES {
-        return None;
+/// Every theme file in `dir`, loaded against `built_ins`: a file named like a
+/// built-in is set aside (the built-in wins), and a base theme the directory
+/// does not have is looked up among them. A missing directory is no themes.
+///
+/// Files are taken in file name order, so when two slug to the same name the
+/// first of them that loads is the one offered, whatever order the directory
+/// lists them in; the other is reported.
+pub fn load_dir(dir: &Path, built_ins: &[Theme]) -> Loaded {
+    let mut loaded = Loaded::default();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return loaded;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "theme"))
+        .collect();
+    paths.sort();
+
+    let mut files = Vec::new();
+    for path in paths {
+        match path.file_stem().and_then(|s| s.to_str()) {
+            Some(stem) if !slug(stem).is_empty() => files.push(File {
+                stem: stem.to_string(),
+                doc: read_json(&path),
+                path,
+            }),
+            _ => loaded.skipped.push(Skipped {
+                path,
+                problem: Problem::NoName,
+            }),
+        }
     }
-    let mut text = String::new();
-    OpenOptions::new()
+
+    // Name -> the file offered under it.
+    let mut offered: HashMap<String, String> = HashMap::new();
+    for file in &files {
+        let name = slug(&file.stem);
+        let theme = if built_ins.iter().any(|t| t.name == name) {
+            Err(Problem::BuiltIn(name.clone()))
+        } else if let Some(first) = offered.get(&name) {
+            Err(Problem::Duplicate(name.clone(), first.clone()))
+        } else {
+            file.doc
+                .clone()
+                .and_then(|doc| merged(&files, built_ins, &file.stem, &doc, &mut Vec::new()))
+                .and_then(|doc| to_theme(&name, &doc))
+        };
+        match theme {
+            Ok(theme) => {
+                offered.insert(name, file_name(&file.path));
+                loaded.themes.push(theme);
+            }
+            Err(problem) => loaded.skipped.push(Skipped {
+                path: file.path.clone(),
+                problem,
+            }),
+        }
+    }
+    loaded.themes.sort_by(|a, b| a.name.cmp(b.name));
+    loaded
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// One theme file, opened read-only. A symlink is followed; what it leads to
+/// must be a regular file under `MAX_BYTES`, checked before it is opened (a
+/// FIFO would block the read) and again on the open file, in case it was
+/// swapped in between.
+fn read_json(path: &Path) -> Result<Value, Problem> {
+    let unreadable = |e: std::io::Error| Problem::Unreadable(e.to_string());
+    let checked = |meta: std::fs::Metadata| {
+        if !meta.is_file() {
+            Err(Problem::NotAFile)
+        } else if meta.len() > MAX_BYTES {
+            Err(Problem::TooLarge)
+        } else {
+            Ok(())
+        }
+    };
+    checked(std::fs::metadata(path).map_err(unreadable)?)?;
+    let file = OpenOptions::new()
         .read(true)
         .open(path)
-        .ok()?
-        .take(MAX_BYTES)
+        .map_err(unreadable)?;
+    checked(file.metadata().map_err(unreadable)?)?;
+    let mut text = String::new();
+    file.take(MAX_BYTES + 1)
         .read_to_string(&mut text)
-        .ok()?;
-    serde_json::from_str(&text).ok()
+        .map_err(unreadable)?;
+    if text.len() as u64 > MAX_BYTES {
+        return Err(Problem::TooLarge);
+    }
+    match serde_json::from_str(&text) {
+        Ok(value @ Value::Object(_)) => Ok(value),
+        Ok(_) => Err(Problem::NotAnObject),
+        Err(e) => Err(Problem::BadJson(e.to_string())),
+    }
 }
 
-/// `name`'s values laid over its `base theme`'s, recursively. The base is
-/// looked up in the same directory, by file name or by slug.
-fn merged(raw: &HashMap<String, Value>, name: &str, depth: usize) -> Option<Value> {
-    if depth > MAX_DEPTH {
-        return None;
+/// `doc` laid over its `base theme`, recursively. `chain` holds the themes
+/// already on the way here, so a base that leads back is caught.
+///
+/// The base is looked for among `files` by file name, then by slug, and only
+/// then among `built_ins`: a file in the directory is the real thing, while a
+/// built-in has to be turned back into a theme file (`built_in_document`).
+fn merged(
+    files: &[File],
+    built_ins: &[Theme],
+    name: &str,
+    doc: &Value,
+    chain: &mut Vec<String>,
+) -> Result<Value, Problem> {
+    let Some(parent) = doc.pointer("/meta/base theme").and_then(Value::as_str) else {
+        return Ok(doc.clone());
+    };
+    let wanted = slug(parent);
+    // A file naming itself as its base has no base.
+    if wanted == slug(name) {
+        return Ok(doc.clone());
     }
-    let own = raw.get(name).or_else(|| {
-        let wanted = slug(name);
-        raw.iter().find(|(k, _)| slug(k) == wanted).map(|(_, v)| v)
-    })?;
-    match own.pointer("/meta/base theme").and_then(Value::as_str) {
-        Some(parent) if parent != name => Some(overlay(&merged(raw, parent, depth + 1)?, own)),
-        _ => Some(own.clone()),
+    if chain.iter().any(|n| slug(n) == wanted) || chain.len() >= MAX_DEPTH {
+        return Err(Problem::BaseLoop(parent.to_string()));
     }
+    let file = files
+        .iter()
+        .find(|f| f.stem == parent)
+        .or_else(|| files.iter().find(|f| slug(&f.stem) == wanted));
+    let base = match file {
+        Some(file) => {
+            let base_doc = file
+                .doc
+                .as_ref()
+                .map_err(|p| Problem::BaseBroken(parent.to_string(), Box::new(p.clone())))?;
+            chain.push(name.to_string());
+            let base = merged(files, built_ins, &file.stem, base_doc, chain);
+            chain.pop();
+            base.map_err(|p| match p {
+                // Already names the theme it loops through.
+                Problem::BaseLoop(_) => p,
+                p => Problem::BaseBroken(parent.to_string(), Box::new(p)),
+            })?
+        }
+        None => match BEAR_BASES
+            .iter()
+            .chain(built_ins)
+            .find(|t| t.name == wanted)
+        {
+            Some(theme) => built_in_document(theme),
+            None => return Err(Problem::BaseNotFound(parent.to_string())),
+        },
+    };
+    Ok(overlay(&base, doc))
+}
+
+/// Bear's own colors for the themes Bjorn offers hand-tuned instead
+/// (`tools/bear_theme.py` generates them, `THEMES` leaves them out). Seven of
+/// Bear's themes name Red Graphite as their base, and were written against
+/// these colors, not the hand-tuned ones.
+const BEAR_BASES: &[Theme] = &[palettes::BEAR_RED_GRAPHITE];
+
+/// A built-in theme written back out as a Bear theme file, to serve as the
+/// base of a file that names it. Bear's own files are not shipped, so this is
+/// what makes a theme copied out of Bear.app (Academia, over Dark Graphite)
+/// load on its own.
+///
+/// Every key `to_theme` reads is given the built-in's color. What matters for
+/// a child, though, is less a base's colors than its references: Bear's
+/// bases say `"list marker color": "$base.accent color"`, so a child that
+/// sets only its accent recolors its list markers too. A palette has lost
+/// those references, so each key that could be one is written as the
+/// reference Bear's bases use for it whenever the built-in's color is what
+/// that reference gives, and as a plain color otherwise. For the palettes
+/// generated from Bear's files this reproduces the base's behavior wherever
+/// its children rely on it; `a_copied_bear_theme_loads_over_its_built_in_base`
+/// checks each of Bear's own children against its palette.
+///
+/// The toast colors go back as highlighter colors, the keys they are derived
+/// from. `recolor` sets a lightness and keeps the hue, so a toast color comes
+/// back as itself, and moves to the child's lightness if the child is dark
+/// where its base is light.
+fn built_in_document(theme: &Theme) -> Value {
+    let keys: [(&str, Color, &[&str]); 23] = [
+        ("base.background color", theme.background, &[]),
+        ("base.text color", theme.foreground, &[]),
+        ("base.accent color", theme.accent, &[]),
+        ("base.text secondary color", theme.muted, &[]),
+        ("base.background secondary color", theme.header_bg, &[]),
+        // Only ever reached as a reference; Bear's tag background uses it.
+        ("base.background tertiary color", theme.tag_bg, &[]),
+        ("base.stroke color", theme.border, &[]),
+        ("sidebar.background color", theme.sidebar_bg, &[]),
+        ("sidebar.text color", theme.sidebar_fg, &[]),
+        (
+            "sidebar.text secondary color",
+            theme.sidebar_cursor_blur_fg,
+            &[],
+        ),
+        (
+            "sidebar.background secondary color",
+            theme.sidebar_cursor_blur_bg,
+            &[],
+        ),
+        (
+            "sidebar.stroke color",
+            theme.sidebar_border,
+            &["sidebar.background color", "base.stroke color"],
+        ),
+        (
+            "notes.selection background color",
+            theme.cursor_blur_bg,
+            &["base.background secondary color"],
+        ),
+        (
+            "editor.headers.text color",
+            theme.heading,
+            &["base.text color"],
+        ),
+        ("editor.link color", theme.link, &["base.accent color"]),
+        (
+            "editor.list marker color",
+            theme.bullet,
+            &["base.accent color"],
+        ),
+        (
+            "editor.code.text color",
+            theme.code_fg,
+            &["base.text color"],
+        ),
+        (
+            "editor.code.background color",
+            theme.code_bg,
+            &["base.background secondary color"],
+        ),
+        ("editor.tag.text color", theme.tag_fg, &["base.text color"]),
+        (
+            "editor.tag.background color",
+            theme.tag_bg,
+            &["base.background tertiary color"],
+        ),
+        (
+            "editor.highlighter.green.background color",
+            theme.success,
+            &[],
+        ),
+        (
+            "editor.highlighter.yellow.background color",
+            theme.warning,
+            &[],
+        ),
+        ("editor.highlighter.red.background color", theme.error, &[]),
+    ];
+
+    let mut colors: HashMap<&str, Color> = HashMap::new();
+    let mut doc = Value::Object(Map::new());
+    for (key, color, references) in keys {
+        let Color::Rgb(r, g, b) = color else {
+            continue;
+        };
+        let value = match references.iter().find(|r| colors.get(*r) == Some(&color)) {
+            Some(reference) => format!("${reference}"),
+            None => format!("#{r:02X}{g:02X}{b:02X}"),
+        };
+        colors.insert(key, color);
+
+        let mut node = &mut doc;
+        let mut segments = key.split('.').peekable();
+        while let Some(segment) = segments.next() {
+            let Value::Object(map) = node else {
+                break;
+            };
+            if segments.peek().is_none() {
+                map.insert(segment.to_string(), Value::String(value.clone()));
+                break;
+            }
+            node = map
+                .entry(segment)
+                .or_insert_with(|| Value::Object(Map::new()));
+        }
+    }
+    doc
 }
 
 /// `over` laid on `base`: objects merge key by key, anything else replaces.
@@ -148,20 +463,38 @@ fn overlay(base: &Value, over: &Value) -> Value {
 
 type Rgb = (u8, u8, u8);
 
-/// The colour at a dotted `section.key` path, following `$` references.
-fn lookup(root: &Value, path: &str, depth: usize) -> Option<Rgb> {
-    if depth > MAX_DEPTH {
-        return None;
+/// The color at a dotted `section.key` path, following `$` references. An
+/// absent key (or a reference to one) is `MissingColor` or
+/// `DanglingReference`, which an optional key shrugs off; a value that is not
+/// a color, or references that never reach one, is an error for any key.
+fn lookup(root: &Value, key: &str) -> Result<Rgb, Problem> {
+    let mut path = key.to_string();
+    for _ in 0..=MAX_DEPTH {
+        let mut node = Some(root);
+        for segment in path.split('.') {
+            node = node.and_then(|n| n.get(segment));
+        }
+        let Some(node) = node else {
+            return Err(if path == key {
+                Problem::MissingColor(path)
+            } else {
+                Problem::DanglingReference {
+                    key: key.to_string(),
+                    target: path,
+                }
+            });
+        };
+        let Some(text) = node.as_str().map(str::trim) else {
+            return Err(Problem::BadColor(path, node.to_string()));
+        };
+        match text.strip_prefix('$') {
+            Some(reference) => path = reference.to_string(),
+            None => {
+                return parse_hex(text).ok_or_else(|| Problem::BadColor(path, format!("{text:?}")));
+            }
+        }
     }
-    let mut node = root;
-    for segment in path.split('.') {
-        node = node.get(segment)?;
-    }
-    let text = node.as_str()?.trim();
-    match text.strip_prefix('$') {
-        Some(reference) => lookup(root, reference, depth + 1),
-        None => parse_hex(text),
-    }
+    Err(Problem::ReferenceLoop(key.to_string()))
 }
 
 /// `#RGB`, `#RRGGBB`, or `#RRGGBBAA` with the alpha dropped.
@@ -183,7 +516,7 @@ fn color((r, g, b): Rgb) -> Color {
     Color::Rgb(r, g, b)
 }
 
-// The colour arithmetic below mirrors `tools/bear_theme.py` step for step,
+// The color arithmetic below mirrors `tools/bear_theme.py` step for step,
 // down to Python's round-half-to-even, so both produce the same bytes.
 
 /// `a` moved a fraction `t` of the way to `b`.
@@ -224,7 +557,7 @@ fn best(bg: Rgb, candidates: &[Rgb]) -> Rgb {
     })
 }
 
-/// Text over `bg`: the theme's own colour that reads best, when one reads at
+/// Text over `bg`: the theme's own color that reads best, when one reads at
 /// 3:1; plain white or near-black otherwise.
 fn on(bg: Rgb, candidates: &[Rgb]) -> Rgb {
     let pick = best(bg, candidates);
@@ -302,27 +635,35 @@ fn recolor((r, g, b): Rgb, dark: bool) -> Rgb {
 
 /// Map a merged theme file onto Bjorn's palette. Only the page background,
 /// the text and the accent are required; a hand-written file that leaves the
-/// rest out gets the nearest colour it does have.
-fn to_theme(name: &str, root: &Value) -> Option<Theme> {
-    let get = |path: &str| lookup(root, path, 0);
+/// rest out gets the nearest color it does have.
+fn to_theme(name: &str, root: &Value) -> Result<Theme, Problem> {
+    let get = |path: &str| lookup(root, path);
     let bg = get("base.background color")?;
     let text = get("base.text color")?;
     let accent = get("base.accent color")?;
-    let or = |path: &str, fallback: Rgb| get(path).unwrap_or(fallback);
+    let or = |path: &str, fallback: Rgb| match get(path) {
+        Err(problem) if problem.is_absent() => Ok(fallback),
+        found => found,
+    };
 
     let dark = luminance(bg) < 0.5;
-    let muted = or("base.text secondary color", text);
-    let bg2 = or("base.background secondary color", bg);
-    let sb_bg = or("sidebar.background color", bg2);
-    let sb_text = or("sidebar.text color", text);
-    let headers = or("editor.headers.text color", text);
-    let blur_bg = or("notes.selection background color", bg2);
-    let sb_blur_bg = or("sidebar.background secondary color", sb_bg);
-    let sb_text_2 = or("sidebar.text secondary color", sb_text);
+    let muted = or("base.text secondary color", text)?;
+    let bg2 = or("base.background secondary color", bg)?;
+    let sb_bg = or("sidebar.background color", bg2)?;
+    let sb_text = or("sidebar.text color", text)?;
+    let headers = or("editor.headers.text color", text)?;
+    let blur_bg = or("notes.selection background color", bg2)?;
+    let sb_blur_bg = or("sidebar.background secondary color", sb_bg)?;
+    let sb_text_2 = or("sidebar.text secondary color", sb_text)?;
     let over_accent = on(accent, &[bg, text, sb_bg]);
 
-    let highlighter = |hue: &str| {
-        get(&format!("editor.highlighter.{hue}.background color")).map(|c| recolor(c, dark))
+    let highlighter = |hue: &str, fallback: Rgb| {
+        let key = format!("editor.highlighter.{hue}.background color");
+        match get(&key) {
+            Ok(c) => Ok(recolor(c, dark)),
+            Err(problem) if problem.is_absent() => Ok(fallback),
+            Err(problem) => Err(problem),
+        }
     };
     let fixed = if dark {
         [(0x6F, 0xB9, 0x8F), (0xE0, 0xA4, 0x58), (0xE0, 0x5C, 0x5C)]
@@ -330,13 +671,13 @@ fn to_theme(name: &str, root: &Value) -> Option<Theme> {
         [(0x3F, 0x9D, 0x63), (0xB7, 0x79, 0x1F), (0xC0, 0x39, 0x2B)]
     };
     let [success, warning, error] = [
-        highlighter("green").unwrap_or(fixed[0]),
-        highlighter("yellow").unwrap_or(fixed[1]),
-        highlighter("red").unwrap_or(fixed[2]),
+        highlighter("green", fixed[0])?,
+        highlighter("yellow", fixed[1])?,
+        highlighter("red", fixed[2])?,
     ]
     .map(|c| legible(c, bg, text));
 
-    Some(Theme {
+    Ok(Theme {
         name: Box::leak(name.to_string().into_boxed_str()),
         dark,
 
@@ -351,8 +692,8 @@ fn to_theme(name: &str, root: &Value) -> Option<Theme> {
         sidebar_fg: color(sb_text),
         sidebar_muted: color(blend(sb_text, sb_bg, 0.35)),
 
-        border: color(or("base.stroke color", muted)),
-        sidebar_border: color(or("sidebar.stroke color", sb_bg)),
+        border: color(or("base.stroke color", muted)?),
+        sidebar_border: color(or("sidebar.stroke color", sb_bg)?),
         header_bg: color(bg2),
         header_fg: color(headers),
         sidebar_header_bg: color(blend(sb_bg, sb_text, 0.06)),
@@ -377,12 +718,12 @@ fn to_theme(name: &str, root: &Value) -> Option<Theme> {
 
         heading: color(headers),
         heading_alt: color(text),
-        link: color(or("editor.link color", accent)),
-        bullet: color(or("editor.list marker color", accent)),
-        code_fg: color(or("editor.code.text color", text)),
-        code_bg: color(or("editor.code.background color", bg2)),
-        tag_fg: color(or("editor.tag.text color", text)),
-        tag_bg: color(or("editor.tag.background color", bg2)),
+        link: color(or("editor.link color", accent)?),
+        bullet: color(or("editor.list marker color", accent)?),
+        code_fg: color(or("editor.code.text color", text)?),
+        code_bg: color(or("editor.code.background color", bg2)?),
+        tag_fg: color(or("editor.tag.text color", text)?),
+        tag_bg: color(or("editor.tag.background color", bg2)?),
     })
 }
 
@@ -391,9 +732,45 @@ mod tests {
     use super::*;
     use crate::ui::theme::THEMES;
 
+    /// Where Bear keeps its theme files; the same path `tools/bear_theme.py`
+    /// reads. Only tests look here: at runtime Bjorn never reads Bear.app.
+    const BEAR: &str =
+        "/Applications/Bear.app/Contents/Frameworks/BearCore.framework/Versions/A/Resources";
+
+    /// Hand-tuned in theme.rs rather than generated.
+    const HAND_TUNED: &[&str] = &["red-graphite", "red-graphite-dark", "textual-dark"];
+
+    /// The generator names these themes' toast colors from the palette they
+    /// are named after (`SEMANTICS` in `tools/bear_theme.py`); a theme file
+    /// has no such table, so the parser derives them and only those differ.
+    const NAMED_SEMANTICS: &[&str] = &[
+        "atom",
+        "ayu",
+        "ayu-mirage",
+        "catppuccin-latte",
+        "catppuccin-macchiato",
+        "cobalt",
+        "dracula",
+        "everforest-dark",
+        "everforest-light",
+        "gruvbox",
+        "nord",
+        "rose-pine",
+        "rose-pine-dawn",
+        "shibuya-jazz",
+        "shibuya-lo-fi",
+        "solarized-dark",
+        "solarized-light",
+        "tokyo-night",
+        "tokyo-night-light",
+    ];
+
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::write(dir.join(name), body).unwrap();
     }
+
+    const PLAIN: &str = r##"{"base": {"text color": "#111111", "background color": "#FFFFFF",
+                            "accent color": "#DD4C4F"}}"##;
 
     fn find<'a>(themes: &'a [Theme], name: &str) -> &'a Theme {
         themes
@@ -402,8 +779,25 @@ mod tests {
             .unwrap_or_else(|| panic!("no {name}"))
     }
 
-    /// Loading must leave a read-only theme directory exactly as it was, and
-    /// must not follow a symlink out of it.
+    fn names(loaded: &Loaded) -> Vec<&str> {
+        loaded.themes.iter().map(|t| t.name).collect()
+    }
+
+    /// File name -> why it was skipped.
+    fn skipped(loaded: &Loaded) -> Vec<(String, Problem)> {
+        loaded
+            .skipped
+            .iter()
+            .map(|s| (file_name(&s.path), s.problem.clone()))
+            .collect()
+    }
+
+    fn rgb(hex: u32) -> Color {
+        crate::ui::theme::rgb(hex)
+    }
+
+    /// Loading must leave a read-only theme directory exactly as it was,
+    /// symlinks included.
     #[cfg(unix)]
     #[test]
     fn loading_reads_without_touching_the_directory() {
@@ -411,13 +805,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        write(
-            dir.path(),
-            "Plain.theme",
-            r##"{"base": {"text color": "#111111", "background color": "#FFFFFF",
-                 "accent color": "#DD4C4F"}}"##,
-        );
-        write(outside.path(), "Elsewhere.theme", r##"{"base": {}}"##);
+        write(dir.path(), "Plain.theme", PLAIN);
+        write(outside.path(), "Elsewhere.theme", PLAIN);
         symlink(
             outside.path().join("Elsewhere.theme"),
             dir.path().join("Linked.theme"),
@@ -442,18 +831,57 @@ mod tests {
         };
         set_mode(&dir.path().join("Plain.theme"), 0o444);
         set_mode(dir.path(), 0o555);
-        let before = snapshot(dir.path());
+        let before = (snapshot(dir.path()), snapshot(outside.path()));
 
-        let themes = load_dir(dir.path());
+        let loaded = load_dir(dir.path(), &[]);
 
-        let after = snapshot(dir.path());
+        let after = (snapshot(dir.path()), snapshot(outside.path()));
         set_mode(dir.path(), 0o755);
         assert_eq!(before, after);
-        assert_eq!(
-            themes.iter().map(|t| t.name).collect::<Vec<_>>(),
-            ["plain"],
-            "the symlinked file is not followed"
+        assert_eq!(names(&loaded), ["linked", "plain"]);
+    }
+
+    /// Dotfile managers (stow, chezmoi) link theme files into place, so a
+    /// link is followed; what it points at still has to be a regular file
+    /// under the size cap, and a FIFO is refused before it could block.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_followed_to_a_regular_file_only() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = |name: &str| outside.path().join(name);
+        write(outside.path(), "Real.theme", PLAIN);
+        write(
+            outside.path(),
+            "Huge.theme",
+            &" ".repeat(MAX_BYTES as usize + 1),
         );
+        std::fs::create_dir(target("Folder.theme")).unwrap();
+        let fifo = std::process::Command::new("mkfifo")
+            .arg(target("Pipe.theme"))
+            .status()
+            .unwrap();
+        assert!(fifo.success());
+        for (link, to) in [
+            ("Stowed.theme", "Real.theme"),
+            ("Huge.theme", "Huge.theme"),
+            ("Folder.theme", "Folder.theme"),
+            ("Pipe.theme", "Pipe.theme"),
+            ("Dangling.theme", "Gone.theme"),
+        ] {
+            symlink(target(to), dir.path().join(link)).unwrap();
+        }
+
+        let loaded = load_dir(dir.path(), &[]);
+        assert_eq!(names(&loaded), ["stowed"]);
+        let problems = skipped(&loaded);
+        assert_eq!(problems.len(), 4, "{problems:?}");
+        assert!(matches!(&problems[0], (f, Problem::Unreadable(_)) if f == "Dangling.theme"));
+        assert_eq!(problems[1], ("Folder.theme".into(), Problem::NotAFile));
+        assert_eq!(problems[2], ("Huge.theme".into(), Problem::TooLarge));
+        assert_eq!(problems[3], ("Pipe.theme".into(), Problem::NotAFile));
     }
 
     #[test]
@@ -483,32 +911,70 @@ mod tests {
             r##"{"meta": {"base theme": "Parent"},
                  "base": {"accent color": "#FF0000"}}"##,
         );
-        write(dir.path(), "Broken.theme", "{ not json");
         write(dir.path(), "notes.txt", "{}");
 
-        let themes = load_dir(dir.path());
-        assert_eq!(
-            themes.iter().map(|t| t.name).collect::<Vec<_>>(),
-            ["child-theme", "parent"]
-        );
-        let child = find(&themes, "child-theme");
+        let loaded = load_dir(dir.path(), &[]);
+        assert_eq!(names(&loaded), ["child-theme", "parent"]);
+        assert!(loaded.skipped.is_empty());
+        let child = find(&loaded.themes, "child-theme");
         assert_eq!(child.link, Color::Rgb(0xFF, 0, 0));
         assert_eq!(child.foreground, Color::Rgb(0x11, 0x11, 0x11));
         assert!(!child.dark);
-        // Keys the file leaves out fall back to the nearest colour it has.
+        // Keys the file leaves out fall back to the nearest color it has.
         assert_eq!(child.bullet, child.accent);
         assert_eq!(child.code_bg, child.background);
-        assert_eq!(find(&themes, "parent").link, Color::Rgb(0, 0, 0xFF));
+        assert_eq!(find(&loaded.themes, "parent").link, Color::Rgb(0, 0, 0xFF));
     }
 
+    /// Every way a file can be broken is skipped with its own reason, which
+    /// `--list-themes` and `--theme` print.
     #[test]
-    fn loops_and_missing_required_colours_are_skipped() {
+    fn a_broken_file_is_skipped_with_the_reason() {
         let dir = tempfile::tempdir().unwrap();
+        let theme = |base: &str| {
+            format!(
+                r##"{{"base": {{"text color": "#111111", "background color": "#FFFFFF",
+                    "accent color": "#DD4C4F", {base}}}}}"##
+            )
+        };
+        write(dir.path(), "Bad Json.theme", "{ not json");
+        write(dir.path(), "Array.theme", "[]");
+        write(
+            dir.path(),
+            "No Accent.theme",
+            r##"{"base": {"text color": "#111111", "background color": "#FFFFFF"}}"##,
+        );
         write(
             dir.path(),
             "Loop.theme",
             r##"{"base": {"text color": "$base.text color",
                  "background color": "#000000", "accent color": "#FF0000"}}"##,
+        );
+        write(
+            dir.path(),
+            "Optional Loop.theme",
+            &theme(r#""stroke color": "$base.stroke color""#),
+        );
+        write(
+            dir.path(),
+            "Dangling.theme",
+            r##"{"base": {"text color": "$base.ink", "background color": "#FFFFFF",
+                 "accent color": "#DD4C4F"}}"##,
+        );
+        write(
+            dir.path(),
+            "Not A Color.theme",
+            &theme(r#""stroke color": "blue""#),
+        );
+        write(
+            dir.path(),
+            "Orphan.theme",
+            r#"{"meta": {"base theme": "Mauve"}, "base": {}}"#,
+        );
+        write(
+            dir.path(),
+            "Heir.theme",
+            r#"{"meta": {"base theme": "Bad Json"}, "base": {}}"#,
         );
         write(
             dir.path(),
@@ -520,64 +986,377 @@ mod tests {
             "Cycle 2.theme",
             r#"{"meta": {"base theme": "Cycle"}, "base": {}}"#,
         );
-        assert!(load_dir(dir.path()).is_empty());
-        assert!(load_dir(&dir.path().join("absent")).is_empty());
+        write(dir.path(), "___.theme", PLAIN);
+        // An optional key that is simply absent, or refers to something
+        // absent, is no problem: it falls back.
+        write(
+            dir.path(),
+            "Fine.theme",
+            &theme(r#""stroke color": "$base.nothing""#),
+        );
+
+        let loaded = load_dir(dir.path(), &[]);
+        assert_eq!(names(&loaded), ["fine"]);
+        let problem = |file: &str| {
+            skipped(&loaded)
+                .into_iter()
+                .find(|(f, _)| f == file)
+                .unwrap_or_else(|| panic!("{file} was not skipped"))
+                .1
+        };
+        assert!(matches!(problem("Bad Json.theme"), Problem::BadJson(_)));
+        assert_eq!(problem("Array.theme"), Problem::NotAnObject);
+        assert_eq!(
+            problem("No Accent.theme"),
+            Problem::MissingColor("base.accent color".into())
+        );
+        assert_eq!(
+            problem("Loop.theme"),
+            Problem::ReferenceLoop("base.text color".into())
+        );
+        assert_eq!(
+            problem("Optional Loop.theme"),
+            Problem::ReferenceLoop("base.stroke color".into())
+        );
+        assert_eq!(
+            problem("Dangling.theme"),
+            Problem::DanglingReference {
+                key: "base.text color".into(),
+                target: "base.ink".into()
+            }
+        );
+        assert_eq!(
+            problem("Not A Color.theme"),
+            Problem::BadColor("base.stroke color".into(), "\"blue\"".into())
+        );
+        assert_eq!(
+            problem("Orphan.theme"),
+            Problem::BaseNotFound("Mauve".into())
+        );
+        assert!(matches!(
+            problem("Heir.theme"),
+            Problem::BaseBroken(base, inner) if base == "Bad Json"
+                && matches!(*inner, Problem::BadJson(_))
+        ));
+        assert_eq!(problem("Cycle.theme"), Problem::BaseLoop("Cycle".into()));
+        assert_eq!(
+            problem("Cycle 2.theme"),
+            Problem::BaseLoop("Cycle 2".into())
+        );
+        assert_eq!(problem("___.theme"), Problem::NoName);
+        assert_eq!(loaded.skipped.len(), 12);
+
+        // Each reason reads as one line after the file's path.
+        for skipped in &loaded.skipped {
+            let line = skipped.problem.to_string();
+            assert!(!line.is_empty() && !line.contains('\n'), "{line:?}");
+        }
+        assert_eq!(
+            problem("Heir.theme").to_string().split(':').next(),
+            Some(r#"base theme "Bad Json" did not load"#)
+        );
+        assert!(load_dir(&dir.path().join("absent"), &[]).themes.is_empty());
     }
 
-    /// The generator names these themes' toast colours from the palette they
-    /// are named after (`SEMANTICS` in `tools/bear_theme.py`); a theme file
-    /// has no such table, so the parser derives them and only those differ.
-    const NAMED_SEMANTICS: &[&str] = &[
-        "atom",
-        "ayu",
-        "ayu-mirage",
-        "catppuccin-latte",
-        "catppuccin-macchiato",
-        "cobalt",
-        "dracula",
-        "everforest-dark",
-        "everforest-light",
-        "gruvbox",
-        "nord",
-        "rose-pine",
-        "rose-pine-dawn",
-        "shibuya-jazz",
-        "shibuya-lo-fi",
-        "solarized-dark",
-        "solarized-light",
-        "tokyo-night",
-        "tokyo-night-light",
-    ];
-
-    /// The theme files kept in the repo (`config/themes/`, copied from Bear)
-    /// parse, and each draws exactly as the palette generated from it. Needs
-    /// nothing installed, so it runs everywhere.
+    /// Bear's own files are not shipped, so a theme copied out of Bear.app
+    /// finds its base among the built-ins: Academia over Dark Graphite.
     #[test]
-    fn repo_theme_files_match_the_built_in_palettes() {
+    fn a_base_theme_not_in_the_directory_comes_from_the_built_ins() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "Nord Ember.theme",
+            r##"{"meta": {"base theme": "Nord"}, "base": {"accent color": "#D08770"}}"##,
+        );
+        let nord = crate::ui::palettes::NORD;
+        let loaded = load_dir(dir.path(), THEMES);
+        assert!(loaded.skipped.is_empty(), "{:?}", loaded.skipped);
+        let ember = find(&loaded.themes, "nord-ember");
+        assert_eq!(ember.accent, rgb(0xD08770));
+        assert_eq!(ember.background, nord.background);
+        assert_eq!(ember.sidebar_bg, nord.sidebar_bg);
+        assert_eq!(ember.tag_bg, nord.tag_bg);
+        // Nord's list markers are its accent, so they follow the new one;
+        // its links are a color of their own, so they stay.
+        assert_eq!(ember.bullet, rgb(0xD08770));
+        assert_eq!(ember.link, nord.link);
+
+        // Base names are matched like theme names.
+        write(
+            dir.path(),
+            "Spelled.theme",
+            r#"{"meta": {"base theme": "rosé  PINE"}}"#,
+        );
+        let loaded = load_dir(dir.path(), THEMES);
+        let mut spelled = *find(&loaded.themes, "spelled");
+        spelled.name = "rose-pine";
+        assert_eq!(
+            spelled.background,
+            crate::ui::palettes::ROSE_PINE.background
+        );
+    }
+
+    /// A base in the directory is the real thing and is used over the
+    /// built-in of that name, while the file itself is not offered: a
+    /// built-in name always wins.
+    #[test]
+    fn a_base_file_in_the_directory_comes_before_a_built_in() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "Nord.theme", PLAIN);
+        write(
+            dir.path(),
+            "Mine.theme",
+            r#"{"meta": {"base theme": "Nord"}}"#,
+        );
+        let loaded = load_dir(dir.path(), THEMES);
+        assert_eq!(names(&loaded), ["mine"]);
+        assert_eq!(find(&loaded.themes, "mine").background, rgb(0xFFFFFF));
+        assert_eq!(
+            skipped(&loaded),
+            [("Nord.theme".into(), Problem::BuiltIn("nord".into()))]
+        );
+    }
+
+    /// Two files with one name: the first in file name order that loads is
+    /// offered, whatever order the directory lists them in.
+    #[test]
+    fn files_with_one_name_resolve_in_file_name_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let with_bg = |bg: &str| {
+            format!(
+                r##"{{"base": {{"text color": "#111111", "background color": "{bg}",
+                    "accent color": "#DD4C4F"}}}}"##
+            )
+        };
+        // Distinct on a case-insensitive file system too.
+        write(dir.path(), "My_Theme.theme", &with_bg("#000002"));
+        write(dir.path(), "My-Theme.theme", &with_bg("#000001"));
+        write(dir.path(), "My Theme.theme", "{ broken");
+        let loaded = load_dir(dir.path(), &[]);
+        assert_eq!(names(&loaded), ["my-theme"]);
+        // `My Theme` sorts first but is broken, so `My-Theme` is offered.
+        assert_eq!(loaded.themes[0].background, rgb(0x000001));
+        let problems = skipped(&loaded);
+        assert!(matches!(&problems[0], (f, Problem::BadJson(_)) if f == "My Theme.theme"));
+        assert_eq!(
+            problems[1],
+            (
+                "My_Theme.theme".into(),
+                Problem::Duplicate("my-theme".into(), "My-Theme.theme".into())
+            )
+        );
+    }
+
+    /// A built-in written back out as a theme file draws as itself, apart
+    /// from the toast colors, which pass through `recolor` again and land
+    /// within a few steps of where they were.
+    #[test]
+    fn a_built_in_written_out_as_a_base_draws_as_itself() {
+        let generated = THEMES
+            .iter()
+            .filter(|t| !HAND_TUNED.contains(&t.name))
+            .chain(BEAR_BASES);
+        for built_in in generated {
+            let mut rebuilt = to_theme(built_in.name, &built_in_document(built_in)).unwrap();
+            if !NAMED_SEMANTICS.contains(&built_in.name) {
+                assert_toasts_close(&rebuilt, built_in);
+            }
+            rebuilt.success = built_in.success;
+            rebuilt.warning = built_in.warning;
+            rebuilt.error = built_in.error;
+            assert_eq!(rebuilt, *built_in, "{}", built_in.name);
+        }
+    }
+
+    fn assert_toasts_close(a: &Theme, b: &Theme) {
+        let pairs = [
+            (a.success, b.success),
+            (a.warning, b.warning),
+            (a.error, b.error),
+        ];
+        for (x, y) in pairs {
+            let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (x, y) else {
+                panic!("not RGB");
+            };
+            let close = r1.abs_diff(r2) <= 4 && g1.abs_diff(g2) <= 4 && b1.abs_diff(b2) <= 4;
+            assert!(close, "{}: {x:?} vs {y:?}", b.name);
+        }
+    }
+
+    /// The hand-written themes in `config/themes/` load on CI, where Bear is
+    /// not installed: one resolving `$section.key` references, one over a
+    /// base in the same directory, one over a built-in base.
+    #[test]
+    fn hand_written_theme_files_load() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/themes");
-        let files = std::fs::read_dir(&dir)
+        let loaded = load_dir(&dir, THEMES);
+        assert!(loaded.skipped.is_empty(), "{:?}", loaded.skipped);
+        assert_eq!(names(&loaded), ["nord-ember", "paper", "paper-night"]);
+
+        let paper = find(&loaded.themes, "paper");
+        assert!(!paper.dark);
+        assert_eq!(paper.link, rgb(0x2F6FA3));
+        assert_eq!(paper.bullet, rgb(0x2F6FA3));
+        assert_eq!(paper.code_bg, rgb(0xF1ECE0));
+        assert_eq!(paper.cursor_blur_bg, rgb(0xF1ECE0));
+        assert_eq!(paper.tag_bg, rgb(0xE6DFCF));
+        assert_eq!(paper.sidebar_border, rgb(0x2E2A24));
+
+        // Paper's references resolve against Paper Night's own values.
+        let night = find(&loaded.themes, "paper-night");
+        assert!(night.dark);
+        assert_eq!(night.link, rgb(0xE0A458));
+        assert_eq!(night.code_fg, rgb(0xE4DDCF));
+        assert_eq!(night.tag_bg, rgb(0x3A362F));
+        assert_eq!(night.sidebar_bg, paper.sidebar_bg);
+
+        let ember = find(&loaded.themes, "nord-ember");
+        assert_eq!(ember.background, crate::ui::palettes::NORD.background);
+        assert_eq!(ember.accent, rgb(0xD08770));
+    }
+
+    /// Bear's files, as `config/themes/bear-themes.sha256` records them:
+    /// slug -> (file name, SHA-256).
+    fn manifest() -> HashMap<String, (String, String)> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/themes/bear-themes.sha256");
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let (hash, file) = line.split_once("  ").expect("`<sha256>  <file>`");
+                let stem = file.strip_suffix(".theme").expect(".theme");
+                (slug(stem), (file.to_string(), hash.to_string()))
+            })
+            .collect()
+    }
+
+    fn sha256(path: &Path) -> Option<String> {
+        let out = std::process::Command::new("shasum")
+            .args(["-a", "256"])
+            .arg(path)
+            .output()
+            .ok()?;
+        let text = String::from_utf8(out.stdout).ok()?;
+        out.status
+            .success()
+            .then(|| text.split_whitespace().next().map(str::to_string))?
+    }
+
+    /// Bear's theme files in the installed Bear.app whose SHA-256 is the one
+    /// the manifest records, by slug. Anything else is noted, never failed:
+    /// a changed hash means Bear updated its themes, which is a reason to
+    /// rerun `tools/bear_theme.py`, not a broken build. `None` without Bear.
+    fn verified_bear_files() -> Option<Vec<(String, PathBuf)>> {
+        let dir = Path::new(BEAR);
+        if !dir.is_dir() {
+            return None;
+        }
+        let mut manifest = manifest();
+        let mut verified = Vec::new();
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()
-            .filter(|e| e.path().extension().is_some_and(|x| x == "theme"))
-            .count();
-        let parsed = load_dir(&dir);
-        assert_eq!(parsed.len(), files, "every file parses");
-
-        let mut compared = 0;
-        for built_in in THEMES {
-            // Hand-tuned in theme.rs rather than generated.
-            if ["red-graphite", "red-graphite-dark", "textual-dark"].contains(&built_in.name) {
-                continue;
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "theme"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let name = slug(&path.file_stem().unwrap().to_string_lossy());
+            match (manifest.remove(&name), sha256(&path)) {
+                (Some((_, want)), Some(got)) if want == got => verified.push((name, path)),
+                (Some((file, _)), _) => eprintln!(
+                    "note: Bear's {file} is not the file palettes.rs was generated from \
+                     (its SHA-256 differs); not compared. Rerun tools/bear_theme.py."
+                ),
+                (None, _) => eprintln!(
+                    "note: Bear ships {}, which bear-themes.sha256 does not list; \
+                     not compared. Rerun tools/bear_theme.py.",
+                    path.display()
+                ),
             }
-            let mut theme = *find(&parsed, built_in.name);
-            if NAMED_SEMANTICS.contains(&built_in.name) {
+        }
+        for (file, _) in manifest.values() {
+            eprintln!("note: Bear no longer ships {file}.");
+        }
+        Some(verified)
+    }
+
+    /// Bear's own theme files, read from Bear.app where it is installed,
+    /// parse, and each draws exactly as the palette generated from it. Bear's
+    /// files are not in the repo, so without Bear.app (CI) this checks
+    /// nothing.
+    #[test]
+    fn bear_theme_files_match_the_built_in_palettes() {
+        let Some(verified) = verified_bear_files() else {
+            return;
+        };
+        let loaded = load_dir(Path::new(BEAR), &[]);
+        for (name, path) in &verified {
+            assert!(
+                !loaded.skipped.iter().any(|s| &s.path == path),
+                "{name}: {:?}",
+                loaded.skipped
+            );
+            let built_in = THEMES
+                .iter()
+                .filter(|t| !HAND_TUNED.contains(&t.name))
+                .chain(BEAR_BASES)
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("no palette for {name}"));
+            let mut theme = *find(&loaded.themes, name);
+            if NAMED_SEMANTICS.contains(&name.as_str()) {
                 theme.success = built_in.success;
                 theme.warning = built_in.warning;
                 theme.error = built_in.error;
             }
-            assert_eq!(theme, *built_in, "{}", built_in.name);
-            compared += 1;
+            assert_eq!(theme, *built_in, "{name}");
         }
-        assert_eq!(compared, files - 1, "every generated palette has its file");
+    }
+
+    /// What the review found: a Bear theme with a `base theme`, copied alone
+    /// into the themes directory under a new name, loads over its built-in
+    /// base and draws as that theme's own palette.
+    ///
+    /// Two things cannot come back exactly. Toast colors go through `recolor`
+    /// a second time and land within a few steps. And a palette cannot tell a
+    /// reference from a plain color that happens to match it, so a key is
+    /// taken to be the reference Bear's bases normally use: Dieci's tag
+    /// background is a plain color where the others refer to the tertiary
+    /// background, so the two Shibuya themes, which set their own, pick that
+    /// up instead.
+    #[test]
+    fn a_copied_bear_theme_loads_over_its_built_in_base() {
+        let Some(verified) = verified_bear_files() else {
+            return;
+        };
+        let mut children = 0;
+        for (name, path) in verified {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let doc: Value = serde_json::from_str(&text).unwrap();
+            if doc.pointer("/meta/base theme").is_none() {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            write(dir.path(), &format!("My {name}.theme"), &text);
+            let loaded = load_dir(dir.path(), THEMES);
+            assert!(loaded.skipped.is_empty(), "{name}: {:?}", loaded.skipped);
+
+            let built_in = find(THEMES, &name);
+            let mut theme = *find(&loaded.themes, &format!("my-{name}"));
+            theme.name = built_in.name;
+            if !NAMED_SEMANTICS.contains(&name.as_str()) {
+                assert_toasts_close(&theme, built_in);
+            }
+            theme.success = built_in.success;
+            theme.warning = built_in.warning;
+            theme.error = built_in.error;
+            if name.starts_with("shibuya-") {
+                assert_ne!(theme.tag_bg, built_in.tag_bg, "{name}: now exact?");
+                theme.tag_bg = built_in.tag_bg;
+            }
+            assert_eq!(theme, *built_in, "{name}");
+            children += 1;
+        }
+        assert!(children > 0, "no Bear theme with a base theme was compared");
     }
 }

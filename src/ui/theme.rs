@@ -13,7 +13,7 @@
 //! user's themes, set once from the config at startup, so drawing code can read
 //! it without threading a reference through every function.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -304,24 +304,73 @@ pub const DEFAULT_THEME: &str = "red-graphite-dark";
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
-/// Where the user's own `.theme` files live:
-/// `${XDG_CONFIG_HOME:-~/.config}/bjorn/themes`.
+static DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where the user's own `.theme` files live: `themes/` beside the config
+/// file, so `--config` brings its own themes along. That is
+/// `${XDG_CONFIG_HOME:-~/.config}/bjorn/themes` unless `use_config` named
+/// another file.
 pub fn themes_dir() -> PathBuf {
-    crate::config::config_dir().join("themes")
+    DIR.get().cloned().unwrap_or_else(|| themes_dir_for(None))
 }
 
-static USER: OnceLock<Vec<Theme>> = OnceLock::new();
+/// Read themes from beside `config` (the file `--config` named) rather than
+/// the default. Only the first call counts, and it has to come before
+/// anything asks for a theme past the built-ins.
+pub fn use_config(config: Option<&Path>) {
+    if config.is_some() {
+        let _ = DIR.set(themes_dir_for(config));
+    }
+}
 
-/// The themes in `themes_dir()`, minus any a built-in already names: the
-/// built-ins always win. Read once, and only when something asks past the
-/// built-ins.
+/// `themes/` in the directory holding `config`, or in the default config
+/// directory without one.
+fn themes_dir_for(config: Option<&Path>) -> PathBuf {
+    let Some(config) = config else {
+        return crate::config::config_dir().join("themes");
+    };
+    let config = crate::util::expand_tilde(&config.to_string_lossy());
+    match config.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join("themes"),
+        _ => PathBuf::from("themes"),
+    }
+}
+
+static USER: OnceLock<bear_theme::Loaded> = OnceLock::new();
+
+/// The themes directory, loaded: the themes it offers, which exclude any a
+/// built-in already names (the built-ins always win), and the files it set
+/// aside. Read once, and only when something asks past the built-ins.
+fn loaded() -> &'static bear_theme::Loaded {
+    USER.get_or_init(|| bear_theme::load_dir(&themes_dir(), THEMES))
+}
+
 fn user() -> &'static [Theme] {
-    USER.get_or_init(|| {
-        bear_theme::load_dir(&themes_dir())
-            .into_iter()
-            .filter(|t| THEMES.iter().all(|b| b.name != t.name))
-            .collect()
-    })
+    &loaded().themes
+}
+
+/// The `.theme` files in `themes_dir()` that are not offered, and why.
+pub fn skipped() -> &'static [bear_theme::Skipped] {
+    &loaded().skipped
+}
+
+/// Why no theme is called `name` although a file of that name is in the
+/// themes directory: the file and what is wrong with it, on one line.
+/// `None` when there is such a theme, or no such file.
+pub fn why_not(name: &str) -> Option<String> {
+    if lookup(name).is_some() {
+        return None;
+    }
+    explain(name, skipped())
+}
+
+/// The line `why_not` gives, from the files set aside in `skipped`.
+fn explain(name: &str, skipped: &[bear_theme::Skipped]) -> Option<String> {
+    let wanted = bear_theme::slug(name);
+    skipped
+        .iter()
+        .find(|s| s.name() == wanted)
+        .map(|s| format!("{} did not load: {}", s.path.display(), s.problem))
 }
 
 /// The theme every drawing function reads.
@@ -581,6 +630,43 @@ mod tests {
         assert_eq!(find("mauve", || &[]), None);
         assert_eq!(find("mauve", || &THEMES[..1]), None);
         assert_eq!(find("red-graphite-dark", || &[]), Some(0));
+    }
+
+    /// `--config` brings its own themes directory: `themes/` beside the file.
+    #[test]
+    fn the_themes_directory_sits_beside_the_config_file() {
+        assert_eq!(
+            themes_dir_for(None),
+            crate::config::config_dir().join("themes")
+        );
+        assert_eq!(
+            themes_dir_for(Some(Path::new("/etc/bjorn/work.toml"))),
+            Path::new("/etc/bjorn/themes")
+        );
+        assert_eq!(
+            themes_dir_for(Some(Path::new("~/dots/bjorn.toml"))),
+            crate::util::home_dir().join("dots/themes")
+        );
+        assert_eq!(
+            themes_dir_for(Some(Path::new("bjorn.toml"))),
+            Path::new("themes")
+        );
+    }
+
+    /// A theme that exists as a file but did not load is explained, by the
+    /// file and the reason, under any spelling of its name.
+    #[test]
+    fn a_file_that_did_not_load_is_explained_by_name() {
+        let skipped = [bear_theme::Skipped {
+            path: PathBuf::from("/t/My Nord.theme"),
+            problem: bear_theme::Problem::MissingColor("base.accent color".into()),
+        }];
+        assert_eq!(
+            explain("MY NORD", &skipped).as_deref(),
+            Some("/t/My Nord.theme did not load: missing color `base.accent color`")
+        );
+        assert_eq!(explain("my-nord", &skipped), explain("My Nord", &skipped));
+        assert_eq!(explain("mauve", &skipped), None);
     }
 
     #[test]
