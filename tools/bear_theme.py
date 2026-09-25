@@ -2,6 +2,7 @@
 """Generate Bjorn palettes from Bear's own theme files.
 
     python3 tools/bear_theme.py > src/ui/palettes.rs
+    python3 tools/bear_theme.py --manifest > config/themes/bear-themes.sha256
 
 Bear.app ships one JSON file per theme in its BearCore framework. A file may
 name a `meta.base theme` it overrides, and any value may be a `$section.key`
@@ -13,12 +14,18 @@ blending or from the palette the theme is named after.
 The mapping is fixed here rather than tuned per theme, and every theme file
 Bear ships is converted, so a Bear update that adds one needs only a rerun.
 `red-graphite` and its dark twin stay hand-tuned in theme.rs; they were
-sampled from the app before this existed.
+sampled from the app before this existed. Bear's own Red Graphite is still
+generated, as `BEAR_RED_GRAPHITE`, for the themes that name it as their base.
+
+`--manifest` prints each theme file's SHA-256 instead: Bear's files are not in
+the repo, and the manifest is how the parity test knows a Bear.app it finds
+has the files `palettes.rs` was generated from.
 """
 
 from __future__ import annotations
 
 import colorsys
+import hashlib
 import json
 import sys
 import unicodedata
@@ -54,7 +61,11 @@ SEMANTICS = {
     "Tokyo Night Light": ("#587539", "#8F5E15", "#F52A65"),
 }
 
-# Hand-tuned in theme.rs before this script existed; not regenerated.
+# Hand-tuned in theme.rs before this script existed, so not offered from
+# here. Still generated, as `BEAR_RED_GRAPHITE`, because seven of Bear's
+# themes name it as their `base theme`: a copy of one of those in the user's
+# themes directory is laid over Bear's own colors, not over the hand-tuned
+# ones (`bear_theme::built_in_document`).
 SKIP = {"Red Graphite"}
 
 
@@ -148,12 +159,19 @@ def derived_semantics(d: dict, dark: bool) -> tuple[str, str, str]:
     )
 
 
+# Letters NFKD does not decompose, so the ASCII fold below would drop them
+# (`Bjørn` would be `bjrn`). `LETTERS` in src/ui/bear_theme.rs is the same list.
+LETTERS = str.maketrans({"ß": "ss", "æ": "ae", "œ": "oe", "ø": "o", "ð": "d", "đ": "d",
+                         "ħ": "h", "ı": "i", "ł": "l", "ŧ": "t", "þ": "th"})
+
+
 def slug(bear_name: str) -> str:
-    ascii_ = unicodedata.normalize("NFKD", bear_name).encode("ascii", "ignore").decode()
+    folded = bear_name.lower().translate(LETTERS)
+    ascii_ = unicodedata.normalize("NFKD", folded).encode("ascii", "ignore").decode()
     return "-".join("".join(c if c.isalnum() else " " for c in ascii_).lower().split())
 
 
-def theme(bear_name: str) -> str:
+def theme(bear_name: str, prefix: str = "") -> str:
     name = slug(bear_name)
     d = load(bear_name)
     g = lambda p: get(d, p)  # noqa: E731
@@ -206,7 +224,7 @@ def theme(bear_name: str) -> str:
         "tag_fg": parse(g("editor.tag.text color")),
         "tag_bg": parse(g("editor.tag.background color")),
     }
-    const = name.upper().replace("-", "_")
+    const = prefix + name.upper().replace("-", "_")
     lines = [f"/// Bear's {bear_name}.", f"pub const {const}: Theme = Theme {{", f'    name: "{name}",', f"    dark: {str(dark).lower()},"]
     lines += [f"    {k}: rgb({fmt(v)})," for k, v in fields.items()]
     lines.append("};")
@@ -228,8 +246,18 @@ def main() -> None:
     ]
     names = sorted(p.stem for p in BEAR.glob("*.theme") if p.stem not in SKIP)
     out += [theme(n) + "\n" for n in names]
+    out += [theme(n, prefix="BEAR_") + "\n" for n in sorted(SKIP)]
     sys.stdout.write("\n".join(out))
 
 
+def manifest() -> None:
+    """Name and SHA-256 of each theme file, in `shasum -a 256` format: what
+    `config/themes/bear-themes.sha256` records of the files `palettes.rs` was
+    generated from, without their contents."""
+    for path in sorted(BEAR.glob("*.theme")):
+        name = unicodedata.normalize("NFC", path.name)
+        sys.stdout.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {name}\n")
+
+
 if __name__ == "__main__":
-    main()
+    manifest() if sys.argv[1:] == ["--manifest"] else main()

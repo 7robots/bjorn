@@ -116,7 +116,7 @@ pub struct Config {
     pub bearcli: String,
     pub icon_style: String,
     pub icons: BTreeMap<String, String>,
-    /// Palette name; see `ui::theme::THEMES`. An unknown name falls back to
+    /// Palette name; see `ui::theme::names`. An unknown name falls back to
     /// the default, so a typo never stops the app.
     pub theme: String,
     /// Accepted for compatibility with the Python Bjorn's config file. The

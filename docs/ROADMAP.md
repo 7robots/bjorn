@@ -9,7 +9,7 @@ plan lives in `docs/plans/bjorn-rust.md`.
 - Search-box completion candidates could be shown as a popup list now that
   the box is drawn by hand; the Python version was limited to one ghost line.
 - A theme that follows the terminal's own palette, for people who dress their
-  terminal and want the app to match. Every theme here is true colour, which is
+  terminal and want the app to match. Every theme here is true color, which is
   what makes the two implementations agree.
 
 ## Deferred (carried from bjorn's ROADMAP, still open here)

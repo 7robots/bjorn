@@ -27,7 +27,7 @@ struct Cli {
     /// start scoped to this tag as the workspace (overrides config)
     #[arg(long, value_name = "TAG")]
     tag: Option<String>,
-    /// config file to read instead of the default (before a subcommand)
+    /// config file to read instead of the default (before a subcommand); `.theme` files are then read from `themes/` beside it
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
     /// run against a built-in fake bearcli with sample notes (before a subcommand)
@@ -137,9 +137,22 @@ impl Drop for TerminalGuard {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Before anything looks past the built-in themes: `--config` brings the
+    // themes directory beside it, for `--list-themes` as much as for the app.
+    bjorn::ui::theme::use_config(cli.config.as_deref());
     if cli.list_themes {
         for name in bjorn::ui::theme::names() {
             println!("{name}");
+        }
+        // On stderr, so the names on stdout stay a clean list. The path and
+        // the problem are escaped (`bear_theme::escaped`): both can carry
+        // what a file name or a theme file holds.
+        for skipped in bjorn::ui::theme::skipped() {
+            eprintln!(
+                "bjorn: skipped {}: {}",
+                skipped.shown_path(),
+                skipped.problem
+            );
         }
         return Ok(());
     }
@@ -182,10 +195,19 @@ async fn main() -> anyhow::Result<()> {
     // unknown name there falls back to the default with a warning in the app.
     if let Some(theme) = cli.theme.as_deref() {
         if bjorn::ui::theme::lookup(theme).is_none() {
+            let shown = bjorn::ui::bear_theme::escaped(theme);
+            // A file by that name that did not load: say why, rather than
+            // suggest adding the file that is already there.
+            if let Some(why) = bjorn::ui::theme::why_not(theme) {
+                anyhow::bail!("theme \"{shown}\": {why}");
+            }
             anyhow::bail!(
-                "unknown theme {:?}; try one of: {}",
-                theme,
-                bjorn::ui::theme::names().collect::<Vec<_>>().join(", ")
+                "unknown theme \"{}\"; try one of: {} (or add a .theme file to {})",
+                shown,
+                bjorn::ui::theme::names().collect::<Vec<_>>().join(", "),
+                bjorn::ui::bear_theme::escaped(
+                    &bjorn::ui::theme::themes_dir().display().to_string()
+                )
             );
         }
         config.theme = theme.trim().to_lowercase();

@@ -458,13 +458,20 @@ impl App {
         };
         app.reader.clear("Loading\u{2026}");
         if let Some(name) = unknown_theme {
-            app.notify_titled(
-                "Theme",
-                &format!(
+            let message = match crate::ui::theme::why_not(&name) {
+                Some(why) => format!(
+                    "Theme {name:?}: {why}. Drawing with {}.",
+                    crate::ui::theme::DEFAULT_THEME
+                ),
+                None => format!(
                     "Unknown theme {name:?}; drawing with {}. This build knows: {}.",
                     crate::ui::theme::DEFAULT_THEME,
                     crate::ui::theme::names().collect::<Vec<_>>().join(", ")
                 ),
+            };
+            app.notify_titled(
+                "Theme",
+                &message,
                 Severity::Warning,
                 Duration::from_secs(10),
             );

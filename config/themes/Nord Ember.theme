@@ -1,0 +1,6 @@
+{
+  "meta": { "base theme": "Nord" },
+  "base": {
+    "accent color": "#D08770"
+  }
+}
