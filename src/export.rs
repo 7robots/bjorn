@@ -106,9 +106,15 @@ pub fn safe_filename(title: &str) -> String {
     }
 }
 
+/// Is anything at `path`, a dangling symlink included? `Path::exists` follows
+/// the link and says no, and a write would then follow it to wherever it points.
+fn taken(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
 /// `path`, or `stem (2).ext`, `stem (3).ext`... if it already exists.
 pub fn unique_path(path: &Path) -> PathBuf {
-    if !path.exists() {
+    if !taken(path) {
         return path.to_path_buf();
     }
     let stem = path
@@ -122,7 +128,7 @@ pub fn unique_path(path: &Path) -> PathBuf {
     let mut n = 2;
     loop {
         let candidate = path.with_file_name(format!("{stem} ({n}){suffix}"));
-        if !candidate.exists() {
+        if !taken(&candidate) {
             return candidate;
         }
         n += 1;
@@ -134,8 +140,17 @@ pub fn default_export_path(export_dir: &Path, title: &str, ext: &str) -> PathBuf
     unique_path(&dir.join(format!("{}.{ext}", safe_filename(title))))
 }
 
+/// The destination with `~` expanded and its folder created. A destination
+/// that is itself a symlink is refused: an export writes a file or a folder of
+/// its own, never through a link to somewhere else.
 fn prepare(destination: &Path) -> Result<PathBuf, ExportError> {
     let destination = expand_tilde(&destination.to_string_lossy());
+    if is_symlink(&destination) {
+        return Err(ExportError(format!(
+            "{}: is a symbolic link; not writing through it",
+            destination.display()
+        )));
+    }
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| ExportError(format!("{}: {e}", parent.display())))?;
@@ -143,8 +158,45 @@ fn prepare(destination: &Path) -> Result<PathBuf, ExportError> {
     Ok(destination)
 }
 
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Write `data` to `path`. A new file is created with `O_EXCL`, which fails
+/// rather than follow a symlink that appears at the name; an existing regular
+/// file the user chose is overwritten; a symlink is refused.
 fn write(path: &Path, text: &str) -> Result<(), ExportError> {
-    std::fs::write(path, text).map_err(|e| ExportError(format!("{}: {e}", path.display())))
+    write_bytes(path, text.as_bytes())
+}
+
+fn write_bytes(path: &Path, data: &[u8]) -> Result<(), ExportError> {
+    use std::io::Write;
+    let fail = |e: std::io::Error| ExportError(format!("{}: {e}", path.display()));
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(ExportError(format!(
+            "{}: is a symbolic link; not writing through it",
+            path.display()
+        ))),
+        Ok(_) => std::fs::write(path, data).map_err(fail),
+        Err(_) => std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(data))
+            .map_err(fail),
+    }
+}
+
+/// Is `name` a plain file name: one normal path component, with nothing that
+/// climbs out of the folder it is joined to or replaces it (`..`, `a/b`,
+/// `/etc/x`, empty)? Attachment names come from the note's library, so an
+/// export treats them as data, not as paths.
+fn is_plain_file_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) && !name.contains(['/', '\0'])
 }
 
 /// Write the raw note text. The parent directory is created if missing.
@@ -217,10 +269,7 @@ pub fn export_rtf(
     );
     write(&source, &html)?;
     let result = std::process::Command::new("textutil")
-        .args(["-convert", kind])
-        .arg(&source)
-        .arg("-output")
-        .arg(&destination)
+        .args(textutil_args(kind, &source, &destination))
         .output()
         .map_err(|e| ExportError(format!("textutil: {e}")))?;
     // textutil exits 0 even when it fails; the output is the only reliable signal.
@@ -238,6 +287,22 @@ pub fn export_rtf(
         return Err(ExportError(first.to_string()));
     }
     Ok(destination)
+}
+
+/// textutil's arguments. A flat `.rtf` gets `-noload`, so nothing the note's
+/// HTML points at (a remote image, a stylesheet) is fetched for a file that
+/// carries no images anyway. An `.rtfd` cannot have it: with `-noload`,
+/// textutil drops the `data:` images the package exists to carry and puts a
+/// placeholder icon in their place.
+fn textutil_args(kind: &str, source: &Path, destination: &Path) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec!["-convert".into(), kind.into()];
+    if kind == "rtf" {
+        args.push("-noload".into());
+    }
+    args.push(source.into());
+    args.push("-output".into());
+    args.push(destination.into());
+    args
 }
 
 /// Percent-encode a filename the way Bear writes attachment links.
@@ -275,7 +340,8 @@ pub fn rewrite_attachment_links(content: &str, filenames: &[String], prefix: &st
 
 /// A `.textbundle` folder (TextBundle 2.0): `info.json`, the raw Bear markdown
 /// as `text.md` with attachment links pointing into `assets/`, and every
-/// attachment copied there.
+/// attachment copied there. An attachment whose name is not a plain file name
+/// is left out, and its link left as written.
 pub fn export_textbundle(
     content: &str,
     destination: &Path,
@@ -289,7 +355,11 @@ pub fn export_textbundle(
         &destination.join("info.json"),
         &format!("{}\n", serde_json::to_string_pretty(&info).unwrap()),
     )?;
-    let names: Vec<String> = images.keys().cloned().collect();
+    let images: Vec<(&String, &Vec<u8>)> = images
+        .iter()
+        .filter(|(name, _)| is_plain_file_name(name))
+        .collect();
+    let names: Vec<String> = images.iter().map(|(name, _)| (*name).clone()).collect();
     let text = rewrite_attachment_links(content, &names, "assets/");
     let text = if text.ends_with('\n') {
         text
@@ -301,8 +371,7 @@ pub fn export_textbundle(
         let assets = destination.join("assets");
         std::fs::create_dir_all(&assets).map_err(|e| ExportError(e.to_string()))?;
         for (name, data) in images {
-            std::fs::write(assets.join(name), data)
-                .map_err(|e| ExportError(format!("{name}: {e}")))?;
+            write_bytes(&assets.join(name), data)?;
         }
     }
     Ok(destination)
@@ -347,6 +416,90 @@ mod tests {
             default_export_path(dir.path(), "Note", "md"),
             dir.path().join("Note (3).md")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_export_never_writes_through_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        let link = dir.path().join("Note.md");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        assert!(!link.exists(), "dangling, so `exists` says no");
+        assert_eq!(unique_path(&link), dir.path().join("Note (2).md"));
+        assert_eq!(
+            default_export_path(dir.path(), "Note", "md"),
+            dir.path().join("Note (2).md")
+        );
+        for fmt in ["md", "txt", "html", "textbundle"] {
+            let err =
+                export_note(format_by_id(fmt), "# T\n", "T", &link, &HashMap::new()).unwrap_err();
+            assert!(err.0.contains("symbolic link"), "{fmt}: {}", err.0);
+        }
+        assert!(
+            !elsewhere.exists(),
+            "nothing was created at the link's target"
+        );
+
+        // An existing regular file the user typed is still overwritten.
+        let chosen = dir.path().join("chosen.md");
+        std::fs::write(&chosen, "old").unwrap();
+        export_markdown("new", &chosen).unwrap();
+        assert_eq!(std::fs::read_to_string(&chosen).unwrap(), "new\n");
+    }
+
+    #[test]
+    fn a_textbundle_keeps_attachments_inside_its_assets_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("out").join("T.textbundle");
+        let outside = dir.path().join("abs.png");
+        let mut images: HashMap<String, Vec<u8>> = HashMap::new();
+        for name in [
+            "../../evil.png",
+            "..",
+            ".",
+            "",
+            "sub/x.png",
+            outside.to_str().unwrap(),
+            "ok.png",
+        ] {
+            images.insert(name.to_string(), b"bytes".to_vec());
+        }
+        let out = export_textbundle(
+            "![](ok.png) ![](../../evil.png) ![](sub/x.png)",
+            &bundle,
+            &images,
+        )
+        .unwrap();
+        let assets: Vec<_> = std::fs::read_dir(out.join("assets"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(assets, vec![std::ffi::OsString::from("ok.png")]);
+        assert!(!dir.path().join("evil.png").exists());
+        assert!(!outside.exists());
+        assert_eq!(
+            std::fs::read_to_string(out.join("text.md")).unwrap(),
+            "![](assets/ok.png) ![](../../evil.png) ![](sub/x.png)\n",
+            "only the attachment written is relinked"
+        );
+        assert!(is_plain_file_name("Front bed.png") && is_plain_file_name("..png"));
+    }
+
+    #[test]
+    fn flat_rtf_asks_textutil_not_to_load_resources() {
+        let args = |kind| {
+            textutil_args(kind, Path::new("in.html"), Path::new("out"))
+                .into_iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            args("rtf"),
+            ["-convert", "rtf", "-noload", "in.html", "-output", "out"]
+        );
+        // `-noload` would swap the package's embedded images for an icon.
+        assert!(!args("rtfd").contains(&"-noload".to_string()));
     }
 
     #[test]
@@ -429,5 +582,16 @@ mod tests {
         .unwrap();
         let rtf = std::fs::read_to_string(out).unwrap();
         assert!(rtf.starts_with("{\\rtf1") && rtf.contains("release notes"));
+
+        // Images the note points at elsewhere do not stop a flat export.
+        let out = export_note(
+            format_by_id("rtf"),
+            "# T\n\n![](http://127.0.0.1:9/x.png) <img src=\"https://example.invalid/y.png\">\n\nstill here",
+            "T",
+            &dir.path().join("remote.rtf"),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(out).unwrap().contains("still here"));
     }
 }
