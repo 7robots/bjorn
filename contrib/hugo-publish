@@ -8,7 +8,7 @@ Python 3 and its standard library; macOS has python3 once the Command Line
 Tools are installed (`xcode-select --install`).
 
     hugo-publish --site ~/site [--section posts] [--draft | --live | --ask]
-                 [--tag-prefix blog/] [--bundle] [--allow-html]
+                 [--tag-prefix blog/] [--bundle] [--allow-html] [--allow-exif]
 
 A post is a draft unless --live is given (or --ask and the action's prompt
 was answered `yes`). Nothing leaves the machine: the script writes files
@@ -22,7 +22,9 @@ What it guards, and why:
 - A file it did not write for this note is never replaced. Every post it
   writes carries `bjorn_note:` (a hash of the note's id, so no Bear id reaches
   the site); an existing file without this note's mark is refused, as is an
-  image or other file already in a bundle.
+  image or other file already in a bundle. A new post whose name Hugo would
+  read as a page already there (`<slug>.en.md`, `<slug>/`, `index`) is
+  refused too.
 - Front matter is written by this script, key by key, from a fixed list,
   every string JSON-quoted (a valid YAML double-quoted scalar), so nothing in
   a note can add a key or break a line. The note's own front matter is read
@@ -31,9 +33,14 @@ What it guards, and why:
 - The note's private parts stay home: its tags (only tags under
   --tag-prefix are published, prefix removed), wiki links (reduced to their
   text), links to bear://, file://, other apps and local paths (reduced to
-  their text), and a note that mentions /Users/... is refused.
+  their text), and a note that mentions /Users/... is refused. So is an
+  image carrying a GPS location, unless --allow-exif.
 - Hugo shortcodes and raw HTML would run on the site; a note carrying
-  either is refused unless --allow-html says it was meant.
+  either is refused unless --allow-html says it was meant. The check runs
+  again on the text as it will be written, after links are taken out, and
+  treats inline code as prose: where Markdown reads backticks differently
+  from this script, the result is a refusal, never HTML on the site.
+  Front matter values are held to the same rules.
 - Everything is worked out before anything is written; files are created
   with O_EXCL|O_NOFOLLOW under a temporary name and moved into place, and a
   failure part way removes what this run added.
@@ -46,6 +53,7 @@ import argparse
 import bisect
 import datetime
 import hashlib
+import html
 import json
 import os
 import re
@@ -56,10 +64,16 @@ import unicodedata
 import urllib.parse
 
 MARK_KEY = "bjorn_note"
+# The note keys this script wrote into the post, so that a key the note no
+# longer gives is dropped rather than kept as if added by hand.
+MANAGED_KEY = "bjorn_managed"
 FRONT_MATTER_LIMIT = 64 * 1024
 NOTE_LIMIT = 8 * 1024 * 1024
+LINE_LIMIT = 64 * 1024
 POST_LIMIT = 4 * 1024 * 1024
 IMAGE_LIMIT = 50 * 1024 * 1024
+IMAGES_LIMIT = 200 * 1024 * 1024
+IMAGE_COUNT_LIMIT = 200
 SLUG_LIMIT = 80
 # How far the search for this note's earlier post looks: deep enough for
 # year/month folders and bundles, bounded for a huge section.
@@ -117,7 +131,21 @@ COVER_KEYS = {
 TAG_TOKEN = r"#[^\s#][^#\n]*?#(?=\s|$)|#[^\s#]+"
 TAG_LINE_RE = re.compile(r"^\s*(?:%s)(?:\s+(?:%s))*\s*$" % (TAG_TOKEN, TAG_TOKEN))
 HEADING_RE = re.compile(r"^#{1,6}\s+\S")
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+# A fence line after its indentation: the run, and what follows it.
+FENCE_RUN_RE = re.compile(r"(`{3,}|~{3,})(.*)$")
+# A fence behind a list marker (`- ````, `1. ~~~`, `> - ````). Its code
+# block ends with the list item, which this script cannot see: see
+# code_states.
+LIST_FENCE_RE = re.compile(
+    r"^[ \t]*(?:>[ \t]*)*(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]*(?:>|[-+*]|[0-9]{1,9}[.)]))*[ \t]*(?:`{3,}|~{3,})"
+)
+# A line that starts a block of its own and so ends a paragraph, for
+# pairing code spans across the lines of one paragraph.
+BLOCK_START_RE = re.compile(
+    r"^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|[-+*](?:[ \t]|$)|[0-9]{1,9}[.)](?:[ \t]|$)|<|\|"
+    r"|(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,}|=+[ \t]*)$)"
+)
+LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$)")
 KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)[ \t]*:(?:[ \t]+(.*))?$")
 # Any top-level key of a post's existing front matter, for keeping a post's
 # hand-added keys as written.
@@ -129,15 +157,42 @@ LINK_RE = re.compile(
     r"((?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*)\)"
 )
 DESTINATION_RE = re.compile(r"\]\([ \t]*<?([^()\s<>]+)")
-REFERENCE_RE = re.compile(r"^[ ]{0,3}\[([^\]\n]+)\]:[ \t]*<?([^\s<>]+)>?")
-BARE_URL_RE = re.compile(r"<?\b([A-Za-z][A-Za-z0-9+.-]*)://[^\s<>)\]\"']*>?")
+# A link whose target would be on the next line, which Markdown allows.
+OPEN_DESTINATION_RE = re.compile(r"\]\([ \t]*<?[ \t]*$")
+# `[id]: target`, also behind list and quote markers (`- [id]: ...`,
+# `> [id]: ...`), where Markdown still reads it as a link definition.
+REFERENCE_RE = re.compile(
+    r"^(?:[ \t]*(?:>|[-+*]|[0-9]{1,9}[.)]))*[ \t]*\[((?:[^\[\]\\\n]|\\.)+)\]:(.*)$"
+)
+# The scheme may not follow a letter, digit or `+.-`, so a long run of those
+# is not rescanned from every position.
+BARE_URL_RE = re.compile(r"<?(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]*)://[^\s<>)\]\"']*>?")
+# `<scheme:...>`, an autolink (Markdown's scheme is 2 to 32 characters).
+AUTOLINK_RE = re.compile(r"<([A-Za-z][A-Za-z0-9+.-]{1,31}):[^\s<>]*>")
+EMAIL_AUTOLINK_RE = re.compile(
+    r"<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*>"
+)
 SHORTCODE_RE = re.compile(r"\{\{[<%]")
 # An HTML tag, comment, declaration or processing instruction. An autolink
 # (`<https://...>`, `<me@example.com>`) has `:` or `@` after its first word
-# and does not match.
-HTML_RE = re.compile(r"<(?:/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>])|!--|![A-Za-z\[]|\?)")
+# and does not match. A tag name at the end of a line is a tag too: its
+# attributes can go on the next line.
+HTML_RE = re.compile(r"<(?:/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$)|!--|![A-Za-z\[]|\?)")
+# A tag in inline code that could do nothing even if Markdown read it as HTML
+# after all: no attribute value (so no handler, no URL), whole on its line,
+# and none of the elements below. `Vec<String>` and `<div>` in backticks pass.
+INERT_TAG_RE = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)(?:[ \t/][^<>=\"'`]*)?>")
+LIVE_ELEMENTS = frozenset(
+    "script style iframe frame frameset object embed applet base link meta form "
+    "textarea title plaintext xmp noembed noframes noscript template svg math".split()
+)
 MORE = "<!--more-->"
+# A /Users/... path anywhere, and in prose also the lower-case /users/...
+# where a path starts (APFS matches either); code keeps the stricter form so
+# an API route like `GET /users/42` in code is not refused.
 LOCAL_PATH_RE = re.compile(r"/Users/[^/\s]")
+PROSE_PATH_RE = re.compile(r"/Users/[^/\s]|(?<![A-Za-z0-9_%-])/(?i:users)/[^/\s]")
 TOKEN_OPEN, TOKEN_CLOSE = "\ufdd0", "\ufdd1"
 TOKEN_RE = re.compile("\ufdd0([0-9]+)\ufdd1")
 DATE_RE = re.compile(
@@ -245,7 +300,11 @@ def parse_date(text):
     except ValueError:
         return None
     if zone is None:
-        return dt.astimezone()
+        try:
+            return dt.astimezone()
+        except (OverflowError, OSError, ValueError):
+            # Year 1 in a zone east of UTC has no local time to convert to.
+            return None
     if zone == "Z":
         offset = datetime.timedelta(0)
     else:
@@ -483,13 +542,125 @@ def backtick_run(line, i):
     return j - i
 
 
-def scan_wiki(line):
+def autolink_spans(text):
+    """(start, end) of each autolink, URL or email: Markdown reads these
+    before code spans, so a backtick inside one is text."""
+    spans = [(m.start(), m.end()) for m in AUTOLINK_RE.finditer(text)]
+    spans += [(m.start(), m.end()) for m in EMAIL_AUTOLINK_RE.finditer(text)]
+    return sorted(spans)
+
+
+def code_spans(text):
+    """(start, end) of each code span in `text`, one paragraph with its lines
+    joined by newlines, as Markdown pairs them: a run of backticks opens a
+    span unless a backslash escapes its first backtick or an autolink that
+    started first holds it, and closes at the next run of exactly as many
+    backticks (a backslash is plain text inside code). An unclosed run is
+    text."""
+    runs, by_length, i = [], {}, 0
+    while True:
+        i = text.find("`", i)
+        if i < 0:
+            break
+        run = backtick_run(text, i)
+        runs.append((i, run))
+        by_length.setdefault(run, []).append(i)
+        i += run
+    if not runs:
+        return []
+    links = autolink_spans(text) if "<" in text else []
+    link_starts = [start for start, _ in links]
+    spans, prose = [], 0
+    for start, run in runs:
+        if start < prose:
+            continue
+        k = bisect.bisect_right(link_starts, start) - 1
+        if k >= 0 and links[k][0] >= prose and links[k][1] > start:
+            continue
+        slashes, j = 0, start - 1
+        while j >= prose and text[j] == "\\":
+            slashes, j = slashes + 1, j - 1
+        if slashes % 2:
+            start, run = start + 1, run - 1
+            if not run:
+                continue
+        closers = by_length.get(run, [])
+        k = bisect.bisect_left(closers, start + run)
+        if k < len(closers):
+            spans.append((start, closers[k] + run))
+            prose = closers[k] + run
+    return spans
+
+
+def code_ranges(lines):
+    """code_spans for lines that make one paragraph, as (start, end) on each
+    line; a span over several lines is a range on each of them."""
+    out = [[] for _ in lines]
+    if not any("`" in line for line in lines):
+        return out
+    offsets, at = [], 0
+    for line in lines:
+        offsets.append(at)
+        at += len(line) + 1
+    for start, end in code_spans("\n".join(lines)):
+        k = bisect.bisect_right(offsets, start) - 1
+        while start < end:
+            line_end = offsets[k] + len(lines[k])
+            out[k].append((start - offsets[k], min(end, line_end) - offsets[k]))
+            start, k = line_end + 1, k + 1
+    return out
+
+
+def paragraph_ranges(lines, prose):
+    """code_ranges for every paragraph of `lines`, where `prose[i]` is false
+    for a line in a code block. A blank line, a code block or a line that
+    starts a block of its own (a heading, a list item, a quote, a table row)
+    ends a paragraph; a heading, a rule or a table row is one on its own."""
+    out = [[] for _ in lines]
+    run = []
+
+    def flush():
+        for k, ranges in zip(run, code_ranges([lines[k] for k in run])):
+            out[k] = ranges
+        run.clear()
+
+    for k, line in enumerate(lines):
+        if not prose[k] or not line.strip():
+            flush()
+            continue
+        block = BLOCK_START_RE.match(line)
+        quoted = line.lstrip().startswith(">")
+        if block and run and not (quoted and lines[run[-1]].lstrip().startswith(">")):
+            flush()
+        run.append(k)
+        if block and not (quoted or LIST_ITEM_RE.match(line) or line.lstrip().startswith("<")):
+            flush()
+    flush()
+    return out
+
+
+def split_pieces(line, ranges):
+    """The line as (is_code, text) pieces, code where `ranges` says."""
+    pieces, at = [], 0
+    for start, end in ranges:
+        pieces.append((False, line[at:start]))
+        pieces.append((True, line[start:end]))
+        at = end
+    pieces.append((False, line[at:]))
+    return pieces
+
+
+def scan_wiki(line, code=None):
     """(start, end, display) for each wiki link on a line. A link runs from
     `[[` to the first `]]` after it; a `]` right after that belongs to the
     title while a `[` in it is still open, so `[[Plan [v2]]]` names
-    `Plan [v2]`. A code span that opens before a `[[` hides it."""
+    `Plan [v2]`. A code span (`code`, as from code_ranges; by default the
+    line's own) that opens before a `[[` hides it."""
     if "[[" not in line:
         return []
+    if code is None:
+        code = code_ranges([line])[0]
+    skip = dict(code)
     n = len(line)
 
     def pair_at(i, ch):
@@ -503,21 +674,10 @@ def scan_wiki(line):
     depth = [0] * (n + 1)
     for p, ch in enumerate(line):
         depth[p + 1] = depth[p] + (1 if ch == "[" else -1 if ch == "]" else 0)
-    runs, p = {}, 0
-    while p < n:
-        if line[p] == "`":
-            run = backtick_run(line, p)
-            runs.setdefault(run, []).append(p)
-            p += run
-        else:
-            p += 1
     out, i = [], 0
     while i < n:
-        if line[i] == "`":
-            run = backtick_run(line, i)
-            starts = runs.get(run, [])
-            k = bisect.bisect_left(starts, i + run)
-            i = starts[k] + run if k < len(starts) else i + run
+        if i in skip:
+            i = max(skip[i], i + 1)
             continue
         if pair_at(i, "[") and next_close[i + 2] < n:
             first = next_close[i + 2]
@@ -537,38 +697,68 @@ def scan_wiki(line):
 # -- links, tags and code -------------------------------------------------------
 
 
+def indentation(line):
+    """(columns, characters) of a line's leading spaces and tabs; a tab
+    reaches the next multiple of four columns, as in Markdown."""
+    cols = i = 0
+    while i < len(line) and line[i] in " \t":
+        cols = cols + 4 - cols % 4 if line[i] == "\t" else cols + 1
+        i += 1
+    return cols, i
+
+
 def code_states(lines):
-    """(in_code, line) for each line: fence lines and what is between them
-    are code. A fence closes on a run of the same character, at least as
-    long, with nothing after it."""
-    fence = None
+    """Each line's state: "code", "uncertain" or "prose".
+
+    A fence opens on at most three columns of indentation and a run of three
+    or more backticks or tildes (a backtick fence's info string holds no
+    backtick), and closes on a run of the same character at least as long,
+    also on at most three columns, with nothing but spaces after it. Fence
+    lines and what is between them are code. That is Markdown's rule for a
+    fence at the top level, so there this script and the site agree.
+
+    A fence inside a list item also ends with the item, which depends on
+    indentation this script does not follow. Once a line could be read
+    either way (a fence behind a list marker, a fence-like line indented four
+    or more, a line in a fence indented less than its opening fence, a
+    closing fence indented unlike it), what this script takes for code is
+    "uncertain" to the end of the note: kept as written, but checked as if
+    it were prose, so a misreading can only refuse, never publish HTML."""
+    fence, unsure = None, False  # fence: (character, length, indent)
     for line in lines:
-        m = FENCE_RE.match(line)
-        if fence:
-            closes = (
-                m is not None
-                and m.group(1)[0] == fence[0]
-                and len(m.group(1)) >= len(fence)
-                and not line.strip().strip(fence[0])
-            )
-            if closes:
-                fence = None
-            yield True, line
-        elif m:
-            fence = m.group(1)
-            yield True, line
-        else:
-            yield False, line
+        cols, at = indentation(line)
+        m = FENCE_RUN_RE.match(line, at)
+        if fence is None:
+            if m and cols <= 3 and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = (m.group(1)[0], len(m.group(1)), cols)
+                yield "uncertain" if unsure else "code"
+                continue
+            if (m and cols > 3) or LIST_FENCE_RE.match(line):
+                unsure = True
+            yield "prose"
+            continue
+        char, length, opened = fence
+        closes = (
+            m is not None
+            and m.group(1)[0] == char
+            and len(m.group(1)) >= length
+            and not m.group(2).strip(" \t")
+        )
+        if closes and cols <= 3:
+            unsure = unsure or cols < opened
+            fence = None
+        elif closes and opened and cols <= opened + 3:
+            unsure = True
+        elif line.strip() and cols < opened:
+            unsure = True
+        yield "uncertain" if unsure else "code"
 
 
-def destination_kind(target, bundle_assets):
-    """What a link target is: `web` (kept), `local` (a place on this Mac or
-    in another app: dropped), `asset` (a TextBundle attachment) or
-    `relative` (a path within the site)."""
-    target = target.strip()
-    if target.startswith("<") and target.endswith(">"):
-        target = target[1:-1]
-    decoded = urllib.parse.unquote(target)
+# What a browser strips from both ends of a URL before reading it.
+URL_TRIM = "".join(chr(c) for c in range(0x21))
+
+
+def plain_kind(decoded, bundle_assets):
     if decoded.startswith("#") or decoded.startswith("//"):
         return "web"
     m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):", decoded)
@@ -584,33 +774,38 @@ def destination_kind(target, bundle_assets):
     return "relative"
 
 
-def split_code_spans(line):
-    """The line as (is_code, text) pieces: a code span closes at the next run
-    of exactly as many backticks; an unclosed run is text."""
-    pieces, start, i, n = [], 0, 0, len(line)
-    while i < n:
-        if line[i] != "`":
-            i += 1
-            continue
-        run = backtick_run(line, i)
-        close, j = None, i + run
-        while True:
-            at = line.find("`" * run, j)
-            if at < 0:
-                break
-            length = backtick_run(line, at)
-            if length == run:
-                close = at
-                break
-            j = at + length
-        if close is None:
-            i += run
-            continue
-        pieces.append((False, line[start:i]))
-        pieces.append((True, line[i : close + run]))
-        i = start = close + run
-    pieces.append((False, line[start:]))
-    return pieces
+def destination_kind(target, bundle_assets):
+    """What a link target is: `web` (kept), `local` (a place on this Mac or
+    in another app: dropped), `asset` (a TextBundle attachment) or
+    `relative` (a path within the site).
+
+    Markdown decodes entities in a target (`&#116;hings:` is `things:`), and
+    a browser drops tabs and newlines anywhere in a URL and spaces and
+    control characters at its ends. The target is read every way it could
+    be, percent-decoded too, and is local if any reading is."""
+    target = target.strip()
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1]
+    target = target.strip()
+    readings = {target, html.unescape(target)}
+    readings |= {urllib.parse.unquote(r) for r in readings}
+    readings = {re.sub(r"[\t\n\r]", "", r).strip(URL_TRIM) for r in readings}
+    if any(plain_kind(r, bundle_assets) == "local" for r in readings):
+        return "local"
+    primary = urllib.parse.unquote(html.unescape(target))
+    return plain_kind(re.sub(r"[\t\n\r]", "", primary).strip(URL_TRIM), bundle_assets)
+
+
+def gap(m):
+    """What a match taken out of the text leaves: a space where the text on
+    either side would otherwise join (into a word, or into `{{<` or `<img`),
+    else nothing."""
+    before = m.string[m.start() - 1 : m.start()]
+    after = m.string[m.end() : m.end() + 1]
+    return " " if before and after and not before.isspace() and not after.isspace() else ""
+
+
+TAG_END_RE = re.compile(r"[.,;:!?)\]}\"']+")
 
 
 def strip_inline_tags(text, known):
@@ -621,36 +816,34 @@ def strip_inline_tags(text, known):
     if not known or "#" not in text:
         return text
     cuts = []
-    for m in re.finditer("#", text):
-        i = m.start()
+    i = text.find("#")
+    while i >= 0:
         before = text[i - 1] if i else ""
-        if before and not (before.isspace() or before in "(["):
-            continue
-        rest = text[i + 1 :]
-        for tag in known:
-            head = rest[: len(tag)]
-            if head.lower() != tag:
-                continue
-            after = rest[len(tag) :]
-            end = i + 1 + len(tag)
-            if " " in tag:
-                ok = after.startswith("#")
-                end += 1 if ok else 0
-            elif not after or after[0].isspace():
-                ok = True
-            elif after[0] == "#":
-                ok, end = True, end + 1
-            else:
-                punct = re.match(r"[.,;:!?)\]}\"']+", after)
-                ok = bool(punct) and (len(after) == punct.end() or after[punct.end()].isspace())
-            if ok:
-                cuts.append((i, end))
-                break
+        if not before or before.isspace() or before in "([":
+            for tag in known:
+                end = i + 1 + len(tag)
+                if text[i + 1 : end].lower() != tag:
+                    continue
+                after = text[end : end + 1]
+                if " " in tag:
+                    ok = after == "#"
+                    end += 1 if ok else 0
+                elif not after or after.isspace():
+                    ok = True
+                elif after == "#":
+                    ok, end = True, end + 1
+                else:
+                    punct = TAG_END_RE.match(text, end)
+                    ok = bool(punct) and (punct.end() == len(text) or text[punct.end()].isspace())
+                if ok:
+                    cuts.append((i, end))
+                    break
+        i = text.find("#", i + 1)
     if not cuts:
         return text
     out, last = "", 0
     for start, end in cuts:
-        if text[:start].endswith("(") and text[end:].startswith(")"):
+        if start and text[start - 1] == "(" and text[end : end + 1] == ")":
             start, end = start - 1, end + 1
         if start < last:
             continue
@@ -663,6 +856,30 @@ def strip_inline_tags(text, known):
             elif not out and nxt == " ":
                 last += 1
     return out + text[last:]
+
+
+def html_refusal(where):
+    return Refusal(
+        "%s has raw HTML, which a Hugo site may render as is; "
+        "remove it, or add --allow-html to the action." % where
+    )
+
+
+def shortcode_refusal(where):
+    return Refusal(
+        "%s has a Hugo shortcode ({{< or {{%%), which the site would run; "
+        "remove it, or add --allow-html to the action." % where
+    )
+
+
+def inert_in_code(text, at, code):
+    """Whether the tag at `at` sits whole inside one of the line's code spans
+    and could do nothing even if Markdown read it as HTML after all."""
+    for start, end in code:
+        if start <= at < end:
+            m = INERT_TAG_RE.match(text, at)
+            return bool(m) and m.end() <= end and m.group(1).lower() not in LIVE_ELEMENTS
+    return False
 
 
 class Cleaner:
@@ -691,11 +908,23 @@ class Cleaner:
                 "write ~/... or $HOME/... instead." % where
             )
 
+    def check_unsure(self, text, number):
+        """A line this script takes for code that the site may read as prose
+        (see code_states) carries nothing prose would have had taken out."""
+        if scan_wiki(text, []) or strip_inline_tags(text, self.known) != text:
+            raise Refusal(
+                "Line %d is in a code block the site may not read as one (a fence in a "
+                "list item?) and holds a wiki link or one of the note's tags; move the "
+                "fence out of the list, or take them out." % number
+            )
+
     def link(self, m):
         bang, text, target, title = m.group(1), m.group(2), m.group(3), m.group(4)
         kind = destination_kind(target, self.assets)
         raw = target[1:-1] if target.startswith("<") else target
-        if bang and urllib.parse.unquote(raw).strip().lower().startswith("data:"):
+        if bang and urllib.parse.unquote(html.unescape(raw)).strip(URL_TRIM).lower().startswith(
+            "data:"
+        ):
             raise Refusal(
                 "The note has an inline data: image; only attached or web images are published."
             )
@@ -707,7 +936,7 @@ class Cleaner:
                         "The image %s is not among the note's attachments." % one_line(raw)[:80]
                     )
                 self.notes.append("A link to a missing attachment became its text.")
-                return text
+                return text or gap(m)
             if name.rsplit(".", 1)[-1].lower() not in IMAGE_EXTENSIONS or "." not in name:
                 if bang:
                     raise Refusal(
@@ -717,7 +946,7 @@ class Cleaner:
                 self.notes.append(
                     "The link to the attachment %s became its text." % one_line(name)[:80]
                 )
-                return text
+                return text or gap(m)
             if name not in self.images:
                 self.images.append(name)
             return "%s[%s](%s%d%s%s)" % (
@@ -736,7 +965,7 @@ class Cleaner:
                     % one_line(raw)[:80]
                 )
             self.notes.append("A link to a local file or another app became its text.")
-            return text
+            return text or gap(m)
         if bang and kind == "relative":
             raise Refusal(
                 "The image %s is not an attachment the action was given, so it would be a broken link; "
@@ -749,41 +978,52 @@ class Cleaner:
             for m in HTML_RE.finditer(text):
                 if text.startswith(MORE, m.start()):
                     continue
-                raise Refusal(
-                    "Line %d has raw HTML, which a Hugo site may render as is; "
-                    "remove it, or add --allow-html to the action." % number
-                )
+                raise html_refusal("Line %d" % number)
         text = LINK_RE.sub(self.link, text)
 
-        def bare(m):
+        def away(m):
             if m.group(1).lower() in WEB_SCHEMES:
                 return m.group(0)
-            self.notes.append("A %s:// address was taken out." % m.group(1).lower())
-            return ""
+            self.notes.append("A %s: address was taken out." % m.group(1).lower())
+            return gap(m)
 
-        text = BARE_URL_RE.sub(bare, text)
-        if LOCAL_PATH_RE.search(text):
+        text = AUTOLINK_RE.sub(away, text)
+        text = BARE_URL_RE.sub(away, text)
+        if PROSE_PATH_RE.search(text):
             raise Refusal(
                 "Line %d mentions a /Users/... path, which names this Mac's account; "
                 "write ~/... instead." % number
             )
         return strip_inline_tags(text, self.known)
 
-    def line(self, line, number):
-        found = scan_wiki(line)
+    def line(self, line, number, code):
+        found = scan_wiki(line, code)
         shown = []
         if found:
-            out, last = "", 0
+            out, last, taken = "", 0, []
             for start, end, display in found:
-                display = one_line(display)
-                if LOCAL_PATH_RE.search(display):
+                display = strip_inline_tags(one_line(display), self.known).strip()
+                if PROSE_PATH_RE.search(display):
                     raise Refusal("Line %d links to a note named after a /Users/... path." % number)
-                out += line[last:start] + TOKEN_OPEN + "w%d" % len(shown) + TOKEN_CLOSE
+                token = TOKEN_OPEN + "w%d" % len(shown) + TOKEN_CLOSE
+                out += line[last:start] + token
+                taken.append((start, end, len(token)))
                 shown.append(md_escape(display))
                 last = end
             line = out + line[last:]
+            # The code spans, moved to where they are now; one a wiki link
+            # took in is part of that link's text.
+            moved = []
+            for start, end in code:
+                if any(start < w_end and end > w_start for w_start, w_end, _ in taken):
+                    continue
+                shift = sum(
+                    w_end - w_start - size for w_start, w_end, size in taken if w_end <= start
+                )
+                moved.append((start - shift, end - shift))
+            code = moved
         pieces = []
-        for is_code, text in split_code_spans(line):
+        for is_code, text in split_pieces(line, code):
             if is_code:
                 self.check_code(text, "Line %d's code" % number)
                 pieces.append(text)
@@ -795,53 +1035,119 @@ class Cleaner:
         )
 
     def reference(self, line, number):
-        """A `[id]: target` definition: kept, dropped with its target, or
-        refused, by the same rules as an inline link."""
+        """A `[id]: target` definition, also behind list and quote markers:
+        kept, dropped with its target, or refused, by the same rules as an
+        inline link."""
         m = REFERENCE_RE.match(line)
         if not m:
             return line
-        kind = destination_kind(m.group(2), None)
-        if kind == "local":
+        rest = m.group(2).strip()
+        if not rest:
+            raise Refusal(
+                "Line %d is a link definition with its address on the next line; "
+                "put the address on the same line." % number
+            )
+        if rest.startswith("<") and ">" in rest:
+            target = rest[: rest.index(">") + 1]
+        else:
+            target = rest.split()[0]
+        if destination_kind(target, None) == "local":
             self.notes.append("A link definition pointing at this Mac was taken out.")
             return None
         return line
 
     def body(self, lines):
+        """(number, state, text) for each line kept, where state is what
+        code_states made of it."""
+        texts = [text for _, text in lines]
+        states = list(code_states(texts))
+        ranges = paragraph_ranges(texts, [state == "prose" for state in states])
         out = []
-        numbers = [number for number, _ in lines]
-        for number, (in_code, line) in zip(numbers, code_states(text for _, text in lines)):
-            if in_code:
+        for (number, line), state, code in zip(lines, states, ranges):
+            if state != "prose":
                 self.check_code(line, "Line %d (in a code block)" % number)
-                out.append(line)
+                if state == "uncertain":
+                    self.check_unsure(line, number)
+                out.append((number, state, line))
                 continue
             if is_tag_line(line):
                 continue
-            line = self.reference(line, number)
-            if line is None:
+            if self.reference(line, number) is None:
                 continue
-            out.append(self.line(line, number))
+            out.append((number, state, self.line(line, number, code)))
         return out
 
 
-def check_final(body):
-    """The last look before writing: no link that would leave the site for
-    this Mac or another app survived the cleaning. A link the cleaner could
-    not take apart (brackets inside its text, say) is refused, not guessed."""
-    for in_code, line in code_states(body):
-        if in_code:
+def check_final(body, allow_html):
+    """The last look, at the lines as they will be written, (number, state,
+    text) as Cleaner.body gives them. The cleaning above takes links and
+    wiki links out of the text, and what is left can come together into
+    something new (`{{[](x:y)<` is `{{<` once the link is gone), so every
+    check runs again on the result: shortcodes on every line, code too
+    (Hugo runs them there); raw HTML, links to this Mac or another app, and
+    /Users/... paths on every line outside a fenced code block, inline code
+    included. Markdown does not always read backticks the way a script
+    would, so inline code gets no pass beyond tags that could do nothing
+    as HTML (INERT_TAG_RE). A link the cleaner could not take apart
+    (brackets inside its text, say) is refused, not guessed."""
+    texts = [text for _, _, text in body]
+    ranges = paragraph_ranges(texts, [state == "prose" for _, state, _ in body])
+    for (number, state, text), code in zip(body, ranges):
+        where = "Line %d" % number
+        if not allow_html and SHORTCODE_RE.search(text):
+            raise shortcode_refusal(where)
+        if state == "code":
             continue
-        for is_code, text in split_code_spans(line):
-            if is_code:
-                continue
-            for d in DESTINATION_RE.finditer(text):
-                if destination_kind(d.group(1), None) == "local":
-                    raise Refusal(
-                        "A link to %s could not be cleaned; simplify it (plain [text](url)) and try again."
-                        % one_line(urllib.parse.unquote(d.group(1)))[:60]
-                    )
-            for d in BARE_URL_RE.finditer(text):
-                if d.group(1).lower() not in WEB_SCHEMES:
-                    raise Refusal("A %s:// address could not be cleaned." % d.group(1).lower())
+        if not allow_html:
+            for m in HTML_RE.finditer(text):
+                if text.startswith(MORE, m.start()) or inert_in_code(text, m.start(), code):
+                    continue
+                raise Refusal(
+                    "%s has raw HTML (inline code counts, and so does what is left once "
+                    "links are taken out), which a Hugo site may render as is; remove it, "
+                    "or add --allow-html to the action." % where
+                )
+        if OPEN_DESTINATION_RE.search(text):
+            raise Refusal(
+                "%s ends a link with its address on the next line; put the address on the "
+                "same line." % where
+            )
+        for d in DESTINATION_RE.finditer(text):
+            if destination_kind(d.group(1), None) == "local":
+                raise Refusal(
+                    "A link to %s could not be cleaned; simplify it (plain [text](url)) and try again."
+                    % one_line(urllib.parse.unquote(d.group(1)))[:60]
+                )
+        for d in list(AUTOLINK_RE.finditer(text)) + list(BARE_URL_RE.finditer(text)):
+            if d.group(1).lower() not in WEB_SCHEMES:
+                raise Refusal(
+                    "%s has a %s: address that could not be cleaned (in inline code?); "
+                    "remove it." % (where, d.group(1).lower())
+                )
+        if LOCAL_PATH_RE.search(text):
+            raise Refusal(
+                "%s mentions a /Users/... path, which names this Mac's account; "
+                "write ~/... instead." % where
+            )
+
+
+def check_value(text, key, allow_html):
+    """A front matter value, cleaned: themes print some of these as
+    Markdown or HTML (a summary, a caption), so it is held to the same
+    rules as the body."""
+    if (
+        PROSE_PATH_RE.search(text)
+        or re.search(r"\b(?:file|bear):", text, re.IGNORECASE)
+        or any(d.group(1).lower() not in WEB_SCHEMES for d in BARE_URL_RE.finditer(text))
+        or any(d.group(1).lower() not in WEB_SCHEMES for d in AUTOLINK_RE.finditer(text))
+    ):
+        raise Refusal(
+            "The note's %s names a local path or another app's link; remove it first." % key
+        )
+    if not allow_html and SHORTCODE_RE.search(text):
+        raise shortcode_refusal("The note's %s" % key)
+    if not allow_html and HTML_RE.search(text):
+        raise html_refusal("The note's %s" % key)
 
 
 # -- the note ---------------------------------------------------------------------
@@ -902,6 +1208,12 @@ class Note:
         text = text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
         text = text.replace(TOKEN_OPEN, "\ufffd").replace(TOKEN_CLOSE, "\ufffd")
         lines = text.split("\n")
+        for number, line in enumerate(lines, 1):
+            if len(line) > LINE_LIMIT // 4 and len(line.encode("utf-8")) > LINE_LIMIT:
+                raise Refusal(
+                    "Line %d is over 64 KB; the script reads lines up to that long." % number
+                )
+        self.allow_html = allow_html
         self.front, self.dropped, start = {}, [], 0
         if lines and lines[0].rstrip() == "---":
             end = next(
@@ -912,36 +1224,37 @@ class Note:
             self.front, self.dropped = read_note_front(lines[1:end])
             start = end + 1
         numbered = list(enumerate(lines, 1))[start:]
-        while numbered and not numbered[0][1].strip():
-            numbered.pop(0)
+        at = 0
+        while at < len(numbered) and not numbered[at][1].strip():
+            at += 1
         heading = ""
-        if numbered:
-            first = numbered[0][1]
+        if at < len(numbered):
+            first = numbered[at][1]
             if first.startswith("# "):
                 heading = first[2:].strip()
-                numbered.pop(0)
+                at += 1
             elif (
                 env_title.strip()
                 and first.lstrip("#").strip() == env_title.strip().lstrip("#").strip()
             ):
-                numbered.pop(0)
-        while numbered and (not numbered[0][1].strip() or is_tag_line(numbered[0][1])):
-            numbered.pop(0)
+                at += 1
+        while at < len(numbered) and (not numbered[at][1].strip() or is_tag_line(numbered[at][1])):
+            at += 1
+        numbered = numbered[at:]
         known = [normalize_tag(t).lower() for t in tags]
         self.cleaner = Cleaner(known, assets, allow_html)
         if not allow_html:
             for number, line in numbered:
                 if SHORTCODE_RE.search(line):
-                    raise Refusal(
-                        "Line %d has a Hugo shortcode ({{< or {{%%), which the site would run; "
-                        "remove it, or add --allow-html to the action." % number
-                    )
+                    raise shortcode_refusal("Line %d" % number)
         body = self.cleaner.body(numbered)
-        while body and not body[0].strip():
-            body.pop(0)
-        while body and not body[-1].strip():
-            body.pop()
-        check_final(body)
+        first, last = 0, len(body)
+        while first < last and not body[first][2].strip():
+            first += 1
+        while last > first and not body[last - 1][2].strip():
+            last -= 1
+        body = body[first:last]
+        check_final(body, allow_html)
         self.body = body
         raw_title = self.front.get("title") if isinstance(self.front.get("title"), str) else ""
         self.title = self.clean_value(raw_title.strip() or heading or env_title, "title")
@@ -951,7 +1264,8 @@ class Note:
     def clean_value(self, value, key):
         """Front matter text: one line, wiki links as their text, the note's
         tags out, markdown links as their text. A value naming a local
-        path or another app is refused rather than published."""
+        path or another app is refused rather than published, and so is
+        raw HTML or a shortcode unless --allow-html (check_value)."""
         line = one_line(value)
         found = scan_wiki(line)
         out, last = "", 0
@@ -960,16 +1274,10 @@ class Note:
             last = end
         line = out + line[last:]
         # Front matter is not rendered as markdown: a link is just its text.
-        line = LINK_RE.sub(lambda m: m.group(2), line)
-        if (
-            LOCAL_PATH_RE.search(line)
-            or re.search(r"\b(?:file|bear):", line, re.IGNORECASE)
-            or any(d.group(1).lower() not in WEB_SCHEMES for d in BARE_URL_RE.finditer(line))
-        ):
-            raise Refusal(
-                "The note's %s names a local path or another app's link; remove it first." % key
-            )
-        return " ".join(strip_inline_tags(line, self.cleaner.known).split())
+        line = LINK_RE.sub(lambda m: m.group(2) or gap(m), line)
+        line = " ".join(strip_inline_tags(line, self.cleaner.known).split())
+        check_value(line, key, self.allow_html)
+        return line
 
 
 # -- tags ---------------------------------------------------------------------------
@@ -1171,12 +1479,18 @@ def post_blocks(front, where):
     return blocks
 
 
-def post_value(blocks, key):
+def post_raw(blocks, key):
+    """The text after `key:` on the key's own line, or None."""
     for k, lines in blocks:
         if k == key:
             own = next(line for line in lines if POST_KEY_RE.match(line))
-            return scalar(own.split(":", 1)[1])
+            return own.split(":", 1)[1]
     return None
+
+
+def post_value(blocks, key):
+    raw = post_raw(blocks, key)
+    return None if raw is None else scalar(raw)
 
 
 # -- publishing -----------------------------------------------------------------
@@ -1219,6 +1533,136 @@ def find_own_post(site, mark):
         return None
     rel = found[0].split(os.sep)
     return rel[:-1], rel[-1]
+
+
+def check_slug(site, slug, bundle):
+    """Refuses a new post's place when Hugo would take something already in
+    the section for the same page: `<slug>.<anything>` beside it (another
+    format, a translation `<slug>.en.md`, a case variant), a `<slug>/`
+    folder beside a single file, or, for a bundle, a `<slug>/` holding
+    anything but images (a page of its own, a section's posts). `index` is
+    no name for a single file: Hugo reads `index.md` as a bundle's page.
+    The exact file this post would be is left to the owner check that
+    follows, which replaces it only when this note wrote it."""
+    if not bundle and slug == "index":
+        raise Refusal(
+            "A post cannot be called index (Hugo reads index.md and _index.md as a "
+            "folder's own page); give the note a slug: of its own."
+        )
+    sfd = site.open_dirs(site.section_parts())
+    if sfd is None:
+        return
+    place = "content/" + "/".join(site.section) + "/"
+    try:
+        mine = slug if bundle else slug + ".md"
+        for name in sorted(os.listdir(sfd)):
+            low = name.lower()
+            if name != mine and (low == slug or low.startswith(slug + ".")):
+                raise Refusal(
+                    "%s%s already exists; give the note a slug: of its own." % (place, name)
+                )
+        st = lstat_in(sfd, slug) if bundle else None
+    finally:
+        os.close(sfd)
+    if st is None or not stat.S_ISDIR(st.st_mode):
+        return
+    bfd = site.open_dirs(site.section_parts() + [slug])
+    try:
+        for name in sorted(os.listdir(bfd)):
+            if name.startswith(".") or name == "index.md":
+                continue
+            entry = lstat_in(bfd, name)
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if entry is None or (stat.S_ISREG(entry.st_mode) and ext in IMAGE_EXTENSIONS):
+                continue
+            raise Refusal(
+                "%s%s/ already holds %s; give the note a slug: of its own."
+                % (place, slug, one_line(name)[:80])
+            )
+    finally:
+        os.close(bfd)
+
+
+def tiff_has_gps(blob):
+    """Whether an Exif block (a TIFF header and its IFDs) points to GPS data
+    with a position in it, or to GPS data it cannot read."""
+    if len(blob) < 8 or blob[:2] not in (b"II", b"MM"):
+        return False
+    order = "little" if blob[:2] == b"II" else "big"
+
+    def number(at, size):
+        if at < 0 or at + size > len(blob):
+            raise IndexError(at)
+        return int.from_bytes(blob[at : at + size], order)
+
+    try:
+        ifd = number(4, 4)
+        entries = [ifd + 2 + 12 * k for k in range(number(ifd, 2))]
+        pointer = next((e for e in entries if number(e, 2) == 0x8825), None)
+        if pointer is None:
+            return False
+        gps = number(pointer + 8, 4)
+    except IndexError:
+        return False
+    try:
+        tags = {number(gps + 2 + 12 * k, 2) for k in range(number(gps, 2))}
+    except IndexError:
+        return True
+    # GPSLatitudeRef, GPSLatitude, GPSLongitudeRef, GPSLongitude
+    return bool(tags & {1, 2, 3, 4})
+
+
+def has_gps(data):
+    """Whether a JPEG, PNG or WebP image carries a GPS position, in its Exif
+    block or its XMP packet. Other formats are not read."""
+    exif, xmp = [], []
+    if data[:2] == b"\xff\xd8":
+        i = 2
+        while i + 4 <= len(data) and data[i] == 0xFF:
+            marker = data[i + 1]
+            if marker == 0xFF:
+                i += 1
+                continue
+            if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            if marker in (0xD9, 0xDA):  # end of image, start of the picture data
+                break
+            length = int.from_bytes(data[i + 2 : i + 4], "big")
+            if length < 2:
+                break
+            segment = data[i + 4 : i + 2 + length]
+            if marker == 0xE1:
+                if segment.startswith(b"Exif\0\0"):
+                    exif.append(segment[6:])
+                else:
+                    xmp.append(segment)
+            i += 2 + length
+    elif data[:8] == b"\x89PNG\r\n\x1a\n":
+        i = 8
+        while i + 8 <= len(data):
+            length = int.from_bytes(data[i : i + 4], "big")
+            kind, chunk = data[i + 4 : i + 8], data[i + 8 : i + 8 + length]
+            if kind == b"eXIf":
+                exif.append(chunk)
+            elif kind in (b"iTXt", b"tEXt"):
+                xmp.append(chunk)
+            elif kind == b"IEND":
+                break
+            i += 12 + length
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        i = 12
+        while i + 8 <= len(data):
+            kind, length = data[i : i + 4], int.from_bytes(data[i + 4 : i + 8], "little")
+            chunk = data[i + 8 : i + 8 + length]
+            if kind == b"EXIF":
+                exif.append(chunk[6:] if chunk.startswith(b"Exif\0\0") else chunk)
+            elif kind == b"XMP ":
+                xmp.append(chunk)
+            i += 8 + length + (length & 1)
+    return any(tiff_has_gps(blob) for blob in exif) or any(
+        b"GPSLatitude" in packet or b"GPSLongitude" in packet for packet in xmp
+    )
 
 
 def image_name(name, taken):
@@ -1304,18 +1748,7 @@ def publish(args, env):
         slug = slug or slugify(note.title) or "note-" + mark[:8]
         bundle = args.bundle
         folder, file_name = ([slug], "index.md") if bundle else ([], slug + ".md")
-        # Hugo would see a bundle and a file of the same name as one page.
-        twin = ([], slug + ".md") if bundle else ([slug], "index.md")
-        tdir = site.open_dirs(site.section_parts() + twin[0])
-        if tdir is not None:
-            try:
-                if lstat_in(tdir, twin[1]) is not None:
-                    raise Refusal(
-                        "content/%s already exists; give the note a slug: of its own."
-                        % "/".join(site.section + twin[0] + [twin[1]])
-                    )
-            finally:
-                os.close(tdir)
+        check_slug(site, slug, bundle)
     display = "content/" + "/".join(site.section + folder + [file_name])
     if note.cleaner.images and not bundle:
         raise Refusal(
@@ -1368,11 +1801,14 @@ def publish(args, env):
                 )
         slug_value = post_value(blocks, "slug")
         was_live = (post_value(blocks, "draft") or "").strip().lower() == "false"
-        managed = {"title", "slug", "date", "lastmod", "draft", MARK_KEY}
+        managed = {"title", "slug", "date", "lastmod", "draft", MARK_KEY, MANAGED_KEY}
         managed.update(("tags", "description", "summary", "showtoc", "cover"))
         kept_blocks = [(k, lines) for k, lines in blocks if k not in managed]
-        # Hand-added values of the note keys stay when the note gives none.
-        post_has = {k: lines for k, lines in blocks}
+        listed = flow_list(post_raw(blocks, MANAGED_KEY) or "[]") or []
+        was_managed = {v.lower() for v in listed if v}
+        # Hand-added values of the note keys stay when the note gives none;
+        # a value the note gave last time goes with it.
+        post_has = {k: lines for k, lines in blocks if k not in was_managed}
     else:
         post_has = {}
 
@@ -1405,14 +1841,17 @@ def publish(args, env):
     if existing is not None:
         fields.append(("lastmod", stamp(now)))
     fields.append(("draft", not live))
-    extra_blocks = []
+    extra_blocks, from_note = [], []
     if tag_list or "tags" not in post_has:
         fields.append(("tags", tag_list))
+        if tag_list:
+            from_note.append("tags")
     else:
         extra_blocks.append(post_has["tags"])
     for key in ("description", "summary"):
         if isinstance(front.get(key), str):
             fields.append((key, note.clean_value(front[key], key)))
+            from_note.append(key)
         elif key in post_has:
             extra_blocks.append(post_has[key])
     if "showtoc" in front:
@@ -1421,6 +1860,7 @@ def publish(args, env):
             dropped.append("showtoc (not true or false)")
         else:
             fields.append(("showtoc", flag))
+            from_note.append("showtoc")
     elif "showtoc" in post_has:
         extra_blocks.append(post_has["showtoc"])
 
@@ -1450,18 +1890,27 @@ def publish(args, env):
                     and not value.lower().startswith("mailto:")
                 ):
                     clean[sub] = one_line(value)
+                    check_value(clean[sub], "cover.image", args.allow_html)
                 else:
                     dropped.append("cover.image (not a web address or an attachment in a bundle)")
             else:
                 clean[sub] = note.clean_value(value, "cover.%s" % sub)
         if clean:
             fields.append(("cover", clean))
+            from_note.append("cover")
     elif "cover" in post_has:
         extra_blocks.append(post_has["cover"])
+    if from_note:
+        fields.append((MANAGED_KEY, sorted(from_note)))
     fields.append((MARK_KEY, mark))
 
     # Images: renamed for the web, never over a file already there.
-    written_names, image_plan = {}, []
+    written_names, image_plan, image_bytes = {}, [], 0
+    if len(images) > IMAGE_COUNT_LIMIT:
+        raise Refusal(
+            "The note has %d images; the script publishes at most %d."
+            % (len(images), IMAGE_COUNT_LIMIT)
+        )
     if images:
         bdir = site.open_dirs(site.section_parts() + folder)
         taken = set()
@@ -1476,6 +1925,18 @@ def publish(args, env):
                     data = read_in(afd, name, IMAGE_LIMIT)
                 finally:
                     os.close(afd)
+                image_bytes += len(data)
+                if image_bytes > IMAGES_LIMIT:
+                    raise Refusal(
+                        "The note's images are over %d MB together; the script publishes "
+                        "at most that much." % (IMAGES_LIMIT // (1024 * 1024))
+                    )
+                if not args.allow_exif and has_gps(data):
+                    raise Refusal(
+                        "The image %s carries a GPS location in its metadata; remove it "
+                        "(Preview: Tools > Show Inspector > Remove Location Info), or add "
+                        "--allow-exif to the action." % one_line(name)[:80]
+                    )
                 while True:
                     target = image_name(name, taken)
                     st = lstat_in(bdir, target) if bdir is not None else None
@@ -1500,7 +1961,9 @@ def publish(args, env):
     for lines in extra_blocks + [lines for _, lines in kept_blocks]:
         fm.extend(lines)
     fm.append("---")
-    body = "\n".join(resolve(line) for line in note.body)
+    final = [(number, state, resolve(line)) for number, state, line in note.body]
+    check_final(final, args.allow_html)
+    body = "\n".join(line for _, _, line in final)
     post = "\n".join(fm) + "\n" + ("\n" + body + "\n" if body.strip() else "")
 
     # Writing: images first, then the post; a failure removes what was added.
@@ -1586,6 +2049,11 @@ def main(argv=None):
         action="store_true",
         help="publish raw HTML and Hugo shortcodes instead of refusing the note",
     )
+    parser.add_argument(
+        "--allow-exif",
+        action="store_true",
+        help="publish images that carry a GPS location instead of refusing the note",
+    )
     args = parser.parse_args(argv)
     try:
         lines = publish(args, os.environ)
@@ -1593,7 +2061,13 @@ def main(argv=None):
         print(str(e).replace("\n", " "), file=sys.stderr)
         return 1
     except OSError as e:
-        print("Nothing was published: %s" % e, file=sys.stderr)
+        print("Nothing was published: %s" % one_line(str(e)), file=sys.stderr)
+        return 1
+    except Exception as e:  # a bug: still one line, and publish undid its writes
+        print(
+            "Nothing was published: unexpected %s: %s" % (type(e).__name__, one_line(str(e))[:200]),
+            file=sys.stderr,
+        )
         return 1
     print("\n".join(lines))
     return 0

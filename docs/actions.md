@@ -216,11 +216,14 @@ prompt = "Publish live? Type yes; anything else saves a draft"
 | `--tag-prefix TAG` | publish only the note's tags under this one, prefix removed: with `blog/`, `#blog/rust` is `rust`. Without it no tags are published |
 | `--bundle` | a new post is `<slug>/index.md` with its images beside it. A note with images needs it |
 | `--allow-html` | publish raw HTML and Hugo shortcodes instead of refusing the note |
+| `--allow-exif` | publish an image that carries a GPS location instead of refusing the note |
 
 What a post gets: `title` (the note's `# ` title), `slug` (the title in
 lower-case ASCII, accents folded, other runs a hyphen), `date` (now), `draft`,
 `tags`, and `bjorn_note`, a hash of the note's id that marks the post as this
-note's. A note can start with its own front matter between `---` fences, and
+note's. When the note gave any of the optional keys below, `bjorn_managed`
+lists which (`["description", "tags"]`). A note can start with its own front
+matter between `---` fences, and
 `title`, `slug`, `date`, `description`, `summary`, `showtoc`, `tags` (a list)
 and `cover` (`image`, `alt`, `caption`, `relative`, `hidden`) are taken from
 it; every other key, and the note's own `draft:`, is left out and listed after
@@ -230,17 +233,27 @@ the toast's line.
 section, even after the note's title changed, and rewrites it from the note:
 it keeps its `date`, `slug` and place, gains a `lastmod`, and keeps keys you
 added to the post by hand. Its `description`, `summary`, `showtoc`, `cover`
-and `tags` stay as you set them when the note gives none. The note is the
-source for everything else, the body included.
+and `tags` stay as you set them when the note gives none, unless the note
+gave them last time (`bjorn_managed`): a value taken out of the note leaves
+the post too. The note is the source for everything else, the body included.
+
+**A draft in a public repository is public.** `draft: true` keeps a post off
+the built site, not out of the site's git repository: if that repository is
+public, so is every draft pushed to it, front matter and images included.
 
 **What it guards:**
 
 - **Never another file.** A file at the post's path without this note's mark
   (a post you wrote by hand, or one written for another note) is refused, not
   replaced; so is a `<slug>.md` beside a `<slug>/` bundle, which Hugo treats
-  as the same page. An image already in the bundle is never overwritten: the
-  same bytes are reused, different ones get a new name (`photo-2.png`), and
-  the output says so.
+  as the same page. A new post is also refused beside anything else Hugo would
+  read as the same page or its bundle: `<slug>.<anything>` (another format, a
+  translation like `<slug>.en.md`, a case variant), a `<slug>/` folder beside
+  a single file, a `<slug>/` folder holding anything but images for a bundle,
+  and `index` as a single file's name. Give the note a `slug:` to get past it.
+  An image already in the bundle is never overwritten: the same bytes are
+  reused, different ones get a new name (`photo-2.png`), and the output says
+  so.
 - **Only inside `content/<section>`.** The slug is `[a-z0-9-]` and cannot
   climb out; every folder under the site is opened without following
   symlinks, and a symlink anywhere on the way is refused. Files are created
@@ -258,12 +271,36 @@ source for everything else, the body included.
   text (`[[Plan [v2]]]` is `Plan [v2]`, `[[Note|shown]]` is `shown`). Links
   to `bear://`, `file://`, other apps (`things:`, `obsidian:`, anything but
   `http`, `https` and `mailto`), `~/...` and paths on this Mac (`/Users/...`,
-  `/Volumes/...`) keep their text and lose the link. A note that still
-  mentions a `/Users/...` path, or has one or a `bear://` link in code (code is
-  published as written), is refused.
+  `/Volumes/...`) keep their text and lose the link, however the target is
+  written (`<things:...>`, `&#116;hings:`, a `[id]: target` definition in a
+  list or a quote). A note that still mentions a `/Users/...` path (or
+  `/users/...` in prose), or has one or a `bear://` link in code (code is
+  published as written), is refused, and so is a link whose address starts
+  on the next line.
 - **Nothing that runs on the site.** Hugo shortcodes (`{{<`, `{{%`, even in
   code blocks, where Hugo still runs them) and raw HTML are refused unless
-  `--allow-html` is given. `<!--more-->` is fine.
+  `--allow-html` is given. `<!--more-->` is fine. The check runs again on the
+  text as it will be written, so HTML that only appears once a link is taken
+  out is caught too, and so is HTML in front matter values (a theme may print
+  a `summary` or a `caption` as Markdown). Only a fenced code block at the
+  top level, or indented evenly in a list, is exempt; **inline code is
+  checked like prose**, because Markdown does not always read backticks the
+  way a line-by-line script would (an escaped backtick, a code span over two
+  lines, a table cell). Tags that could do nothing as HTML pass in inline
+  code (`` `Vec<String>` ``, `` `<div>` ``); a tag with an attribute value
+  (`` `<img src=x>` ``) or a live element (`` `<script>` ``, `` `<style>` ``)
+  needs `--allow-html` or a fenced block. A link or address to another app
+  in inline code (`` `things://...` ``) is refused, as it cannot be taken out
+  of code. A fence behind a list marker (`` - ``` ``) or indented unevenly
+  makes everything the script takes for code after it checked like prose as
+  well.
+- **Where your photos were taken.** Attachments are copied byte for byte,
+  metadata included; only their names change (slugified). A JPEG, PNG or
+  WebP whose Exif or XMP holds a GPS position is refused unless
+  `--allow-exif` is given; other metadata (camera, date, a GPS position in
+  an AVIF) is published as it is. Strip it first if that matters.
+- **Notes that would take long.** A line over 64 KB, more than 200 images or
+  more than 200 MB of them together are refused.
 - **Images that would break.** Only png, jpg, jpeg, gif, webp and avif
   attachments are published, renamed web-safe beside the post. An image that
   is not one of the note's attachments, an svg, an inline `data:` image, or
@@ -281,7 +318,9 @@ BJORN_NOTE_FILE=note.md BJORN_NOTE_ID=test hugo-publish --site ~/sites/blog
 
 Previewing is another action. `hugo server` runs until stopped, so start it
 in the background with its output going to a file, or the action waits for
-it and is killed at the timeout:
+it and is killed at the timeout. `lsof` starts one only when nothing is
+listening on port 1313 yet; `pgrep -f "hugo server"` would also match any
+other process whose arguments say so, and on Linux the action's own `sh -c`:
 
 ```toml
 [[actions]]
@@ -289,7 +328,7 @@ name = "Preview the site"
 command = '''
 cd ~/sites/blog || exit 1
 log="${TMPDIR:-$HOME}/hugo-preview.log"
-pgrep -qf "hugo server" || nohup hugo server -D </dev/null >"$log" 2>&1 &
+lsof -tiTCP:1313 -sTCP:LISTEN >/dev/null || nohup hugo server -D </dev/null >"$log" 2>&1 &
 sleep 2 && open http://localhost:1313/ && echo "http://localhost:1313/ (log: $log)"
 '''
 ```

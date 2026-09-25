@@ -504,11 +504,16 @@ fn front_matter_from_the_note_cannot_add_keys_or_lines() {
             "description",
             "showtoc",
             "cover",
+            "bjorn_managed",
             "bjorn_note"
         ],
         "{post}"
     );
     let lines = front(&post);
+    assert!(
+        lines.contains(&"bjorn_managed: [\"cover\", \"description\", \"showtoc\"]".to_string()),
+        "{post}"
+    );
     assert!(
         lines.contains(&"title: \"Hi url: /x/\"".to_string()),
         "{post}"
@@ -789,6 +794,452 @@ fn a_refusal_writes_nothing_and_says_why_on_one_line() {
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stderr).contains("Bjorn action"));
     assert!(site.files().is_empty());
+}
+
+/// What a post's body says, or None when the run was refused.
+fn published(site: &Site, run: &Run, rel: &str) -> Option<String> {
+    run.ok.then(|| site.read(rel))
+}
+
+#[test]
+fn html_or_a_shortcode_left_behind_by_a_removed_link_is_refused() {
+    need_python!();
+    // Taking a link or a bare address out once joined what was on either
+    // side into a shortcode or a tag.
+    for text in [
+        "# S\n\n{{[](x:y)< figure src=\"https://evil.test/x\" >}}\n",
+        "# S\n\n{{x://y< param \"k\" >}}\n",
+        "# S\n\n{{x://y% param \"k\" %}}\n",
+        "# S\n\n<[](x:y)img src=x onerror=alert(1)>\n",
+    ] {
+        let site = Site::new();
+        let note = site.note(text);
+        let run = site.run(&note, "N", &[]);
+        if let Some(post) = published(&site, &run, "content/posts/s.md") {
+            for bad in ["{{<", "{{%", "<img"] {
+                assert!(!post.contains(bad), "{text}: {post}");
+            }
+        }
+    }
+    // What the cleaning leaves is checked again: link text that makes a
+    // shortcode, and a wiki link's text that makes a tag name.
+    for (text, why) in [
+        ("# S\n\n{[{](x:y)< x >}}\n", "shortcode"),
+        ("# S\n\n<[[img]] src=x onerror=alert(1)>\n", "raw HTML"),
+    ] {
+        let site = Site::new();
+        let note = site.note(text);
+        let run = site.run(&note, "N", &[]);
+        assert!(!run.ok, "{text}: {}", run.stdout);
+        assert!(run.first_line().contains(why), "{text}: {}", run.stderr);
+        assert!(run.first_line().contains("--allow-html"), "{}", run.stderr);
+        assert!(site.files().is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn markdown_that_hides_html_from_a_line_scanner_is_refused() {
+    need_python!();
+    for text in [
+        // A backslash makes the first backtick text, so this is no code span.
+        "# S\n\n\\`<img src=x onerror=alert(1)>`\n",
+        // A backtick fence's info string cannot hold a backtick: no fence.
+        "# S\n\n```a`\n<img src=x onerror=alert(1)>\n```\n",
+        // Indented four or more, a fence is none.
+        "# S\n\n        ```\n<img src=x onerror=alert(1)>\n        ```\n",
+        // A code span runs over lines within a paragraph.
+        "# S\n\n`a\nb` <img src=x onerror=alert(1)> `c`\n",
+        // A fence in a list item ends with the item.
+        "# S\n\n- ```\n  x\n  ```\n  <img src=x onerror=alert(1)>\n",
+        "# S\n\n- item\n  ```\n<img src=x onerror=alert(1)>\n```\n",
+        "# S\n\n- a\n\n    ```\n    x\n  ```\n  <img src=x onerror=alert(1)>\n",
+        // Inline code gets no pass for a tag that could run.
+        "# S\n\nInline `<img src=x onerror=alert(1)>` code.\n",
+        "# S\n\nA `<script>` mention.\n",
+        // An autolink is read before a code span.
+        "# S\n\n<https://x.test/`> <img src=x onerror=alert(1)> `\n",
+    ] {
+        let site = Site::new();
+        let note = site.note(text);
+        let run = site.run(&note, "N", &[]);
+        assert!(!run.ok, "{text}: {}", run.stdout);
+        assert!(
+            run.first_line().contains("--allow-html"),
+            "{text}: {}",
+            run.stderr
+        );
+        assert!(site.files().is_empty(), "{text}");
+        assert!(site.run(&note, "N", &["--allow-html"]).ok, "{text}");
+    }
+}
+
+#[test]
+fn inline_code_keeps_harmless_tags_and_fenced_code_keeps_html() {
+    need_python!();
+    let site = Site::new();
+    let text = "# Code\n\n\
+                Use `Vec<String>`, `Box<dyn Error>` and `<div>`; see <https://example.com>.\n\n\
+                ```html\n<div onclick=\"x()\">top level</div>\n```\n\n\
+                1. Step\n\n   ```html\n   <script>in a list</script>\n   ```\n2. Next\n";
+    let note = site.note(text);
+    let run = site.run(&note, "N", &[]);
+    assert!(run.ok, "{}", run.stderr);
+    let post = body(&site.read("content/posts/code.md"));
+    assert!(
+        post.contains("`Vec<String>`, `Box<dyn Error>` and `<div>`"),
+        "{post}"
+    );
+    assert!(post.contains("<script>in a list</script>"), "{post}");
+}
+
+#[test]
+fn html_split_over_lines_and_app_autolinks_are_caught() {
+    need_python!();
+    for text in [
+        "# S\n\n<details\nopen ontoggle=alert(1)>\n",
+        "# S\n\nx <img\nsrc=x onerror=alert(1)>\n",
+    ] {
+        let site = Site::new();
+        let note = site.note(text);
+        let run = site.run(&note, "N", &[]);
+        assert!(!run.ok, "{text}: {}", run.stdout);
+        assert!(run.first_line().contains("--allow-html"), "{}", run.stderr);
+    }
+    // An autolink to another app loses its target in prose ...
+    let site = Site::new();
+    let note = site.note(
+        "# S\n\nGo <javascript:alert(1)> and <things:show?id=ABC>, or <https://example.com>.\n",
+    );
+    let run = site.run(&note, "N", &[]);
+    assert!(run.ok, "{}", run.stderr);
+    let post = body(&site.read("content/posts/s.md"));
+    assert!(
+        !post.contains("javascript") && !post.contains("things:"),
+        "{post}"
+    );
+    assert!(post.contains("<https://example.com>"), "{post}");
+    // ... and is refused where it cannot be taken out, --allow-html or not.
+    for text in [
+        "# S\n\nIn code `<things:show?id=ABC>`.\n",
+        "---\ndescription: \"<things:show?id=ABC>\"\n---\n# S\n",
+    ] {
+        let site = Site::new();
+        let note = site.note(text);
+        for args in [&[][..], &["--allow-html"][..]] {
+            let run = site.run(&note, "N", args);
+            assert!(!run.ok, "{text}: {}", run.stdout);
+        }
+        assert!(site.files().is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn a_new_post_never_shares_a_name_with_a_page_hugo_already_has() {
+    need_python!();
+    // `index` is a folder's own page, never a post's name.
+    for text in ["# Index\n\nText.\n", "---\nslug: _index\n---\n# Home\n"] {
+        let site = Site::new();
+        let note = site.note(text);
+        let run = site.run(&note, "N", &[]);
+        assert!(!run.ok, "{text}");
+        assert!(run.first_line().contains("index"), "{}", run.stderr);
+        assert!(site.files().is_empty());
+    }
+    let note_text = "# Hello\n\nText.\n";
+    // Beside a single file: another format, a translation, a case variant
+    // or a folder of the same name.
+    for (existing, is_dir) in [
+        ("hello.html", false),
+        ("hello.en.md", false),
+        ("Hello.MD", false),
+        ("hello", true),
+    ] {
+        let site = Site::new();
+        std::fs::create_dir_all(site.posts()).unwrap();
+        if is_dir {
+            std::fs::create_dir_all(site.posts().join(existing)).unwrap();
+            std::fs::write(site.posts().join(existing).join("_index.md"), "x").unwrap();
+        } else {
+            std::fs::write(site.posts().join(existing), "x").unwrap();
+        }
+        let before = site.files();
+        let note = site.note(note_text);
+        let run = site.run(&note, "N", &[]);
+        assert!(!run.ok, "{existing}: {}", run.stdout);
+        assert!(
+            run.first_line().contains("already exists"),
+            "{existing}: {}",
+            run.stderr
+        );
+        assert_eq!(site.files(), before, "{existing}");
+    }
+    // A bundle into a folder that holds a page, or a section's posts.
+    for inside in ["_index.md", "index.en.md", "other-post.md", "sub/"] {
+        let site = Site::new();
+        let dir = site.posts().join("hello");
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(sub) = inside.strip_suffix('/') {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        } else {
+            std::fs::write(dir.join(inside), "x").unwrap();
+        }
+        let before = site.files();
+        let note = site.note(note_text);
+        let run = site.run(&note, "N", &["--bundle"]);
+        assert!(!run.ok, "{inside}: {}", run.stdout);
+        assert!(
+            run.first_line().contains("already holds"),
+            "{inside}: {}",
+            run.stderr
+        );
+        assert_eq!(site.files(), before, "{inside}");
+    }
+    // Its own post, bundle or single file, is still updated in place.
+    for args in [&["--bundle"][..], &[][..]] {
+        let site = Site::new();
+        let note = site.note(note_text);
+        assert!(site.run(&note, "N", args).ok);
+        let run = site.run(&note, "N", args);
+        assert!(run.ok, "{args:?}: {}", run.stderr);
+        assert!(run.first_line().ends_with("(updated)"), "{}", run.stdout);
+    }
+}
+
+#[test]
+fn front_matter_values_are_held_to_the_body_rules() {
+    need_python!();
+    for (text, html) in [
+        (
+            "---\ndescription: \"<img src=x onerror=alert(1)>\"\n---\n# T\n",
+            true,
+        ),
+        ("---\nsummary: \"{{< x >}}\"\n---\n# T\n", true),
+        (
+            "---\ncover:\n  image: https://img.test/a.png\n  caption: \"<b onclick=x>c</b>\"\n---\n# T\n",
+            true,
+        ),
+        ("# A <b>bold</b> title\n\nText.\n", true),
+        (
+            "---\nsummary: \"[x](x:y)<img src=x onerror=alert(1)>\"\n---\n# T\n",
+            true,
+        ),
+        ("---\ndescription: \"see <bear:abc>\"\n---\n# T\n", false),
+    ] {
+        let site = Site::new();
+        let note = site.note(text);
+        let run = site.run(&note, "N", &[]);
+        assert!(!run.ok, "{text}: {}", run.stdout);
+        assert!(site.files().is_empty(), "{text}");
+        let run = site.run(&note, "N", &["--allow-html"]);
+        assert_eq!(run.ok, html, "{text}: {}", run.stderr);
+    }
+}
+
+#[test]
+fn a_value_the_note_no_longer_gives_leaves_the_post() {
+    need_python!();
+    let site = Site::new();
+    let path = "content/posts/t.md";
+    let note = site.note("---\ndescription: \"From the note\"\nsummary: \"Kept\"\n---\n# T\n");
+    assert!(site.run(&note, "N", &[]).ok);
+    let post = site.read(path);
+    assert!(
+        front(&post).contains(&"bjorn_managed: [\"description\", \"summary\"]".to_string()),
+        "{post}"
+    );
+    let edited = post.replacen("bjorn_note", "keywords: \"mine\"\nbjorn_note", 1);
+    std::fs::write(site.root().join(path), edited).unwrap();
+
+    let note = site.note("---\nsummary: \"Kept\"\n---\n# T\n");
+    assert!(site.run(&note, "N", &[]).ok);
+    let post = site.read(path);
+    let lines = front(&post);
+    assert!(!post.contains("From the note"), "{post}");
+    assert!(lines.contains(&"summary: \"Kept\"".to_string()), "{post}");
+    assert!(lines.contains(&"keywords: \"mine\"".to_string()), "{post}");
+    assert!(
+        lines.contains(&"bjorn_managed: [\"summary\"]".to_string()),
+        "{post}"
+    );
+
+    // A value set by hand, for a key the note never gave, stays.
+    let edited = post.replacen("bjorn_note", "description: \"By hand\"\nbjorn_note", 1);
+    std::fs::write(site.root().join(path), edited).unwrap();
+    assert!(site.run(&note, "N", &[]).ok);
+    assert!(site.read(path).contains("description: \"By hand\""));
+}
+
+#[test]
+fn link_targets_written_to_slip_past_the_cleaner_are_caught() {
+    need_python!();
+    let site = Site::new();
+    let note = site.note(
+        "# L\n\n\
+         [a](< things:abc>) [b](&#47;Users/ventz/a) [c](&#116;hings:abc) [d](thi&#9;ngs:abc) \
+         [e](/users/ventz/a)\n\n\
+         - [f]: things:abc\n\
+         > [g]: /Volumes/Secret/a\n\n\
+         Plain `GET /users/42` stays.\n",
+    );
+    let run = site.run(&note, "N", &[]);
+    assert!(run.ok, "{}", run.stderr);
+    let post = body(&site.read("content/posts/l.md"));
+    assert!(post.contains("a b c d e\n"), "{post}");
+    for gone in [
+        "things",
+        "Users",
+        "users/ventz",
+        "Volumes",
+        "&#",
+        "[f]",
+        "[g]",
+    ] {
+        assert!(!post.contains(gone), "{gone}: {post}");
+    }
+    assert!(post.contains("`GET /users/42`"), "{post}");
+
+    for text in [
+        "# L\n\n[x](\nthings:show?id=1)\n",
+        "# L\n\n[x]:\nthings:abc\n",
+        "# L\n\nsee /users/ventz/a\n",
+    ] {
+        let site = Site::new();
+        let note = site.note(text);
+        let run = site.run(&note, "N", &[]);
+        assert!(!run.ok, "{text}: {}", run.stdout);
+        assert!(site.files().is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn a_private_tag_in_a_wiki_links_text_stays_home() {
+    need_python!();
+    let site = Site::new();
+    let note = site.note("# W\n\nSee [[Plan #private]] and [[#private]].\n");
+    let run = site.run_with(&note, "N", &[], &[("BJORN_NOTE_TAGS", "private")]);
+    assert!(run.ok, "{}", run.stderr);
+    let post = body(&site.read("content/posts/w.md"));
+    assert!(!post.contains("private"), "{post}");
+    assert!(post.contains("See Plan and"), "{post}");
+}
+
+/// An Exif block (big-endian TIFF) with or without a GPS position.
+fn exif(gps: bool) -> Vec<u8> {
+    let mut t = b"MM\x00\x2a\x00\x00\x00\x08\x00\x01".to_vec();
+    if gps {
+        // GPSInfo -> the IFD at 26, holding GPSLatitude.
+        t.extend([0x88, 0x25, 0, 4, 0, 0, 0, 1, 0, 0, 0, 26, 0, 0, 0, 0]);
+        t.extend([0, 1, 0, 2, 0, 5, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0]);
+    } else {
+        // Orientation only.
+        t.extend([0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
+    }
+    t
+}
+
+fn jpeg(gps: bool) -> Vec<u8> {
+    let tiff = exif(gps);
+    let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    out.extend(u16::try_from(8 + tiff.len()).unwrap().to_be_bytes());
+    out.extend(b"Exif\x00\x00");
+    out.extend(tiff);
+    out.extend([0xFF, 0xD9]);
+    out
+}
+
+fn png(gps: bool) -> Vec<u8> {
+    let tiff = exif(gps);
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    out.extend(u32::try_from(tiff.len()).unwrap().to_be_bytes());
+    out.extend(b"eXIf");
+    out.extend(tiff);
+    out.extend([0, 0, 0, 0, 0, 0, 0, 0]);
+    out.extend(b"IEND\x00\x00\x00\x00");
+    out
+}
+
+#[test]
+fn an_image_with_a_gps_location_is_refused_unless_allowed() {
+    need_python!();
+    for (name, bytes) in [("photo.jpg", jpeg(true)), ("photo.png", png(true))] {
+        let site = Site::new();
+        let note = site.bundle(&format!("# P\n\n![](assets/{name})\n"), &[(name, &bytes)]);
+        let run = site.run(&note, "N", &["--bundle"]);
+        assert!(!run.ok, "{name}");
+        assert!(run.first_line().contains("GPS"), "{}", run.stderr);
+        assert!(site.files().is_empty());
+        let run = site.run(&note, "N", &["--bundle", "--allow-exif"]);
+        assert!(run.ok, "{name}: {}", run.stderr);
+    }
+    for (name, bytes) in [("photo.jpg", jpeg(false)), ("photo.png", png(false))] {
+        let site = Site::new();
+        let note = site.bundle(&format!("# P\n\n![](assets/{name})\n"), &[(name, &bytes)]);
+        let run = site.run(&note, "N", &["--bundle"]);
+        assert!(run.ok, "{name}: {}", run.stderr);
+    }
+}
+
+#[test]
+fn notes_built_to_be_slow_are_refused_or_finish_quickly() {
+    need_python!();
+    // One line over 64 KB is refused before any work is done on it.
+    let site = Site::new();
+    let note = site.note(&format!("# Long\n\n{}\n", "x".repeat(70 * 1024)));
+    let run = site.run(&note, "N", &[]);
+    assert!(!run.ok);
+    assert!(run.first_line().contains("64 KB"), "{}", run.stderr);
+
+    let line = |unit: &str| unit.repeat(60 * 1024 / unit.len());
+    let backticks: String = (1..300).map(|n| "`".repeat(n) + " x ").collect();
+    for (what, text) in [
+        ("tags", line("x #tag ")),
+        ("scheme runs", line("a+")),
+        ("brackets", line("[a")),
+        ("backtick runs", backticks),
+        ("wiki", line("[[a")),
+    ] {
+        let site = Site::new();
+        let many = format!("{text}\n").repeat(40);
+        let note = site.note(&format!("# Slow\n\n{many}"));
+        let start = std::time::Instant::now();
+        let run = site.run_with(&note, "N", &[], &[("BJORN_NOTE_TAGS", "tag")]);
+        let took = start.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(20),
+            "{what} took {took:?}: {}",
+            run.stderr
+        );
+    }
+
+    // More images than it publishes.
+    let site = Site::new();
+    let names: Vec<String> = (0..201).map(|n| format!("i{n}.png")).collect();
+    let text: String = names.iter().map(|n| format!("![](assets/{n})\n")).collect();
+    let assets: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+    let note = site.bundle(&format!("# Many\n\n{text}"), &assets);
+    let run = site.run(&note, "N", &["--bundle"]);
+    assert!(!run.ok);
+    assert!(run.first_line().contains("at most 200"), "{}", run.stderr);
+    assert!(site.files().is_empty());
+}
+
+#[test]
+fn a_date_the_clock_cannot_hold_is_a_refusal_not_a_crash() {
+    need_python!();
+    for date in ["0001-01-01", "9999-12-31T23:59:59-23:59"] {
+        let site = Site::new();
+        let note = site.note(&format!("---\ndate: {date}\n---\n# D\n"));
+        let run = site.run(&note, "N", &[]);
+        if !run.ok {
+            assert_eq!(run.stderr.lines().count(), 1, "{date}: {}", run.stderr);
+            assert!(!run.stderr.contains("Traceback"), "{}", run.stderr);
+        }
+    }
+    let site = Site::new();
+    let note = site.note("---\ndate: 0001-01-01\n---\n# D\n");
+    let run = site.run(&note, "N", &[]);
+    assert!(!run.ok);
+    assert!(run.first_line().contains("not a date"), "{}", run.stderr);
 }
 
 // -- through Bjorn's own action machinery --------------------------------------------------
