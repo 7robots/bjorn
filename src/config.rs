@@ -566,6 +566,90 @@ mod tests {
         assert_eq!(Config { path: None, ..cfg }, Config::default());
     }
 
+    /// Every TOML key the parser looks up, read from the parser's source: a
+    /// key is read straight off a table (`data.get("theme")`) or through the
+    /// `[daily]` arm's `or_default("title", ...)`. A new helper of that kind
+    /// has to be named here, which is why the count is asserted.
+    fn keys_the_parser_reads() -> Vec<String> {
+        const CALLS: &[&str] = &["get", "or_default"];
+        let source = include_str!("config.rs");
+        let source = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let bytes = source.as_bytes();
+        let mut keys = Vec::new();
+        for call in CALLS {
+            let needle = format!("{call}(\"");
+            let mut from = 0usize;
+            while let Some(at) = source[from..].find(&needle) {
+                let start = from + at;
+                from = start + needle.len();
+                // Not `budget("…")`: the call name must stand on its own.
+                let before = bytes[..start].iter().next_back().copied();
+                if before.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                    continue;
+                }
+                let Some(end) = source[from..].find('"') else {
+                    continue;
+                };
+                let key = &source[from..from + end];
+                if !key.is_empty()
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                {
+                    keys.push(key.to_string());
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        assert!(
+            keys.len() > 25,
+            "only {} config keys parsed out of src/config.rs; has a new helper \
+             been added that CALLS does not name?",
+            keys.len()
+        );
+        keys
+    }
+
+    /// The keys the example config writes, commented out or not: `key = ...`
+    /// and `[table]` / `[[table]]` lines, after any leading `#`.
+    fn keys_in_the_example(example: &str) -> std::collections::BTreeSet<String> {
+        example
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start().trim_start_matches('#').trim_start();
+                if line.starts_with('[') {
+                    let end = line.find(']')?;
+                    Some(line[..end].trim_matches('[').trim().to_string())
+                } else {
+                    let (key, _) = line.split_once('=')?;
+                    let key = key.trim();
+                    (!key.is_empty() && !key.contains(char::is_whitespace)).then(|| key.to_string())
+                }
+            })
+            .collect()
+    }
+
+    /// The README promises every default is in the example, so a key the
+    /// parser reads must be written there, at least as a commented line.
+    #[test]
+    fn every_key_the_parser_reads_is_in_the_example_config() {
+        let example = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example"),
+        )
+        .unwrap();
+        let written = keys_in_the_example(&example);
+        let missing: Vec<String> = keys_the_parser_reads()
+            .into_iter()
+            .filter(|key| !written.contains(key))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "config/config.toml.example does not show these keys from src/config.rs: {}",
+            missing.join(", ")
+        );
+    }
+
     #[test]
     fn xdg_config_home_is_honoured() {
         // Not parallel-safe to set env in tests; exercise the pure part instead.

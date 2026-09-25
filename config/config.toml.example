@@ -13,6 +13,7 @@ icon_style = "auto"             # auto | nerd | emoji | lucide | none
 # A built-in name (`bjorn --list-themes`), or the file name of a Bear
 # `.theme` file in ~/.config/bjorn/themes/ ("My Nord.theme" is "my-nord").
 theme = "red-graphite-dark"
+# mouse_pixels = true           # accepted so older config files still load; it has no effect
 
 [icons]                         # top-level tag -> Lucide icon name, or emoji:<glyph>
 # tech = "terminal"
@@ -34,6 +35,7 @@ remctl = ""                     # path to remctl; default searches PATH
 # confirm = false               # ask before running
 # timeout = 300                 # seconds; a captured command that overruns is killed
 # default = true                # what `!` runs
+# prompt = "Ask for what?"      # ask for a line of text first; the answer is $BJORN_ACTION_INPUT
 
 # The daily note: `D` opens today's, `bjorn capture "text"` adds a line to it.
 # `title` and `tag` are strftime formats (%-d is the day without a leading 0).
