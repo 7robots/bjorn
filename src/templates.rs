@@ -262,18 +262,33 @@ pub fn render_note(body: &str, now: &DateTime<Local>, vars: &[(&str, &str)]) -> 
 }
 
 /// A body split into its YAML front matter (a `---` block opening on the
-/// first line, closing line included) and the rest.
+/// first line, closing line included) and the rest. The block may end its
+/// lines with `\r\n` as well as `\n`: a template saved on Windows has front
+/// matter too.
 pub fn split_front_matter(body: &str) -> (&str, &str) {
-    if let Some(after) = body.strip_prefix("---\n") {
-        let mut offset = 4;
-        for line in after.split_inclusive('\n') {
-            offset += line.len();
-            if line.trim_end() == "---" {
-                return (&body[..offset], &body[offset..]);
-            }
+    let Some(mut offset) = ["---\n", "---\r\n"]
+        .iter()
+        .find(|opener| body.starts_with(*opener))
+        .map(|opener| opener.len())
+    else {
+        return ("", body);
+    };
+    for line in body[offset..].split_inclusive('\n') {
+        offset += line.len();
+        if line.trim_end() == "---" {
+            return (&body[..offset], &body[offset..]);
         }
     }
     ("", body)
+}
+
+/// The line ending `body` mostly uses: `\r\n` when more of its lines end
+/// that way than with a bare `\n`, else `\n`. A line Bjorn writes into the
+/// body takes this ending, so a CRLF template does not come out mixed.
+pub fn line_ending(body: &str) -> &'static str {
+    let crlf = body.matches("\r\n").count();
+    let lf = body.matches('\n').count() - crlf;
+    if crlf > lf { "\r\n" } else { "\n" }
 }
 
 /// The heading a template opens with (after any front matter), as (front
@@ -310,7 +325,8 @@ impl Template {
 
     /// The note's content once its title and tags are settled: any front
     /// matter, the opening heading at its own level carrying `title`, then the
-    /// rest filled in.
+    /// rest filled in. The heading line ends the way the template's lines
+    /// mostly do.
     pub fn content(
         &self,
         now: &DateTime<Local>,
@@ -322,9 +338,10 @@ impl Template {
         let vars = [("title", title), ("workspace", workspace), ("tag", &tag)];
         match split_heading(&self.body) {
             (front, Some((level, _)), rest) => format!(
-                "{}{} {title}\n{}",
+                "{}{} {title}{}{}",
                 render(front, now, &vars),
                 "#".repeat(level),
+                line_ending(&self.body),
                 render_note(rest, now, &vars)
             ),
             (_, None, _) => render_note(&self.body, now, &vars),
@@ -424,6 +441,31 @@ mod tests {
     }
 
     #[test]
+    fn a_crlf_template_keeps_its_front_matter_and_its_line_endings() {
+        let t = template("---\r\ntype: meeting\r\n---\r\n## Sync\r\n{{tag}}\r\nbody\r\n");
+        assert_eq!(t.title(&at(), "", &[]), "Sync");
+        assert_eq!(
+            t.content(&at(), "Sync with Ana", "", &["work".into()]),
+            "---\r\ntype: meeting\r\n---\r\n## Sync with Ana\r\n#work\r\nbody\r\n"
+        );
+        assert_eq!(
+            t.content(&at(), "S", "", &[]),
+            "---\r\ntype: meeting\r\n---\r\n## S\r\nbody\r\n",
+            "a tag-only CRLF line goes when there is no tag"
+        );
+        assert_eq!(
+            split_front_matter("---\r\na: 1\r\n---\r\nrest"),
+            ("---\r\na: 1\r\n---\r\n", "rest")
+        );
+        assert_eq!(line_ending("a\r\nb\r\nc\n"), "\r\n");
+        assert_eq!(line_ending("a\r\nb\nc\n"), "\n");
+        assert_eq!(line_ending("one line"), "\n");
+        // A mostly-LF template stays LF.
+        let lf = template("## T\nbody\r\nmore\n");
+        assert_eq!(lf.content(&at(), "X", "", &[]), "## X\nbody\r\nmore\n");
+    }
+
+    #[test]
     fn templates_are_listed_by_name_and_unusable_ones_counted() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("b.md"), "B").unwrap();
@@ -465,10 +507,23 @@ mod tests {
             .status()
             .is_ok_and(|s| s.success());
         if made {
-            assert!(matches!(
-                load(dir.path(), "pipe"),
-                Err(LoadError::Unusable(_))
-            ));
+            // On a thread with a deadline, so a read that blocks on the FIFO
+            // fails the test instead of hanging the suite.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let templates = dir.path().to_path_buf();
+            std::thread::spawn(move || {
+                let _ = tx.send(load(&templates, "pipe"));
+            });
+            let loaded = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("reading a FIFO template blocked");
+            match loaded {
+                Err(LoadError::Unusable(why)) => {
+                    assert!(why.contains("not a regular file"), "{why}")
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(list(dir.path()).skipped, 1, "the listing skips it too");
         }
     }
 
