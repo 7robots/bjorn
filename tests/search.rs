@@ -30,7 +30,7 @@ async fn slash_search_and_escape() {
     assert_eq!(h.app.focus, Pane::Notes);
     assert!(h.app.notes.search.open, "the box stays open with the query");
     h.press("escape");
-    h.until(|app| app.notes.titles().len() == 5).await;
+    h.until(|app| app.notes.titles().len() == 8).await;
     assert!(!h.app.notes.search.open);
     assert!(!h.text().contains("\"phrase\"  -term"));
 }
@@ -278,7 +278,7 @@ async fn rows_highlight_terms_in_title_and_preview_only() {
         .expect("preview shows the term");
     assert!(h.cell_is_match(x, rows.y + 1));
     h.press("escape");
-    h.until(|app| app.notes.titles().len() == 5).await;
+    h.until(|app| app.notes.titles().len() == 8).await;
     search(&mut h, "garden").await;
     h.until(|app| {
         app.notes.header.starts_with("“garden”")
@@ -294,7 +294,7 @@ async fn rows_highlight_terms_in_title_and_preview_only() {
         "title matches case-insensitively"
     );
     h.press("escape");
-    h.until(|app| app.notes.titles().len() == 5).await;
+    h.until(|app| app.notes.titles().len() == 8).await;
     search(&mut h, "119").await;
     h.until(|app| app.notes.titles() == vec!["Reading Queue"])
         .await;
@@ -308,6 +308,6 @@ async fn rows_highlight_terms_in_title_and_preview_only() {
         }
     }
     h.press("escape");
-    h.until(|app| app.notes.titles().len() == 5).await;
+    h.until(|app| app.notes.titles().len() == 8).await;
     assert!(h.app.notes.pattern.is_none());
 }

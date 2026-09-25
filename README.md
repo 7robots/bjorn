@@ -52,6 +52,7 @@ its source is [docs/bjorn.1](docs/bjorn.1) if you would rather read it here.
 | `w` | make the highlighted tag the workspace; again on it to leave | `W` | clear the workspace |
 | `f` | fold / unfold the highlighted tag's subtree | `F` | fold every tag, or unfold them all when all are folded |
 | `t` | triage the workspace's open todos | `c` / click `▮▮▮` | hide the tag column, then the note column too, then show all three |
+| `s` | add today's dated section to the note; off until the config has `[sections]` (see [Dated sections](#dated-sections)) | `T` | the day screen: every section written on one day; off until the config has `[sections]` |
 | `]` / `[` | next / previous match in the reader while searching | `r` | refresh now |
 | `o` | outline: the note's headings, indented by level; type to filter, `enter` scrolls there | `}` / `{` | next / previous heading in the reader |
 | `L` | the note's wiki links and backlinks; `enter` follows (see [Wiki links](#wiki-links)) | `backspace` / `alt+→` | back to the note a link was followed from / forward again (`ctrl+o`, `alt+←`, `alt+b` go back; `alt+f` goes forward) |
@@ -136,6 +137,101 @@ Trash), and a workspace that excludes it is cleared, with a toast. `backspace`
 search and scroll included; `alt+→` (or `alt+f`) goes forward again. While the
 search box is open, `backspace` edits the query instead. `enter` in triage
 counts as a jump too.
+
+## Dated sections
+
+Dated sections are off until the config has a `[sections]` table; an empty one
+turns them on with the defaults below. `s` rewrites the note under the cursor
+and `T` goes beyond anything Bear shows, so without the table both only say
+how to turn them on, and the table's patterns are never read or checked:
+
+```toml
+[sections]
+```
+
+Some notes are a running log: a title, a preamble, then one section per day,
+newest first. Each section's heading is the date and the line under it carries
+a day tag, which makes Bear's tag view a time axis — except that the tag view
+lists *notes*, not sections, so finding what you wrote on a given day means
+opening each note and searching inside it. `s` and `T` are the two halves of
+that gap.
+
+`s` adds today's section to the note under the cursor, from the `[sections]`
+template:
+
+```markdown
+## September 19, 2026 (Saturday)
+#log/2026/09/19
+* People:
+* Topic:
+
+---
+```
+
+It goes **above the first dated section**, so the newest stays on top, and at
+the end of the note when there is none yet (`insert` changes that; see
+below). It never goes first in a note that has anything in it: Bear takes a
+note's title from its first heading, so a section written above the title would
+rename the note. When the title is itself a dated heading (a daily note), the
+whole of that day's section stays with it and today's goes after it ends. If
+today already has a section, nothing is written: the reader jumps to the one
+that is there and says so. The note is read first and written
+back with `bearcli overwrite --base`, so a change made in Bear while Bjorn was
+reading is refused rather than overwritten, and a read that comes back without
+a hash stops the write instead of writing unguarded.
+
+Before anything is written, the result is read back with the same parser the
+day screen uses and must hold exactly one section for today; a template that
+does not produce one Bjorn can find again is refused with a message, because
+otherwise every `s` would add another section. Apart from the blank lines
+immediately around the insert point and its line endings, the note is left
+alone. A note written with one kind of line ending keeps it (a CRLF note stays
+CRLF); a note that mixes them is rewritten with whichever it uses most, since
+the write rejoins every line. The final newline, or its lack, is kept either way.
+
+A **dated section** is a heading, outside fenced code, that is either
+
+1. a heading whose text parses as `heading_format`, or
+2. a heading whose first non-blank line below is a tag line carrying a tag that
+   parses as `day_tag`.
+
+Either alone is enough: a note whose headings are worded differently is still
+found through its tags, and a note without day tags is still found through its
+headings.
+
+`T` opens the day screen: every section written on one day, across your notes
+**and your archive** (a finished topic note is archived with its history, and
+its rows are marked `(archived)`; the trash is not history and is skipped),
+grouped by note, with the section's heading and the first line or two of its
+body. `enter` opens the note in the reader scrolled to that section, `b` opens
+it in Bear.app there, `←`/`→` (or `[`/`]`) step a day back and forward, `t`
+returns to today, `/` filters, `r` reloads, and `esc` or `q` clears an active
+filter on the first press and closes the screen on the next. A day with
+nothing on it says so and names the tag it looked for.
+
+The screen runs two searches and merges them, so both kinds of dated section
+are found: the day's tag, and the day's heading as a quoted phrase — that
+second one is what finds a note that heads its sections by date but carries no
+day tag. Whatever the searches return is then parsed, and only sections for
+that date are listed. If `heading_format` renders a phrase Bjorn cannot search
+for — one containing a `"`, or shorter than six characters, such as `%d` on its
+own — the tag search runs alone, and heading-only notes are then found only if
+they also carry the tag.
+
+The template is filled in the way note templates are (see [Daily notes and
+templates](#daily-notes-and-templates)): `{{date}}` (ISO), `{{time}}` and
+`{{date:FMT}}`. It has three placeholders of its own: `{{heading}}` (today in
+`heading_format`), `{{tag}}` (the day tag as Bear writes it, `#` and all) and
+`{{title}}` (the note's title). The heading is a placeholder rather than a
+`{{date:FMT}}` because `heading_format` is also how `s` and `T` recognize a
+dated heading, so one setting writes it and finds it again. Anything else in
+braces is left as written, so a typo shows up in the note instead of
+vanishing. `config/sections/section.md` in this repo is the default, kept as
+a starting point to copy into `template` and edit.
+
+`day_tag` defaults to `[daily] tag` when `[daily]` is on and its tag names a
+whole day, so daily notes and dated sections share one time axis; otherwise
+it is `log/%Y/%m/%d`.
 
 ## Todo triage
 
@@ -273,6 +369,20 @@ theme = "red-graphite-dark"   # see Themes below; `bjorn --list-themes` prints t
 [icons]                       # top-level tag -> Lucide icon name, or emoji:<glyph>
 tech = "terminal"
 school = "emoji:🎓"
+
+# [sections]                  # turns on `s` and `T` (off without it); an empty table uses these defaults
+# day_tag = "log/%Y/%m/%d"    # the day tag, a strftime pattern; defaults to [daily] tag when that names a day
+# heading_format = "%B %-d, %Y (%A)"  # the date heading; also how an existing one is recognized
+# insert = "before-first-dated-section"  # top | bottom | before-first-dated-section; anything else warns at start-up
+# what `s` writes; the placeholders are listed under Dated sections
+# template = """
+# ## {{heading}}
+# {{tag}}
+# * People:
+# * Topic:
+#
+# ---
+# """
 
 [reminders]                   # triage can push todos to Apple Reminders
 enabled = false               # off by default

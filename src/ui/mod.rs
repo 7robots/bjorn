@@ -1,6 +1,7 @@
 //! Drawing: the three columns, their headers, the footer, overlays and toasts.
 
 pub mod bear_theme;
+pub mod day;
 pub mod help;
 pub mod highlight;
 pub mod markdown;
@@ -46,6 +47,8 @@ pub const FOOTER: &[(&str, &str)] = &[
     ("w", "Workspace"),
     ("f", "Fold"),
     ("c", "Columns"),
+    ("s", "Section"),
+    ("T", "Day"),
 ];
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -59,6 +62,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.triage.is_some() {
         draw_triage(frame, app, body);
         draw_footer_entries(frame, footer, TRIAGE_FOOTER);
+        app.rects = rects;
+        draw_toasts(frame, app, body);
+        if let Some(overlay) = app.overlay.clone() {
+            draw_overlay(frame, app, area, &overlay);
+        }
+        return;
+    }
+
+    if app.day.is_some() {
+        draw_day(frame, app, body);
+        draw_footer_entries(frame, footer, DAY_FOOTER);
         app.rects = rects;
         draw_toasts(frame, app, body);
         if let Some(overlay) = app.overlay.clone() {
@@ -505,6 +519,130 @@ pub const TRIAGE_FOOTER: &[(&str, &str)] = &[
     ("r", "Reload"),
     ("?", "Help"),
 ];
+
+pub const DAY_FOOTER: &[(&str, &str)] = &[
+    ("esc", "Close"),
+    ("enter", "Open at the section"),
+    ("b", "Bear"),
+    ("← →", "Day back / forward"),
+    ("t", "Today"),
+    ("/", "Filter"),
+    ("r", "Reload"),
+    ("?", "Help"),
+];
+
+/// The day screen: sections written on one day, grouped by note.
+fn draw_day(frame: &mut Frame, app: &mut App, area: Rect) {
+    use crate::ui::day::{DayLine, DayView};
+
+    let Some(day) = app.day.as_mut() else {
+        return;
+    };
+    let filter_rows = if day.filter.is_some() { 3 } else { 0 };
+    let [header, filter, list, status] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(filter_rows),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    frame.render_widget(Clear, area);
+    frame.buffer_mut().set_style(area, theme::surface(true));
+    let head = format!(" {}", day.header());
+    let pad = (header.width as usize).saturating_sub(UnicodeWidthStr::width(head.as_str()));
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{head}{}", " ".repeat(pad)),
+            Style::default()
+                .fg(theme::accent_color())
+                .add_modifier(Modifier::BOLD),
+        ))),
+        header,
+    );
+    if let Some(field) = &day.filter {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::accent_color()));
+        let inner = block.inner(filter);
+        frame.render_widget(block, filter);
+        let shown = if field.value.is_empty() {
+            Line::from(Span::styled(
+                "Filter sections — enter to apply, esc to cancel",
+                theme::muted(),
+            ))
+        } else {
+            Line::from(field.value.clone())
+        };
+        frame.render_widget(Paragraph::new(shown), inner);
+        field_cursor(frame, field, inner.x, inner.y, inner.width);
+    }
+    let lines = day.lines();
+    if lines.is_empty() && day.loaded {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                day.empty_message(),
+                theme::muted(),
+            )))
+            .block(Block::default().padding(Padding::new(3, 3, 2, 0))),
+            list,
+        );
+    } else {
+        let cursor_line = lines
+            .iter()
+            .position(|l| matches!(l, DayLine::Section(i) if day.items.get(day.cursor) == Some(i)));
+        let height = list.height as usize;
+        if let Some(c) = cursor_line {
+            if c < day.scroll {
+                day.scroll = c.saturating_sub(2);
+            } else if c >= day.scroll + height {
+                day.scroll = c + 1 - height;
+            }
+        }
+        day.scroll = day.scroll.min(lines.len().saturating_sub(height));
+        let mut rendered: Vec<Line<'static>> = Vec::new();
+        for line in lines.iter().skip(day.scroll).take(height) {
+            let mut row = match line {
+                DayLine::Blank => Line::default(),
+                DayLine::Header {
+                    title,
+                    count,
+                    archived,
+                } => DayView::render_header(title, *count, *archived),
+                DayLine::Section(i) => {
+                    let is_cursor = day.items.get(day.cursor) == Some(i);
+                    let style = if is_cursor {
+                        Some(theme::cursor_focused())
+                    } else {
+                        None
+                    };
+                    let mut r = day.render_row(&day.rows[*i], style);
+                    if let Some(base) = style {
+                        let used: usize = r
+                            .spans
+                            .iter()
+                            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                            .sum();
+                        r.spans.push(Span::styled(
+                            " ".repeat((list.width as usize).saturating_sub(used + 2)),
+                            base,
+                        ));
+                    }
+                    r
+                }
+            };
+            row.spans.insert(0, Span::raw("  "));
+            rendered.push(row);
+        }
+        frame.render_widget(Paragraph::new(rendered), list);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {}", day.status),
+            theme::muted(),
+        ))),
+        status,
+    );
+}
 
 fn draw_triage(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(triage) = app.triage.as_mut() else {

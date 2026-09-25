@@ -60,7 +60,7 @@ async fn probe_changes_after_a_write() {
     let fake = Fake::new();
     let client = fake.client();
     let before = client.probe().await.unwrap();
-    assert_eq!(before.count, 7);
+    assert_eq!(before.count, 10);
     client.pin("NOTE-READING", "global").await.unwrap();
     client
         .create("Fresh", &["home".to_string()], "")
@@ -68,7 +68,7 @@ async fn probe_changes_after_a_write() {
         .unwrap();
     let after = client.probe().await.unwrap();
     assert_ne!(after, before);
-    assert_eq!(after.count, 8);
+    assert_eq!(after.count, 11);
 }
 
 #[tokio::test]

@@ -345,6 +345,40 @@ fold / unfold the highlighted tag's subtree
 .TP
 .B F
 fold every tag, or unfold them all when all are folded
+.SS Dated sections
+.TP
+.B s
+add today's section to the note under the cursor, from the
+.B [sections]
+template: a date heading, the day tag, and whatever prompts you keep in it. It
+goes above the first dated section, so the newest stays on top; if today
+already has one, nothing is written and the reader jumps to it. Off until the
+config has a
+.B [sections]
+table; without one,
+.B s
+shows how to turn it on and changes nothing
+.TP
+.B T
+the day screen: every section written on one day, across your notes and your
+archive (archived ones are marked), grouped by note. Off, like
+.BR s ,
+without
+.B [sections]
+.TP
+.B ← → / [ ]
+a day back / forward;
+.B t
+returns to today
+.TP
+.B enter / b
+open the note in the reader at that section / open it in Bear.app there
+.TP
+.B / · r
+filter · reload
+.TP
+.B esc / q
+close the day screen
 .SS Triage
 .TP
 .B t
@@ -543,7 +577,145 @@ goes forward again. While the search box is open,
 .B backspace
 edits the query instead.
 .B enter
-in triage counts as a jump too.
+in triage or on the day screen counts as a jump too.
+.SH DATED SECTIONS AND THE DAY VIEW
+Bjorn writes and lists dated sections only when the config has a
+.B [sections]
+table, and an empty one turns them on with the defaults. Without it,
+.B s
+and
+.B T
+say how to turn them on and do nothing else, and the table's patterns are
+never read, so they can neither stop Bjorn from starting nor warn.
+.PP
+Some notes are a running log: a title, a preamble, then one section per day,
+newest first. Each section's heading is the date and the line under it carries
+a day tag, which makes Bear's tag view a time axis \(em except that the tag
+view lists
+.IR notes ,
+not sections.
+.B s
+and
+.B T
+are the two halves of that gap.
+.PP
+.B s
+adds today's section to the note under the cursor, from the
+.B [sections]
+template:
+.PP
+.EX
+## September 19, 2026 (Saturday)
+#log/2026/09/19
+* People:
+* Topic:
+
+\-\-\-
+.EE
+.PP
+It goes above the first dated section, so the newest stays on top, and at the
+end of the note when there is none yet;
+.I insert
+changes that to
+.B top
+or
+.BR bottom .
+It never goes above the note's title, which Bear takes from the first heading.
+If today already has a section, nothing is written: the reader jumps to the one
+that is there and says so. The note is read first and written back with
+.BR "bearcli overwrite \-\-base" ,
+so a change made in Bear while Bjorn was reading is refused rather than
+overwritten. Before anything is written, the new text is read back the way the
+day screen reads it and must hold exactly one section for today; a template
+that would not is refused with a message. A write is normalized only around
+the insert point: the note keeps its own dominant line ending and its final
+newline, or its lack of one, and blank lines directly around the insert are
+collapsed to one.
+.PP
+A
+.B dated section
+is a heading, outside fenced code, that is either a heading whose text parses
+as
+.IR heading_format ,
+or a heading whose first non\-blank line below is a tag line carrying a tag
+that parses as
+.IR day_tag .
+Either alone is enough: a note whose headings are worded differently is still
+found through its tags, and a note without day tags is still found through its
+headings.
+.PP
+The template is filled in the way note templates are (see
+.BR "DAILY NOTES AND TEMPLATES" ),
+with three placeholders of its own:
+.TP
+.B {{heading}}
+today in
+.IR heading_format .
+The same setting is how
+.B s
+and
+.B T
+recognize a dated heading, so one setting writes it and finds it again
+.TP
+.B {{tag}}
+the day tag as Bear writes it,
+.B #
+and all
+.TP
+.B {{title}}
+the note's title
+.PP
+.BR {{date}} ,
+.B {{time}}
+and
+.B {{date:\fIformat\fB}}
+work as they do in a note template, and anything else in braces stays as
+written, so a typo shows up in the note instead of vanishing.
+.I config/sections/section.md
+in the repository is the default, kept as a starting point to copy and edit.
+.PP
+.B T
+opens the day screen: every section written on one day \(em a heading that
+parses as the date, or one whose tag line carries the day's tag \(em across
+notes and the archive,
+grouped by note, with the section's heading and the first line or two of its
+body.
+.B enter
+opens the note in the reader scrolled to that section,
+.B b
+opens it in Bear.app there,
+.B ←
+and
+.B →
+(or
+.B [
+and
+.BR ] )
+step a day back and forward,
+.B t
+returns to today,
+.B /
+filters,
+.B r
+reloads, and
+.B esc
+or
+.B q
+clears an active filter on the first press and closes the screen on the next.
+Two searches run and are merged: the day's tag, and the day's heading as a
+quoted phrase, which is what finds a note that heads its sections by date but
+carries no day tag. Every candidate note's body is then parsed and only the
+sections for that date are kept. When
+.I heading_format
+renders a phrase Bjorn cannot search for \(em one containing a
+.BR \(dq ,
+or shorter than six characters, such as
+.B %d
+on its own \(em the tag search runs alone, and a heading\-only note is then
+found only if it also carries the tag. Notes
+in the trash are skipped, notes in the archive are listed and marked, and notes
+Bjorn could not read (locked or encrypted) are counted. A day with nothing on
+it says so and names the tag it looked for.
 .SH TODO TRIAGE
 .B t
 opens a screen listing every open
@@ -1232,6 +1404,46 @@ and
 .B {{workspace}}
 are filled in. Default:
 .BR "* {{time}} {{text}}" .
+.SS [sections]
+Present, even empty, turns dated sections on; absent, they are off. See
+.BR "DATED SECTIONS AND THE DAY VIEW" .
+The patterns are checked at start only while the table is present.
+.TP
+.I template
+What
+.B s
+writes, with the placeholders listed under
+.BR "DATED SECTIONS AND THE DAY VIEW" .
+Default: the contents of
+.IR config/sections/section.md :
+.B {{heading}}
+as a second\-level heading,
+.BR {{tag}} ,
+People, Topic and a rule.
+.TP
+.I day_tag
+The day tag that carries the time axis, as a strftime pattern. Default:
+.B [daily]
+.I tag
+when
+.B [daily]
+is on and its tag names a whole day, else
+.BR log/%Y/%m/%d .
+.TP
+.I heading_format
+The date heading, as a strftime pattern; also how an existing dated heading is
+recognized. Default:
+.BR "%B %\-d, %Y (%A)" .
+.TP
+.I insert
+Where a new section goes:
+.BR top ,
+.BR bottom ,
+or
+.BR before\-first\-dated\-section .
+Underscores are accepted; anything unrecognized is the default and gets a
+warning at start. Default:
+.BR before\-first\-dated\-section .
 .SS [templates]
 .TP
 .I dir
@@ -1445,6 +1657,32 @@ bjorn capture \-\- "$text" </dev/null   # in a git hook
 bjorn today
 .EE
 .PP
+Turn on dated sections with the defaults:
+.PP
+.EX
+# ~/.config/bjorn/config.toml
+[sections]
+.EE
+.PP
+Or with a template of your own, so
+.B s
+writes the shape you keep:
+.PP
+.EX
+[sections]
+day_tag = "journal/%Y\-%m\-%d"
+heading_format = "%Y\-%m\-%d (%a)"
+insert = "before\-first\-dated\-section"
+template = """
+## {{heading}}
+{{tag}}
+
+Focus:
+
+\-\-\-
+"""
+.EE
+.PP
 Choose a palette for one run, or for good:
 .PP
 .EX
@@ -1504,6 +1742,16 @@ There is no HTTP client in it. Anything that has to reach the network \(em a
 model, an upload, a deploy, a commit \(em is an action you configure, running
 with your credentials and your environment. Bjorn does not sandbox an action
 and does not parse it.
+.IP \(bu 2
+.B T finds sections, not everything written on a day.
+The day screen starts from a search for the day tag and, when the date heading
+is long enough to be worth searching for, for that heading as a phrase. A
+section with neither \(em no day tag under its heading and a heading that does
+not parse as
+.I heading_format
+\(em is not found. Neither is one hidden below an unclosed code fence, which
+reads as one long code block in Bear too. Notes in the trash are skipped, and
+notes Bjorn cannot read (locked or encrypted) are counted but not listed.
 .IP \(bu 2
 .B Backlinks are capped.
 .B L

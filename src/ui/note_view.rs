@@ -430,3 +430,40 @@ impl Reader {
             .join("\n")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BODY: &str = "# Topic\n#topic\n\nPreamble.\n\n## September 19, 2026 (Saturday)\n\
+                        #log/2026/09/19\n* People:\n\n---\n\nSeptember 12, 2026 (Saturday)\n\n\
+                        ## September 12, 2026 (Saturday)\n\
+                        #log/2026/09/12\n* People:\n\n---\n";
+
+    #[test]
+    fn scrolling_to_a_heading_lands_on_its_block() {
+        let mut reader = Reader::default();
+        reader.show(&Note::default(), BODY);
+        assert_eq!(reader.scroll, 0);
+        // A body line above it says exactly the same thing; the heading wins.
+        assert!(reader.scroll_to_section("September 12, 2026 (Saturday)", 60, 1));
+        let at = reader.scroll;
+        assert!(at > 0, "the second section is below the first");
+        let body_line = reader
+            .plain_text()
+            .lines()
+            .position(|l| l.trim() == "September 12, 2026 (Saturday)")
+            .unwrap();
+        assert!(
+            at > body_line,
+            "the paragraph that repeats the date is above the heading, not the landing spot"
+        );
+        // Case does not matter.
+        assert!(reader.scroll_to_section("september 12, 2026 (saturday)", 60, 1));
+        assert_eq!(reader.scroll, at);
+        // A heading the note does not have leaves the scroll alone.
+        assert!(!reader.scroll_to_section("Not in this note", 60, 1));
+        assert_eq!(reader.scroll, at);
+        assert!(!reader.scroll_to_section("  ", 60, 1));
+    }
+}

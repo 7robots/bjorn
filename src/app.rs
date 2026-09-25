@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
+use chrono::{Local, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -34,8 +34,10 @@ use crate::reminders::{
     RemctlClient, Status, join as join_reminders, remctl_found, resolve_remctl,
 };
 use crate::search::{query_pattern, rewrite_subtags};
+use crate::sections::{self, DayScan, Insertion, SectionsConfig};
 use crate::templates::{self, Template};
 use crate::todos::{TodoScan, scan_rows};
+use crate::ui::day::DayView;
 use crate::ui::modals::{
     Field, LinkRow, LinkTarget, Overlay, Pending, Severity, TextPurpose, Toast, filter_links,
     filter_templates,
@@ -195,6 +197,21 @@ pub enum Msg {
         failures: Vec<String>,
         keys: Vec<String>,
     },
+    DayLoaded {
+        generation: u64,
+        scan: DayScan,
+        error: String,
+    },
+    /// A note read for `s`, ready to have a section spliced into it.
+    SectionContent {
+        note: Note,
+        result: Result<NoteContent, BearError>,
+    },
+    SectionWritten {
+        note: Note,
+        heading: String,
+        result: Result<(), BearError>,
+    },
     /// The notes linking to `note_id`, checked, for the Links list. Only
     /// the answer to the latest search (`generation`) is shown.
     Backlinks {
@@ -346,6 +363,10 @@ pub struct App {
     pending_reveal: Option<String>,
     /// The triage screen while it is up; it covers the three columns.
     pub triage: Option<Triage>,
+    /// The day screen while it is up; it covers the three columns too.
+    pub day: Option<DayView>,
+    /// Bumped per day load, so stepping days fast never shows an older answer.
+    day_gen: u64,
     pub remctl: Option<Arc<RemctlClient>>,
     reminders_notice_shown: bool,
     reader_width: usize,
@@ -443,6 +464,8 @@ impl App {
             pending_edit: None,
             pending_reveal: None,
             triage: None,
+            day: None,
+            day_gen: 0,
             remctl,
             reminders_notice_shown: false,
             reader_width: 80,
@@ -457,6 +480,23 @@ impl App {
             search_restored: false,
         };
         app.reader.clear("Loading\u{2026}");
+        // A day tag that is not a whole date leaves the day screen empty for
+        // ever with nothing to say why, so the patterns are checked once here
+        // rather than on every press of T. Only with `[sections]` on: a
+        // feature nobody enabled has nothing to warn about.
+        if let Some(problem) = app
+            .config
+            .sections
+            .as_ref()
+            .and_then(|sections| sections.problem(today()))
+        {
+            app.notify_titled(
+                "Dated sections",
+                &problem,
+                Severity::Warning,
+                Duration::from_secs(12),
+            );
+        }
         if let Some(name) = unknown_theme {
             let message = match crate::ui::theme::why_not(&name) {
                 Some(why) => format!(
@@ -847,6 +887,26 @@ impl App {
                     triage.show(scan, &statuses, &error);
                 }
             }
+            Msg::DayLoaded {
+                generation,
+                scan,
+                error,
+            } => {
+                if generation == self.day_gen
+                    && let Some(day) = self.day.as_mut()
+                {
+                    day.show(scan, &error);
+                }
+            }
+            Msg::SectionContent { note, result } => match result {
+                Ok(before) => self.write_section(note, before),
+                Err(err) => self.error("Read failed", &err),
+            },
+            Msg::SectionWritten {
+                note,
+                heading,
+                result,
+            } => self.on_section_written(note, heading, result),
             Msg::TriageTicked { ticked, failures } => self.on_triage_ticked(ticked, failures),
             Msg::TriageAdded {
                 added,
@@ -1051,6 +1111,7 @@ impl App {
     fn load_note(&mut self, note: Note) {
         let generation = self.load_gen;
         if note.locked {
+            self.clear_pending_jump(&note.id);
             self.reader.show_error(
                 &note,
                 "This note is locked; Bear does not expose its content.",
@@ -1076,6 +1137,19 @@ impl App {
         });
     }
 
+    /// Drop a jump waiting for `note_id`: nothing will be rendered for it
+    /// (the note is locked, or could not be read), and a jump left behind
+    /// would fire the next time the reader lands on that note.
+    fn clear_pending_jump(&mut self, note_id: &str) {
+        if self
+            .pending_jump
+            .as_ref()
+            .is_some_and(|(id, _)| id == note_id)
+        {
+            self.pending_jump = None;
+        }
+    }
+
     fn on_content(&mut self, generation: u64, epoch: u64, result: Result<NoteContent, BearError>) {
         if generation != self.load_gen {
             return;
@@ -1096,9 +1170,11 @@ impl App {
                 self.apply_pending_jump();
                 self.prefetch_around_cursor();
             }
-            Err(err) => self
-                .reader
-                .show_error(&note, &format!("Could not read note: {err}")),
+            Err(err) => {
+                self.clear_pending_jump(&note.id);
+                self.reader
+                    .show_error(&note, &format!("Could not read note: {err}"));
+            }
         }
     }
 
@@ -2705,6 +2781,10 @@ impl App {
             self.triage_key(key);
             return;
         }
+        if self.day.is_some() {
+            self.day_key(key);
+            return;
+        }
         if self.focus == Pane::Search {
             self.search_key(key);
             return;
@@ -2751,6 +2831,8 @@ impl App {
             KeyCode::Char('a') => self.open_actions(),
             KeyCode::Char('b') => self.open_in_bear(),
             KeyCode::Char('t') => self.open_triage(),
+            KeyCode::Char('T') => self.open_day(today()),
+            KeyCode::Char('s') => self.new_section(),
             KeyCode::Char('c') => self.cycle_columns(),
             KeyCode::Char('w') => self.toggle_workspace(),
             KeyCode::Char('W') => {
@@ -4195,6 +4277,317 @@ impl App {
         if let Some(triage) = self.triage.as_mut() {
             triage.unmark(&keys);
             self.triage_load();
+        }
+    }
+}
+
+// -- dated sections and the day screen ----------------------------------------------
+
+impl App {
+    /// The `[sections]` settings, or `None` after saying how to turn dated
+    /// sections on. `s` and `T` both start here, so without the table neither
+    /// reads nor writes anything.
+    fn sections_config(&mut self) -> Option<SectionsConfig> {
+        let config = self.config.sections.clone();
+        if config.is_none() {
+            self.notify(sections::SECTIONS_OFF, Duration::from_secs(8));
+        }
+        config
+    }
+
+    /// `s`: a section for today in the note under the cursor, from the
+    /// `[sections]` template. The note is read first, so the write is guarded
+    /// by the hash that read produced.
+    fn new_section(&mut self) {
+        if self.sections_config().is_none() {
+            return;
+        }
+        let Some(note) = self.current_note().cloned() else {
+            self.notify("No note selected.", Duration::from_secs(3));
+            return;
+        };
+        if note.locked {
+            self.notify_titled(
+                "",
+                "Locked notes cannot take a section.",
+                Severity::Warning,
+                Duration::from_secs(5),
+            );
+            return;
+        }
+        if note.location == Location::Trash {
+            self.refuse_trashed_section();
+            return;
+        }
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let id = note.id.clone();
+        tokio::spawn(async move {
+            let result = client.cat(&id).await;
+            let _ = tx.send(Msg::SectionContent { note, result });
+        });
+    }
+
+    /// A trashed note is on its way out; a section written into it would be
+    /// history nobody sees, since the day screen skips the Trash.
+    fn refuse_trashed_section(&mut self) {
+        self.notify_titled(
+            "",
+            "Notes in the Trash cannot take a section.",
+            Severity::Warning,
+            Duration::from_secs(5),
+        );
+    }
+
+    /// The note came back: splice the section in, or say why nothing was done.
+    fn write_section(&mut self, note: Note, before: NoteContent) {
+        let Some(config) = self.sections_config() else {
+            return;
+        };
+        // The read took a round trip; a refresh in the meantime may have seen
+        // the note go to the Trash.
+        if self
+            .snapshot
+            .by_id(&note.id)
+            .is_some_and(|n| n.location == Location::Trash)
+        {
+            self.refuse_trashed_section();
+            return;
+        }
+        let when = crate::model::now_local();
+        let title = strip_control(&note.title);
+        match sections::insert_section(&config, &before.content, when, &note.title) {
+            Insertion::Exists { heading } => {
+                self.notify(
+                    &format!("“{title}” already has a section for today; jumped to it."),
+                    Duration::from_secs(4),
+                );
+                self.goto_section(&note.id, &heading);
+            }
+            Insertion::Unrecognized { reason } => self.notify_titled(
+                "Section not added",
+                &format!("Nothing was written to “{title}”: {reason}."),
+                Severity::Error,
+                Duration::from_secs(15),
+            ),
+            Insertion::Added { content, heading } => {
+                // `overwrite` treats an empty --base as "write it anyway".
+                // Without a hash there is no guard, so there is no write.
+                if before.hash.trim().is_empty() {
+                    self.notify_titled(
+                        "Section not added",
+                        &format!(
+                            "bearcli gave no content hash for “{title}”, so the write could not be guarded against a change made in Bear. Nothing was written."
+                        ),
+                        Severity::Error,
+                        Duration::from_secs(15),
+                    );
+                    return;
+                }
+                let client = self.client.clone();
+                let tx = self.tx.clone();
+                let id = note.id.clone();
+                let base = before.hash.clone();
+                tokio::spawn(async move {
+                    let result = client.overwrite(&id, &content, &base).await;
+                    let _ = tx.send(Msg::SectionWritten {
+                        note,
+                        heading,
+                        result,
+                    });
+                });
+            }
+        }
+    }
+
+    fn on_section_written(&mut self, note: Note, heading: String, result: Result<(), BearError>) {
+        match result {
+            Err(err) if err.is_conflict() => self.notify_titled(
+                "Section not added",
+                "The note changed in Bear while it was being read. Nothing was written; press s again.",
+                Severity::Error,
+                Duration::from_secs(10),
+            ),
+            Err(err) => self.error("Section failed", &err),
+            Ok(()) => {
+                self.forget_content(Some(&note.id));
+                self.note_written(&note.title);
+                // The reader lands on the new section once the reload renders
+                // it. Not before: the reader still shows the note as it was,
+                // without the heading.
+                self.start_reload(Some(note.id.clone()), None, true);
+                self.land_on_section(&note.id, &heading);
+                self.notify(
+                    &format!(
+                        "Added “{}” to “{}”.",
+                        strip_control(heading.trim_start_matches('#').trim()),
+                        strip_control(&note.title)
+                    ),
+                    Duration::from_secs(4),
+                );
+            }
+        }
+    }
+
+    /// Show `note_id` in the reader scrolled to `heading`. The reader may
+    /// already be on the note, in which case nothing reloads and the scroll
+    /// happens here.
+    fn goto_section(&mut self, note_id: &str, heading: &str) {
+        if !self.reveal_note(note_id) {
+            self.notify(GONE_FROM_THE_LIST, Duration::from_secs(5));
+            return;
+        }
+        self.focus = Pane::Notes;
+        // Set after `reveal_note`, whose preview drops a jump for another
+        // note; applied here too, since the reader may already show this one.
+        self.land_on_section(note_id, heading);
+        self.apply_pending_jump();
+    }
+
+    /// Scroll the reader to `heading` (a markdown heading line, `#`s and all)
+    /// in `note_id` the next time that note is drawn. Public so a test can
+    /// wait on a note that will never be drawn and see the jump dropped
+    /// rather than left to fire later.
+    pub fn land_on_section(&mut self, note_id: &str, heading: &str) {
+        let section = heading.trim_start_matches('#').trim().to_string();
+        self.pending_jump = Some((note_id.to_string(), Jump::Section(section)));
+    }
+
+    /// Is the reader waiting to land somewhere once a note is drawn?
+    pub fn jump_pending(&self) -> bool {
+        self.pending_jump.is_some()
+    }
+
+    /// `T`: every section written on one day, across all notes.
+    pub fn open_day(&mut self, date: NaiveDate) {
+        let Some(config) = self.sections_config() else {
+            return;
+        };
+        self.day = Some(DayView::new(
+            date,
+            &config.day_tag_display(date),
+            &config.heading_text(date),
+        ));
+        self.day_load();
+    }
+
+    fn close_day(&mut self) {
+        self.day = None;
+    }
+
+    fn day_load(&mut self) {
+        let Some(day) = self.day.as_ref() else {
+            return;
+        };
+        self.day_gen += 1;
+        let generation = self.day_gen;
+        let date = day.date;
+        // The screen only opens with `[sections]` on.
+        let Some(config) = self.config.sections.clone() else {
+            return;
+        };
+        let tag = config.day_tag_for(date);
+        // The tag finds notes that carry it; the heading phrase also finds the
+        // ones that only head their sections by date. Both are filtered by the
+        // body parse afterwards.
+        let phrase = config.heading_phrase(date);
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let (scan, error) = match client.day_rows(&tag, &phrase).await {
+                Ok(rows) => (sections::scan_day_rows(&config, &rows, date), String::new()),
+                Err(err) => (DayScan::default(), format!("Day: {err}")),
+            };
+            let _ = tx.send(Msg::DayLoaded {
+                generation,
+                scan,
+                error,
+            });
+        });
+    }
+
+    /// Step to another day, keeping the filter; the header says which day.
+    fn step_day(&mut self, delta: i64) {
+        let Some(day) = self.day.as_mut() else {
+            return;
+        };
+        let Some(date) = day.date.checked_add_signed(chrono::Duration::days(delta)) else {
+            return;
+        };
+        self.show_day(date);
+    }
+
+    fn show_day(&mut self, date: NaiveDate) {
+        let Some(day) = self.day.as_mut() else {
+            return;
+        };
+        if day.date == date {
+            return;
+        }
+        let filter = day.filter_text.clone();
+        let Some(config) = self.config.sections.as_ref() else {
+            return;
+        };
+        let mut next = DayView::new(
+            date,
+            &config.day_tag_display(date),
+            &config.heading_text(date),
+        );
+        next.filter_text = filter;
+        self.day = Some(next);
+        self.day_load();
+    }
+
+    fn day_key(&mut self, key: KeyEvent) {
+        let Some(day) = self.day.as_mut() else {
+            return;
+        };
+        if let Some(field) = day.filter.as_mut() {
+            match key.code {
+                KeyCode::Esc => day.close_filter(),
+                KeyCode::Enter => day.apply_filter(),
+                _ => {
+                    Self::field_key(field, &key);
+                }
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if !day.filter_text.is_empty() {
+                    day.clear_filter();
+                } else {
+                    self.close_day();
+                }
+            }
+            KeyCode::Char('?') => self.overlay = Some(Overlay::Help { scroll: 0 }),
+            KeyCode::Char('j') | KeyCode::Down => day.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => day.move_cursor(-1),
+            KeyCode::Char('/') => day.open_filter(),
+            KeyCode::Char('r') => {
+                day.status = "reloading…".into();
+                self.day_load();
+            }
+            KeyCode::Left | KeyCode::Char('[') => self.step_day(-1),
+            KeyCode::Right | KeyCode::Char(']') => self.step_day(1),
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                let today = today();
+                self.show_day(today);
+            }
+            KeyCode::Enter => {
+                if let Some(row) = day.current_row().cloned() {
+                    self.close_day();
+                    // A jump like following a link: `backspace` comes back.
+                    self.push_history();
+                    self.goto_section(&row.note_id, &row.heading);
+                }
+            }
+            KeyCode::Char('b') => {
+                if let Some(row) = day.current_row().cloned() {
+                    self.open_note_in_bear(&row.note_id, &row.header());
+                }
+            }
+            _ => {}
         }
     }
 }

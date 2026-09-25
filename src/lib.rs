@@ -20,6 +20,7 @@ pub mod render;
 pub mod render_html;
 pub mod search;
 pub mod search_box;
+pub mod sections;
 pub mod templates;
 pub mod todos;
 pub mod ui;

@@ -6,6 +6,9 @@ plan lives in `docs/plans/bjorn-rust.md`.
 ## Next
 
   or the two keep coexisting (gate passed 2026-09-11; numbers in the README).
+- Appending a line into today's section of a configured note from the shell.
+  The daily-notes PR (#10) adds `bjorn capture`; once both are in, this becomes
+  an option of that command rather than a second one.
 - Search-box completion candidates could be shown as a popup list now that
   the box is drawn by hand; the Python version was limited to one ghost line.
 - A theme that follows the terminal's own palette, for people who dress their
@@ -82,6 +85,17 @@ plan lives in `docs/plans/bjorn-rust.md`.
   the shell. Example templates ship in `config/templates/`. Daily notes are
   opt-in (the maintainer's call in the #10 review): off until the config has
   a `[daily]` table, since Bear itself has none; templates are always on.
+- Dated sections: `s` writes today's section into the note under the cursor
+  from the `[sections]` template (above the first dated section, so the newest
+  stays on top; never a second one for the same day), and `T` opens a day
+  screen listing every section written on one day across the notes and the
+  archive, with `←`/`→` to step days. Sections are found two ways and the
+  results merged: the day's tag, and the day's heading searched as a phrase, so
+  a note that dates its sections by heading alone is listed too. The day tag
+  and the date heading are strftime patterns, so any dating scheme works.
+  Opt-in (the maintainer's call in the #12 review, as for `[daily]`): off
+  until the config has a `[sections]` table, since both go beyond what Bear
+  does and `s` is one key that rewrites a note. See the README.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog
