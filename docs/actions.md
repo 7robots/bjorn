@@ -84,7 +84,7 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 |---|---|---|
 | `name` | the command | what the palette shows and the toast reports |
 | `command` | — | required; run through `sh -c`, so pipes, `&&` and redirection all work |
-| `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`. An unknown name falls back to `md` |
+| `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`. Any other value stops the action before it runs, so a typo is never handed a Markdown file instead |
 | `confirm` | `false` | ask before running. Worth setting on anything that publishes or deletes |
 | `prompt` | — | ask for one line of text first and pass it as `$BJORN_ACTION_INPUT`. The value is the prompt's title (`prompt = "Which bucket"`). A blank one is no prompt at all |
 | `interactive` | `false` | give the command the window and the keyboard in a pty, instead of capturing its output. For anything that talks back |

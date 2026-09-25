@@ -7,7 +7,9 @@
 //! $BJORN_FAKE_BEAR_STATE (default ~/.cache/bjorn/demo-bear.json), seeded with
 //! sample notes on first run. Every `app open` call is appended to
 //! `<state>.opened` so tests can assert on it, and a `<state>.hold-<id>` file
-//! holds back a `cat` of that note until the test removes it.
+//! holds back a `cat` of that note until the test removes it. While a
+//! `<state>.overwrite-fails-after` file exists, `overwrite` writes the note and
+//! then fails anyway, the way a bearcli timed out after Bear saved would.
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -1085,6 +1087,9 @@ fn cmd_overwrite(
         note.modified = now_iso();
     }
     save_state(state);
+    if PathBuf::from(format!("{}.overwrite-fails-after", state_path().display())).exists() {
+        return Err(fail_text("Lost touch with Bear before it answered", 1));
+    }
     Ok(())
 }
 

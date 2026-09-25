@@ -349,7 +349,7 @@ async fn export_via_picker(h: &mut bjorn::harness::Harness, key: &str) -> std::p
 }
 
 #[tokio::test]
-async fn x_exports_to_the_prefilled_path_and_can_be_cancelled() {
+async fn x_exports_to_the_prefilled_path_and_can_be_canceled() {
     let fake = Fake::new();
     let mut h = fake.harness();
     h.load().await;

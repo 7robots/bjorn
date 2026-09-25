@@ -112,6 +112,10 @@ pub struct Action {
     /// The export format the note is rendered to first; an id from
     /// `export::FORMATS`.
     pub format: String,
+    /// A `format` value that is not one of `export::FORMATS`, as written.
+    /// `format` is then Markdown, and the action refuses to run, so a typo
+    /// (`"pfd"`) does not hand a PDF command a Markdown file.
+    pub format_error: Option<String>,
     /// Ask before running. For anything that publishes or deletes.
     pub confirm: bool,
     /// Ask for one line of text first, shown as the prompt's title, and pass it
@@ -142,6 +146,7 @@ impl Default for Action {
             name: String::new(),
             command: String::new(),
             format: crate::export::DEFAULT_FORMAT.to_string(),
+            format_error: None,
             confirm: false,
             prompt: None,
             interactive: false,
@@ -180,6 +185,12 @@ impl Action {
     /// Why this action cannot run as configured, if it cannot. Short enough
     /// for the form's warning line; the caller names the action.
     pub fn misconfigured(&self) -> Option<String> {
+        if let Some(value) = &self.format_error {
+            return Some(format!(
+                "format = {value} is not one of {}",
+                crate::export::FORMATS.map(|f| f.id).join(", ")
+            ));
+        }
         if let Some(value) = &self.output_error {
             return Some(format!(
                 "output = {value} is not one of {}",
@@ -551,12 +562,18 @@ pub fn text_for_bear(captured: &Captured) -> Result<String, Refusal> {
 /// `<tmpdir>/bjorn-output-XXXX/<name>.md`. The directory is 0700 and the file
 /// 0600 and new: an LLM's answer about a private note is as private as the note.
 pub fn keep_output(name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    keep_output_in(&std::env::temp_dir(), name, bytes)
+}
+
+/// `keep_output` under `parent` instead of the temp dir, so a test can make it
+/// fail without changing the environment every other test reads.
+pub fn keep_output_in(parent: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let dir = tempfile::Builder::new()
         .prefix("bjorn-output-")
         .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir()?
+        .tempdir_in(parent)?
         .keep();
     let path = dir.join(format!("{}.md", safe_filename(name)));
     let mut file = std::fs::OpenOptions::new()
@@ -711,7 +728,60 @@ pub fn add_to_config(path: &Path, action: &Action) -> Result<(), ActionError> {
         std::fs::create_dir_all(parent)
             .map_err(|e| ActionError(format!("{}: {e}", parent.display())))?;
     }
-    std::fs::write(path, text).map_err(|e| ActionError(format!("{}: {e}", path.display())))
+    write_config(path, &text)
+}
+
+/// Put `text` in place of the config at `path` all at once: written to a temp
+/// file beside it, flushed to disk, then renamed over it. A crash, a full disk
+/// or a killed Bjorn mid-write leaves the old file whole, never half of a
+/// hand-commented config. The temp file takes the old one's permissions, so a
+/// config kept private stays private.
+///
+/// A config that is a symlink (a dotfile manager's) is written where it
+/// points: the temp file goes beside the target and replaces that, so the
+/// link survives and the file it names gets the change.
+fn write_config(path: &Path, text: &str) -> Result<(), ActionError> {
+    use std::io::Write;
+    let failed = |at: &Path, e: std::io::Error| ActionError(format!("{}: {e}", at.display()));
+    let target = match std::fs::canonicalize(path) {
+        Ok(real) => real,
+        // A link to nothing: renaming over it would swap the link for a file,
+        // and guessing where its target should be made is worse.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && path.symlink_metadata().is_ok() => {
+            return Err(ActionError(format!(
+                "{} is a link to a file that does not exist, so nothing was written.",
+                path.display()
+            )));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(e) => return Err(failed(path, e)),
+    };
+    let dir = match target.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let mut temp = tempfile::Builder::new()
+        .prefix(".bjorn-config-")
+        .suffix(".tmp")
+        .tempfile_in(dir)
+        .map_err(|e| failed(dir, e))?;
+    // A new config keeps the temp file's own 0600.
+    if let Ok(meta) = std::fs::metadata(&target) {
+        temp.as_file()
+            .set_permissions(meta.permissions())
+            .map_err(|e| failed(temp.path(), e))?;
+    }
+    temp.write_all(text.as_bytes())
+        .and_then(|()| temp.as_file().sync_all())
+        .map_err(|e| failed(temp.path(), e))?;
+    temp.persist(&target)
+        .map_err(|e| failed(&target, e.error))?;
+    // The rename itself is only durable once the directory is flushed. It has
+    // already happened, so a failure here is not worth reporting.
+    if let Ok(handle) = std::fs::File::open(dir) {
+        let _ = handle.sync_all();
+    }
+    Ok(())
 }
 
 /// The first line of a TOML parse error; the rest is a drawing of the spot.
@@ -1046,7 +1116,7 @@ pub fn update_in_config(
                 .into(),
         ));
     }
-    std::fs::write(path, result).map_err(|e| ActionError(format!("{}: {e}", path.display())))
+    write_config(path, &result)
 }
 
 /// Remove the `[[actions]]` entry that reads as `original`: its header and
@@ -1117,7 +1187,7 @@ pub fn remove_from_config(path: &Path, original: &Action) -> Result<(), ActionEr
                 .into(),
         ));
     }
-    std::fs::write(path, result).map_err(|e| ActionError(format!("{}: {e}", path.display())))
+    write_config(path, &result)
 }
 
 #[cfg(test)]
@@ -1697,6 +1767,7 @@ mod tests {
             name: "Quote \"it\"".into(),
             command: "printf '%s\\n' \"$BJORN_NOTE_TITLE\" C:\\path".into(),
             format: "html".into(),
+            format_error: None,
             confirm: true,
             prompt: None,
             interactive: false,
@@ -1813,5 +1884,112 @@ mod tests {
         let err = remove_from_config(&path, &action("Copy", "pbcopy -Prefer txt")).unwrap_err();
         assert!(err.0.contains("nothing was written"), "{}", err.0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn config_writes_keep_the_file_mode_and_leave_no_temp_file_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# mine\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        add_to_config(&path, &action("Copy", "pbcopy")).unwrap();
+        assert_eq!(mode(&path), 0o640, "an add");
+        let copy = crate::config::Config::load(Some(&path)).unwrap().actions[0].clone();
+        update_in_config(&path, &copy, &action("Copy", "pbcopy -Prefer txt")).unwrap();
+        assert_eq!(mode(&path), 0o640, "an edit");
+        let copy = crate::config::Config::load(Some(&path)).unwrap().actions[0].clone();
+        assert_eq!(copy.command, "pbcopy -Prefer txt");
+        remove_from_config(&path, &copy).unwrap();
+        assert_eq!(mode(&path), 0o640, "a delete");
+        // The blank line the add put ahead of the entry stays.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n\n");
+        assert_eq!(names_in(dir.path()), ["config.toml"]);
+    }
+
+    /// A dotfile manager's link must still be a link afterwards, pointing where
+    /// it did, with the change in the file it names.
+    #[test]
+    fn a_symlinked_config_stays_a_link_and_its_target_gets_the_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dotfiles = dir.path().join("dotfiles");
+        let config_dir = dir.path().join("bjorn");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let target = dotfiles.join("bjorn.toml");
+        std::fs::write(&target, "# managed\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = config_dir.join("config.toml");
+        let points_to = Path::new("../dotfiles/bjorn.toml");
+        std::os::unix::fs::symlink(points_to, &link).unwrap();
+        let still_linked = |what: &str| {
+            assert!(
+                link.symlink_metadata().unwrap().file_type().is_symlink(),
+                "{what}"
+            );
+            assert_eq!(std::fs::read_link(&link).unwrap(), points_to, "{what}");
+        };
+
+        add_to_config(&link, &action("Copy", "pbcopy")).unwrap();
+        still_linked("an add");
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            written.starts_with("# managed\n") && written.contains("name = \"Copy\""),
+            "{written}"
+        );
+        let copy = crate::config::Config::load(Some(&link)).unwrap().actions[0].clone();
+        update_in_config(&link, &copy, &action("Copy", "pbcopy -Prefer txt")).unwrap();
+        still_linked("an edit");
+        assert!(
+            std::fs::read_to_string(&target)
+                .unwrap()
+                .contains("pbcopy -Prefer txt")
+        );
+        let copy = crate::config::Config::load(Some(&link)).unwrap().actions[0].clone();
+        remove_from_config(&link, &copy).unwrap();
+        still_linked("a delete");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "# managed\n\n");
+        assert_eq!(mode(&target), 0o600);
+        assert_eq!(names_in(&dotfiles), ["bjorn.toml"]);
+        assert_eq!(names_in(&config_dir), ["config.toml"]);
+    }
+
+    #[test]
+    fn a_link_to_a_missing_config_is_not_swapped_for_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(dir.path().join("gone.toml"), &link).unwrap();
+        let err = add_to_config(&link, &action("Copy", "pbcopy")).unwrap_err();
+        assert!(err.0.contains("does not exist"), "{}", err.0);
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(names_in(dir.path()), ["config.toml"]);
+    }
+
+    #[test]
+    fn an_unknown_format_refuses_the_action_and_names_the_valid_ones() {
+        let typo = Action {
+            format_error: Some("\"pfd\"".into()),
+            ..action("Print", "weasyprint - out.pdf")
+        };
+        assert_eq!(
+            typo.misconfigured().as_deref(),
+            Some("format = \"pfd\" is not one of md, html, txt, rtf, textbundle")
+        );
     }
 }

@@ -146,7 +146,7 @@ async fn a_lone_action_is_the_default() {
 }
 
 #[tokio::test]
-async fn a_confirm_action_asks_first_and_can_be_cancelled() {
+async fn a_confirm_action_asks_first_and_can_be_canceled() {
     let fake = Fake::new();
     let config = config_with(
         &fake,
@@ -348,6 +348,7 @@ async fn the_menu_marks_the_default_and_shows_the_highlighted_command() {
                 name: "Publish".into(),
                 command: "aws s3 cp \"$BJORN_NOTE_FILE\" s3://notes/".into(),
                 format: "html".into(),
+                format_error: None,
                 confirm: true,
                 prompt: None,
                 interactive: false,
@@ -932,7 +933,7 @@ async fn esc_calls_off_an_interactive_action_that_has_not_started() {
 
     h.press("!");
     h.press("escape");
-    h.until(|app| app.toast_messages().iter().any(|m| m.contains("cancelled")))
+    h.until(|app| app.toast_messages().iter().any(|m| m.contains("canceled")))
         .await;
     h.settle().await;
     assert!(h.app.session.is_none());
@@ -947,7 +948,7 @@ async fn esc_calls_off_an_interactive_action_that_has_not_started() {
 /// next one begins. Its note arriving then must not start it in place of the
 /// newer one.
 #[tokio::test]
-async fn a_cancelled_start_does_not_run_in_place_of_the_next_one() {
+async fn a_canceled_start_does_not_run_in_place_of_the_next_one() {
     let fake = Fake::new();
     let mut h = fake.harness_with(
         interactive(

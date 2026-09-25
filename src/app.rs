@@ -4,7 +4,7 @@
 //! events, `Msg` values sent back by the tokio tasks that talk to bearcli, and
 //! `tick` for timers. Drawing reads the state; nothing here touches the
 //! terminal. Results are tagged with a generation number and a stale one is
-//! dropped, never cancelled mid-flight.
+//! dropped, never canceled mid-flight.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -174,18 +174,45 @@ pub enum ActionWrite {
         backup: PathBuf,
     },
     /// Nothing was written, and why: the command printed nothing, too much or
-    /// not text, or the note went to the trash. The output is at `kept` when
-    /// there was any worth keeping.
+    /// not text, or the note went to the trash. `kept` is `None` when there
+    /// was no output worth keeping, else where it went or why it could not be
+    /// saved.
     Skipped {
         why: String,
-        kept: Option<PathBuf>,
+        kept: Option<std::io::Result<PathBuf>>,
     },
-    /// The write failed. The output is kept at `kept` when it could be saved.
+    /// The write failed. `kept` is where the output went, or why it could not
+    /// be saved. `backup` is a `replace`'s copy of the note's text, kept when
+    /// the failure cannot prove Bear left the note alone.
     Failed {
         message: String,
         conflict: bool,
-        kept: Option<PathBuf>,
+        kept: std::io::Result<PathBuf>,
+        backup: Option<PathBuf>,
     },
+}
+
+/// The end of a toast about output that did not reach Bear: where it is, or
+/// that it is gone and why. Said once, so a failed save is never left out.
+fn kept_phrase(kept: &std::io::Result<PathBuf>) -> String {
+    match kept {
+        Ok(path) => format!("the output is at {}", path.display()),
+        Err(e) => format!("the output could not be saved either: {e}"),
+    }
+}
+
+/// The toast for output that was never sent to Bear.
+fn skipped_message(why: &str, kept: Option<&std::io::Result<PathBuf>>) -> String {
+    match kept {
+        Some(Ok(path)) => format!(
+            "It ran, but {why}, so nothing was written to Bear; the output is at {}",
+            path.display()
+        ),
+        Some(Err(e)) => format!(
+            "It ran, but {why}, so nothing was written to Bear, and the output could not be saved: {e}"
+        ),
+        None => format!("It ran, but {why}, so nothing was written to Bear."),
+    }
 }
 
 /// Where the last frame put each pane, for mouse events.
@@ -1493,7 +1520,7 @@ impl App {
         action: Action,
         payload: Result<Box<crate::actions::Payload>, String>,
     ) {
-        // Cancelled with `esc` while the note was being rendered, or cancelled
+        // Canceled with `esc` while the note was being rendered, or canceled
         // and then replaced by a newer start: dropping the payload removes its
         // temp directory, and the pending start, if any, stays pending.
         if generation != self.session_gen || self.session_starting.take().is_none() {
@@ -2147,16 +2174,15 @@ impl App {
         tags: &str,
     ) -> ActionWrite {
         use actions::BearWrite;
-        let keep = |bytes: &[u8]| actions::keep_output(&action.name, bytes).ok();
-        let skipped = |why: String, kept: Option<PathBuf>| ActionWrite::Skipped { why, kept };
+        let keep = |bytes: &[u8]| actions::keep_output(&action.name, bytes);
+        let skipped = |why: String, kept: Option<std::io::Result<PathBuf>>| ActionWrite::Skipped {
+            why,
+            kept,
+        };
         let text = match actions::text_for_bear(captured) {
             Ok(text) => text,
             Err(refusal) => {
-                let kept = if refusal.keep {
-                    keep(&captured.stdout)
-                } else {
-                    None
-                };
+                let kept = refusal.keep.then(|| keep(&captured.stdout));
                 return skipped(refusal.reason, kept);
             }
         };
@@ -2168,7 +2194,7 @@ impl App {
                     "Bear gave no hash for “{}” to guard the replace",
                     note.title
                 ),
-                keep(text.as_bytes()),
+                Some(keep(text.as_bytes())),
             );
         }
         if write != BearWrite::NewNote {
@@ -2178,7 +2204,7 @@ impl App {
                 Ok((_, location)) if location == "trash" => {
                     return skipped(
                         format!("“{}” went to the trash while it ran", note.title),
-                        keep(text.as_bytes()),
+                        Some(keep(text.as_bytes())),
                     );
                 }
                 Ok(_) => {}
@@ -2187,10 +2213,14 @@ impl App {
                         message: err.to_string(),
                         conflict: false,
                         kept: keep(text.as_bytes()),
+                        backup: None,
                     };
                 }
             }
         }
+        // A `replace` whose overwrite failed in a way that does not prove the
+        // note untouched: the copy of the old text stays and is named.
+        let mut uncertain_backup = None;
         let written = match write {
             BearWrite::Append => client
                 .append(&note.id, &text, action.section.as_deref())
@@ -2209,14 +2239,17 @@ impl App {
             BearWrite::Replace => {
                 // Replacing cannot be undone in Bear, so the text it replaces
                 // is kept first: no copy, no replace.
-                let Ok(backup) = actions::keep_output(
+                let backup = match actions::keep_output(
                     &format!("{} (before {})", note.title, action.name),
                     before.content.as_bytes(),
-                ) else {
-                    return skipped(
-                        "the note's text could not be saved first".into(),
-                        keep(text.as_bytes()),
-                    );
+                ) {
+                    Ok(backup) => backup,
+                    Err(e) => {
+                        return skipped(
+                            format!("the note's text could not be saved first ({e})"),
+                            Some(keep(text.as_bytes())),
+                        );
+                    }
                 };
                 match client.overwrite(&note.id, &text, &before.hash).await {
                     Ok(()) => {
@@ -2230,12 +2263,19 @@ impl App {
                             .unwrap_or_else(|| note.title.clone());
                         Ok(ActionWrite::Replaced { title, backup })
                     }
-                    Err(err) => {
-                        // Nothing changed, so the copy is not needed.
+                    // Only the stale-hash refusal proves Bear wrote nothing,
+                    // so only then is the copy thrown away. A timeout or a
+                    // killed bearcli may come after Bear already replaced
+                    // the text, and then the copy is all that is left of it.
+                    Err(err) if err.is_conflict() => {
                         let _ = std::fs::remove_file(&backup);
                         if let Some(dir) = backup.parent() {
                             let _ = std::fs::remove_dir(dir);
                         }
+                        Err(err)
+                    }
+                    Err(err) => {
+                        uncertain_backup = Some(backup);
                         Err(err)
                     }
                 }
@@ -2245,6 +2285,7 @@ impl App {
             message: err.to_string(),
             conflict: err.is_conflict(),
             kept: keep(text.as_bytes()),
+            backup: uncertain_backup,
         })
     }
 
@@ -2305,13 +2346,7 @@ impl App {
             }
             ActionWrite::Skipped { why, kept } => self.notify_titled(
                 &name,
-                &match &kept {
-                    Some(path) => format!(
-                        "It ran, but {why}, so nothing was written to Bear; the output is at {}",
-                        path.display()
-                    ),
-                    None => format!("It ran, but {why}, so nothing was written to Bear."),
-                },
+                &skipped_message(&why, kept.as_ref()),
                 Severity::Warning,
                 Duration::from_secs(if kept.is_some() { 30 } else { 8 }),
             ),
@@ -2319,11 +2354,21 @@ impl App {
                 message,
                 conflict,
                 kept,
+                backup,
             } => {
-                let kept = match kept {
-                    Some(path) => format!("the output is at {}", path.display()),
-                    None => "the output could not be saved either".to_string(),
-                };
+                let mut kept = kept_phrase(&kept);
+                if let Some(backup) = backup {
+                    // Bear may have written before the failure; say where the
+                    // old text is rather than that nothing changed, and read
+                    // the note again so the reader shows what Bear holds.
+                    self.forget_content(Some(&note.id));
+                    self.start_reload(None, None, true);
+                    kept = format!(
+                        "{kept}. Bear may have replaced “{}” anyway; the text it had is at {}",
+                        note.title,
+                        backup.display()
+                    );
+                }
                 let (title, message) = if conflict {
                     (
                         "Edit conflict".to_string(),
@@ -2359,7 +2404,7 @@ impl App {
             if key.code == KeyCode::Esc {
                 let name = name.clone();
                 self.session_starting = None;
-                self.notify(&format!("“{name}” cancelled."), Duration::from_secs(3));
+                self.notify(&format!("“{name}” canceled."), Duration::from_secs(3));
             }
             return;
         }
@@ -2548,7 +2593,7 @@ impl App {
                     self.overlay = None;
                     let value = field.value.trim().to_string();
                     match purpose {
-                        // Nothing to export to; the prompt is simply cancelled.
+                        // Nothing to export to; the prompt is simply canceled.
                         TextPurpose::ExportPath { .. } if value.is_empty() => {}
                         TextPurpose::ExportPath { format_id, note } => {
                             self.export_to(format_id, note, Path::new(&value))
@@ -2606,10 +2651,16 @@ impl App {
                         Some(action) => Overlay::NewAction {
                             name: Field::new(&action.name),
                             command: Field::new(&action.command),
-                            format: FORMATS
-                                .iter()
-                                .position(|f| f.id == action.format)
-                                .unwrap_or(0),
+                            format: if action.format_error.is_some() {
+                                None
+                            } else {
+                                Some(
+                                    FORMATS
+                                        .iter()
+                                        .position(|f| f.id == action.format)
+                                        .unwrap_or(0),
+                                )
+                            },
                             confirm: action.confirm,
                             default: action.default,
                             output: output_index(action.output),
@@ -2646,7 +2697,7 @@ impl App {
                             focus: if name.is_empty() { 0 } else { 1 },
                             name: Field::new(&name),
                             command: Field::default(),
-                            format: 0,
+                            format: Some(0),
                             confirm: false,
                             default: false,
                             output: 0,
@@ -2738,11 +2789,12 @@ impl App {
                         self.save_action(action, editing, form, note);
                         return;
                     }
+                    // From an unknown format, either way lands on the first.
                     KeyCode::Left if focus == 2 => {
-                        format = (format + FORMATS.len() - 1) % FORMATS.len()
+                        format = Some(format.map_or(0, |f| (f + FORMATS.len() - 1) % FORMATS.len()))
                     }
                     KeyCode::Right | KeyCode::Char(' ') if focus == 2 => {
-                        format = (format + 1) % FORMATS.len()
+                        format = Some(format.map_or(0, |f| (f + 1) % FORMATS.len()))
                     }
                     KeyCode::Char(' ') if focus == 3 => confirm = !confirm,
                     KeyCode::Char(' ') if focus == 4 => default = !default,
@@ -3253,7 +3305,7 @@ mod tests {
         .await;
         let ActionWrite::Skipped {
             why,
-            kept: Some(kept),
+            kept: Some(Ok(kept)),
         } = written
         else {
             panic!("{written:?}");
@@ -3265,5 +3317,40 @@ mod tests {
         );
         std::fs::remove_file(&kept).unwrap();
         std::fs::remove_dir(kept.parent().unwrap()).unwrap();
+    }
+
+    /// A failed save of the output is said, with why, not passed over: the
+    /// output exists nowhere else.
+    #[test]
+    fn output_that_could_not_be_saved_says_so_and_why() {
+        let full = || std::io::Error::other("No space left on device");
+        assert_eq!(
+            skipped_message("the note went to the trash", Some(&Err(full()))),
+            "It ran, but the note went to the trash, so nothing was written to Bear, \
+             and the output could not be saved: No space left on device"
+        );
+        assert_eq!(
+            skipped_message("it printed nothing", None),
+            "It ran, but it printed nothing, so nothing was written to Bear."
+        );
+        assert_eq!(
+            skipped_message("x", Some(&Ok(PathBuf::from("/tmp/o.md")))),
+            "It ran, but x, so nothing was written to Bear; the output is at /tmp/o.md"
+        );
+        assert_eq!(
+            kept_phrase(&Err(full())),
+            "the output could not be saved either: No space left on device"
+        );
+    }
+
+    /// `keep_output` reports a failure instead of swallowing it: here its
+    /// directory cannot be made under a temp dir that is a file.
+    #[test]
+    fn keep_output_returns_why_it_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "").unwrap();
+        let err = actions::keep_output_in(&file, "Sum", b"text").unwrap_err();
+        assert!(!err.to_string().is_empty());
     }
 }

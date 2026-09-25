@@ -243,7 +243,7 @@ async fn replace_always_asks_first_and_can_be_called_off() {
     }
     h.press("escape");
     h.settle().await;
-    assert!(!marker.exists(), "cancelled before the command ran");
+    assert!(!marker.exists(), "canceled before the command ran");
     assert_eq!(body(&fake, PLANNING).await, before);
 
     h.press("!");
@@ -301,6 +301,59 @@ async fn replace_refuses_a_note_that_changed_while_the_command_ran() {
     );
     remove_kept(&kept);
     assert!(body(&fake, PLANNING).await.contains("changed in Bear"));
+}
+
+/// A bearcli that fails after Bear saved (a timeout, a killed process) proves
+/// nothing about the note, so the copy of its old text stays and is named.
+#[tokio::test]
+async fn a_replace_that_fails_without_proof_keeps_the_old_text() {
+    let fake = Fake::new();
+    let before = body(&fake, PLANNING).await;
+    let knob = PathBuf::from(format!("{}.overwrite-fails-after", fake.state().display()));
+    std::fs::write(&knob, "").unwrap();
+    let mut h = start(
+        &fake,
+        writer("Shout", "tr a-z A-Z", ActionOutput::Replace),
+        None,
+    )
+    .await;
+    h.press("!");
+    h.press("y");
+    let message = wait_for_toast(&mut h, "the text it had is at").await;
+    std::fs::remove_file(&knob).unwrap();
+    assert!(
+        message.contains("Lost touch with Bear before it answered — the output is at "),
+        "{message}"
+    );
+    assert!(
+        message.contains("Bear may have replaced “Sprint Planning” anyway"),
+        "{message}"
+    );
+    // Bear did write, and the copy is all that is left of what it replaced.
+    assert_eq!(body(&fake, PLANNING).await, before.to_uppercase());
+    let backup = PathBuf::from(
+        message
+            .rsplit("the text it had is at ")
+            .next()
+            .unwrap()
+            .trim(),
+    );
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), before);
+    remove_kept(&backup);
+    let kept = PathBuf::from(
+        message
+            .split("the output is at ")
+            .nth(1)
+            .unwrap()
+            .split(". Bear may have")
+            .next()
+            .unwrap(),
+    );
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        before.to_uppercase()
+    );
+    remove_kept(&kept);
 }
 
 #[tokio::test]
@@ -614,6 +667,65 @@ async fn an_unknown_output_stops_the_action_before_it_runs() {
         !marker.exists(),
         "no paid call for output that goes nowhere"
     );
+}
+
+#[tokio::test]
+async fn an_unknown_format_stops_the_action_before_it_runs() {
+    let fake = Fake::new();
+    let marker = fake.dir.path().join("ran");
+    let (config, _) = file_config(
+        &fake,
+        &format!(
+            "[[actions]]\nname = \"Print\"\ncommand = \"touch {}\"\nformat = \"pfd\"\ndefault = true\n",
+            marker.display()
+        ),
+    );
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("!");
+    let message = wait_for_toast(&mut h, "is not one of").await;
+    assert!(
+        message.contains("format = \"pfd\" is not one of md, html, txt, rtf, textbundle"),
+        "{message}"
+    );
+    h.settle().await;
+    assert!(
+        !marker.exists(),
+        "not run on a Markdown file it never asked for"
+    );
+}
+
+/// Editing an action whose format is a typo shows the typo and will not save
+/// until a real format is picked, so the form never writes "md" over it unseen.
+#[tokio::test]
+async fn the_form_shows_an_unknown_format_and_saves_only_a_chosen_one() {
+    let fake = Fake::new();
+    let body =
+        "[[actions]]\nname = \"Print\"\ncommand = \"weasyprint - out.pdf\"\nformat = \"pfd\"\n";
+    let (config, path) = file_config(&fake, body);
+    let mut h = fake.harness_with(config, None);
+    h.load().await;
+    h.press("a");
+    h.key(KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("NewAction"));
+    let screen = h.text();
+    assert!(screen.contains("‹ \"pfd\" ›"), "{screen}");
+    assert!(screen.contains("is not one of md, html"), "{screen}");
+    h.press("enter");
+    assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("NewAction"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+
+    h.press("tab");
+    h.press("tab"); // format
+    h.press("right"); // from the unknown one, the first: Markdown
+    assert!(h.text().contains("‹ Markdown ›"), "{}", h.text());
+    h.press("right"); // HTML
+    h.press("enter");
+    h.until(|app| app.overlay.as_ref().map(|o| o.name()) != Some("NewAction"))
+        .await;
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("format = \"html\""), "{saved}");
+    assert!(!saved.contains("pfd"), "{saved}");
 }
 
 #[tokio::test]

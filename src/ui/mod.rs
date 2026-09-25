@@ -1037,7 +1037,21 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, area: Rect, overlay: &Overlay)
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  Format     ", heading(2)),
-                    Span::styled(format!("‹ {} ›", FORMATS[*format].label), control(2)),
+                    Span::styled(
+                        format!(
+                            "‹ {} ›",
+                            match format {
+                                Some(index) => FORMATS[*index].label.to_string(),
+                                // The unknown value as written, so the form
+                                // shows what saving would refuse.
+                                None => editing
+                                    .as_ref()
+                                    .and_then(|a| a.format_error.clone())
+                                    .unwrap_or_default(),
+                            }
+                        ),
+                        control(2),
+                    ),
                     Span::styled("   ←/→ changes it", theme::muted()),
                 ]),
                 if chosen == crate::actions::ActionOutput::Replace {

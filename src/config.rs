@@ -236,9 +236,24 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
         return None;
     }
     let name = text(entry.get("name"), "").trim().to_string();
-    let format = text(entry.get("format"), crate::export::DEFAULT_FORMAT)
-        .trim()
-        .to_lowercase();
+    // An unknown `format` is kept as written and stops the action from
+    // running, the way an unknown `output` does: falling back to Markdown would
+    // hand a command that expects HTML or a PDF's source the wrong file, and a
+    // form edit would then write "md" over the typo without a word.
+    let markdown = || crate::export::DEFAULT_FORMAT.to_string();
+    let (format, format_error) = match entry.get("format") {
+        None => (markdown(), None),
+        Some(Value::String(value)) => {
+            let id = value.trim().to_lowercase();
+            match crate::export::FORMATS.iter().find(|f| f.id == id) {
+                Some(known) => (known.id.to_string(), None),
+                // A blank one is no format at all, as a blank prompt is.
+                None if id.is_empty() => (markdown(), None),
+                None => (markdown(), Some(format!("{value:?}"))),
+            }
+        }
+        Some(other) => (markdown(), Some(other.to_string())),
+    };
     let timeout = match entry.get("timeout") {
         None => DEFAULT_TIMEOUT_SECONDS,
         Some(Value::Integer(i)) => (*i).max(1) as u64,
@@ -283,8 +298,8 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
             name
         },
         command,
-        // An unknown format falls back to Markdown, as `export_format` does.
-        format: crate::export::format_by_id(&format).id.to_string(),
+        format,
+        format_error,
         confirm: truthy(entry.get("confirm"), false),
         prompt,
         interactive: truthy(entry.get("interactive"), false),
@@ -491,6 +506,33 @@ mod tests {
         );
         assert_eq!(actions[3].output, ActionOutput::Toast);
         assert_eq!(actions[3].output_error, None);
+    }
+
+    #[test]
+    fn an_unknown_format_is_kept_as_an_error_not_turned_into_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[[actions]]\nname = \"Print\"\ncommand = \"weasyprint\"\nformat = \"pfd\"\n\n\
+             [[actions]]\nname = \"Loud\"\ncommand = \"cat\"\nformat = \" HTML \"\n\n\
+             [[actions]]\nname = \"Blank\"\ncommand = \"cat\"\nformat = \"\"\n\n\
+             [[actions]]\nname = \"Odd\"\ncommand = \"cat\"\nformat = 3\n",
+        );
+        let actions = Config::load(Some(&path)).unwrap().actions;
+        assert_eq!(actions[0].format_error.as_deref(), Some("\"pfd\""));
+        assert!(
+            actions[0]
+                .misconfigured()
+                .unwrap()
+                .contains("format = \"pfd\" is not one of md, html"),
+            "{:?}",
+            actions[0].misconfigured()
+        );
+        assert_eq!(actions[1].format, "html", "case and spaces do not matter");
+        assert_eq!(actions[1].format_error, None);
+        assert_eq!(actions[2].format, "md", "a blank format is the default");
+        assert_eq!(actions[2].format_error, None);
+        assert_eq!(actions[3].format_error.as_deref(), Some("3"));
     }
 
     #[test]
