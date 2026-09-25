@@ -75,6 +75,13 @@ plan lives in `docs/plans/bjorn-rust.md`.
   on. Attachments are `data:` URIs by then, so nothing that was going to print
   is lost, and the note's own words (a `url(` in a sentence, `<img>` in a code
   block) are text to the parser and come through untouched.
+- Work notes: `D` opens today's daily note (title, dated tag and template
+  from `[daily]`, found or made with `create --if-not-exists`), `N` makes a
+  note from a template in `~/.config/bjorn/templates/` with `{{date}}`-style
+  placeholders, and `bjorn capture` / `bjorn today` reach the daily note from
+  the shell. Example templates ship in `config/templates/`. Daily notes are
+  opt-in (the maintainer's call in the #10 review): off until the config has
+  a `[daily]` table, since Bear itself has none; templates are always on.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog
