@@ -1326,17 +1326,52 @@ mod tests {
             .then(|| text.split_whitespace().next().map(str::to_string))?
     }
 
+    fn have_shasum() -> bool {
+        std::process::Command::new("shasum")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
+    /// Bear's theme files that match the manifest, and whether every file the
+    /// manifest lists did (nothing added, changed or gone).
+    struct Verified {
+        files: Vec<(String, PathBuf)>,
+        complete: bool,
+    }
+
     /// Bear's theme files in the installed Bear.app whose SHA-256 is the one
     /// the manifest records, by slug. Anything else is noted, never failed:
     /// a changed hash means Bear updated its themes, which is a reason to
     /// rerun `tools/bear_theme.py`, not a broken build. `None` without Bear.
-    fn verified_bear_files() -> Option<Vec<(String, PathBuf)>> {
+    fn verified_bear_files() -> Option<Verified> {
         let dir = Path::new(BEAR);
         if !dir.is_dir() {
             return None;
         }
-        let mut manifest = manifest();
-        let mut verified = Vec::new();
+        if !have_shasum() {
+            eprintln!(
+                "note: no `shasum` on PATH, so Bear's theme files cannot be verified; none compared."
+            );
+            return Some(Verified {
+                files: Vec::new(),
+                complete: false,
+            });
+        }
+        Some(verify(dir, manifest(), sha256))
+    }
+
+    /// The `.theme` files in `dir` whose hash (by `hash`) is the one
+    /// `manifest` records for their slug; the rest are noted on stderr.
+    fn verify(
+        dir: &Path,
+        mut manifest: HashMap<String, (String, String)>,
+        hash: impl Fn(&Path) -> Option<String>,
+    ) -> Verified {
+        let mut verified = Verified {
+            files: Vec::new(),
+            complete: true,
+        };
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()
@@ -1346,23 +1381,30 @@ mod tests {
         paths.sort();
         for path in paths {
             let name = slug(&path.file_stem().unwrap().to_string_lossy());
-            match (manifest.remove(&name), sha256(&path)) {
-                (Some((_, want)), Some(got)) if want == got => verified.push((name, path)),
-                (Some((file, _)), _) => eprintln!(
-                    "note: Bear's {file} is not the file palettes.rs was generated from \
-                     (its SHA-256 differs); not compared. Rerun tools/bear_theme.py."
-                ),
-                (None, _) => eprintln!(
-                    "note: Bear ships {}, which bear-themes.sha256 does not list; \
-                     not compared. Rerun tools/bear_theme.py.",
-                    path.display()
-                ),
+            match (manifest.remove(&name), hash(&path)) {
+                (Some((_, want)), Some(got)) if want == got => verified.files.push((name, path)),
+                (Some((file, _)), _) => {
+                    verified.complete = false;
+                    eprintln!(
+                        "note: Bear's {file} is not the file palettes.rs was generated from \
+                         (its SHA-256 differs); not compared. Rerun tools/bear_theme.py."
+                    )
+                }
+                (None, _) => {
+                    verified.complete = false;
+                    eprintln!(
+                        "note: Bear ships {}, which bear-themes.sha256 does not list; \
+                         not compared. Rerun tools/bear_theme.py.",
+                        path.display()
+                    )
+                }
             }
         }
         for (file, _) in manifest.values() {
+            verified.complete = false;
             eprintln!("note: Bear no longer ships {file}.");
         }
-        Some(verified)
+        verified
     }
 
     /// Bear's own theme files, read from Bear.app where it is installed,
@@ -1375,7 +1417,7 @@ mod tests {
             return;
         };
         let loaded = load_dir(Path::new(BEAR), &[]);
-        for (name, path) in &verified {
+        for (name, path) in &verified.files {
             assert!(
                 !loaded.skipped.iter().any(|s| &s.path == path),
                 "{name}: {:?}",
@@ -1413,9 +1455,19 @@ mod tests {
         let Some(verified) = verified_bear_files() else {
             return;
         };
+        compare_copied_children(&verified);
+    }
+
+    /// The check behind `a_copied_bear_theme_loads_over_its_built_in_base`,
+    /// over whichever of Bear's files were verified; how many were compared.
+    /// None compared is a note when Bear's files have changed (the children
+    /// may be among those set aside) and a failure only when every file
+    /// matched the manifest, since Bear's themes as generated do have
+    /// children and a check that finds none has stopped looking.
+    fn compare_copied_children(verified: &Verified) -> usize {
         let mut children = 0;
-        for (name, path) in verified {
-            let text = std::fs::read_to_string(&path).unwrap();
+        for (name, path) in &verified.files {
+            let text = std::fs::read_to_string(path).unwrap();
             let doc: Value = serde_json::from_str(&text).unwrap();
             if doc.pointer("/meta/base theme").is_none() {
                 continue;
@@ -1425,7 +1477,7 @@ mod tests {
             let loaded = load_dir(dir.path(), THEMES);
             assert!(loaded.skipped.is_empty(), "{name}: {:?}", loaded.skipped);
 
-            let built_in = find(THEMES, &name);
+            let built_in = find(THEMES, name);
             let mut theme = *find(&loaded.themes, &format!("my-{name}"));
             theme.name = built_in.name;
             if !NAMED_SEMANTICS.contains(&name.as_str()) {
@@ -1441,6 +1493,45 @@ mod tests {
             assert_eq!(theme, *built_in, "{name}");
             children += 1;
         }
-        assert!(children > 0, "no Bear theme with a base theme was compared");
+        if children == 0 {
+            assert!(
+                !verified.complete,
+                "no Bear theme with a base theme was compared"
+            );
+            eprintln!(
+                "note: none of Bear's verified theme files has a base theme; \
+                 copied themes not compared."
+            );
+        }
+        children
+    }
+
+    /// After a Bear update no file may match the manifest; the copied-theme
+    /// check then notes it and passes rather than failing the build.
+    #[test]
+    fn nothing_verified_after_a_bear_update_is_a_note_not_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "Nord.theme", PLAIN);
+        write(dir.path(), "Brand New.theme", PLAIN);
+        let verified = verify(dir.path(), manifest(), |_| Some("changed".into()));
+        assert!(verified.files.is_empty());
+        assert!(!verified.complete);
+        assert_eq!(compare_copied_children(&verified), 0);
+
+        // A missing `shasum` hashes nothing, with the same outcome.
+        let verified = verify(dir.path(), manifest(), |_| None);
+        assert!(verified.files.is_empty() && !verified.complete);
+        assert_eq!(compare_copied_children(&verified), 0);
+    }
+
+    /// With every file as the manifest has it, finding no child is the
+    /// check broken, not Bear changed.
+    #[test]
+    #[should_panic(expected = "no Bear theme with a base theme was compared")]
+    fn nothing_compared_with_every_file_verified_still_fails() {
+        compare_copied_children(&Verified {
+            files: Vec::new(),
+            complete: true,
+        });
     }
 }
