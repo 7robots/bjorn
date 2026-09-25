@@ -158,32 +158,118 @@ pub struct Loaded {
 /// folded away (`Rosé Pine` is `rose-pine`, `D.Boring` is `d-boring`). macOS
 /// stores file names decomposed (`e` + U+0301) while a typed `é` is one
 /// character, so folding both to `e` is what lets the two meet.
+///
+/// This is `slug` in `tools/bear_theme.py`, which names the built-in themes:
+/// NFKD, then whatever is not ASCII dropped. Rust's standard library has no
+/// normalization, so `NFKD_ASCII` carries the part of that mapping a theme
+/// name can plausibly hold, and `LETTERS` the letters NFKD leaves whole
+/// (`ø`, `ł`, `ß`), which both sides fold by hand rather than drop.
 pub fn slug(name: &str) -> String {
-    let folded: String = name
-        .to_lowercase()
-        .chars()
-        .filter(|c| !('\u{300}'..='\u{36F}').contains(c))
-        .filter_map(|c| {
-            let c = match c {
-                'à'..='å' => 'a',
-                'ç' => 'c',
-                'è'..='ë' => 'e',
-                'ì'..='ï' => 'i',
-                'ñ' => 'n',
-                'ò'..='ö' | 'ø' => 'o',
-                'ù'..='ü' => 'u',
-                'ý' | 'ÿ' => 'y',
-                c => c,
-            };
-            match c {
-                c if c.is_ascii_alphanumeric() => Some(c),
-                c if c.is_ascii() => Some(' '),
-                _ => None,
-            }
-        })
-        .collect();
+    let mut folded = String::new();
+    for c in name.to_lowercase().chars() {
+        let ascii = match c {
+            c if c.is_ascii() => Some(c.to_string()),
+            // Fullwidth ASCII (`Ｎｏｒｄ`) is ASCII shifted up by 0xFEE0.
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).map(String::from),
+            '\u{3000}' => Some(" ".to_string()),
+            c => LETTERS
+                .iter()
+                .chain(NFKD_ASCII)
+                .find(|(from, _)| *from == c)
+                .map(|(_, to)| to.to_string()),
+        };
+        // Anything else, combining accents included, is dropped.
+        for c in ascii.iter().flat_map(|s| s.chars()) {
+            folded.push(if c.is_ascii_alphanumeric() { c } else { ' ' });
+        }
+    }
     folded.split_whitespace().collect::<Vec<_>>().join("-")
 }
+
+/// Letters NFKD does not decompose, so a plain NFKD fold would drop them:
+/// `Bjørn` would be `bjrn`. `LETTERS` in `tools/bear_theme.py` is the same list.
+const LETTERS: &[(char, &str)] = &[
+    ('ß', "ss"),
+    ('æ', "ae"),
+    ('œ', "oe"),
+    ('ø', "o"),
+    ('ð', "d"),
+    ('đ', "d"),
+    ('ħ', "h"),
+    ('ı', "i"),
+    ('ł', "l"),
+    ('ŧ', "t"),
+    ('þ', "th"),
+];
+
+/// Lowercase characters in Latin-1 Supplement, Latin Extended-A and -B,
+/// Latin Extended Additional, General Punctuation and the Latin ligatures,
+/// each with the ASCII its NFKD form keeps (Python's
+/// `unicodedata.normalize("NFKD", c).encode("ascii", "ignore")`, Unicode 15.1).
+/// Characters that keep nothing are left out, and so dropped.
+#[rustfmt::skip]
+const NFKD_ASCII: &[(char, &str)] = &[
+    ('\u{a0}', " "), ('\u{a8}', " "), ('\u{aa}', "a"), ('\u{af}', " "), ('\u{b2}', "2"),
+    ('\u{b3}', "3"), ('\u{b4}', " "), ('\u{b8}', " "), ('\u{b9}', "1"), ('\u{ba}', "o"),
+    ('\u{bc}', "14"), ('\u{bd}', "12"), ('\u{be}', "34"), ('\u{e0}', "a"), ('\u{e1}', "a"),
+    ('\u{e2}', "a"), ('\u{e3}', "a"), ('\u{e4}', "a"), ('\u{e5}', "a"), ('\u{e7}', "c"),
+    ('\u{e8}', "e"), ('\u{e9}', "e"), ('\u{ea}', "e"), ('\u{eb}', "e"), ('\u{ec}', "i"),
+    ('\u{ed}', "i"), ('\u{ee}', "i"), ('\u{ef}', "i"), ('\u{f1}', "n"), ('\u{f2}', "o"),
+    ('\u{f3}', "o"), ('\u{f4}', "o"), ('\u{f5}', "o"), ('\u{f6}', "o"), ('\u{f9}', "u"),
+    ('\u{fa}', "u"), ('\u{fb}', "u"), ('\u{fc}', "u"), ('\u{fd}', "y"), ('\u{ff}', "y"),
+    ('\u{101}', "a"), ('\u{103}', "a"), ('\u{105}', "a"), ('\u{107}', "c"), ('\u{109}', "c"),
+    ('\u{10b}', "c"), ('\u{10d}', "c"), ('\u{10f}', "d"), ('\u{113}', "e"), ('\u{115}', "e"),
+    ('\u{117}', "e"), ('\u{119}', "e"), ('\u{11b}', "e"), ('\u{11d}', "g"), ('\u{11f}', "g"),
+    ('\u{121}', "g"), ('\u{123}', "g"), ('\u{125}', "h"), ('\u{129}', "i"), ('\u{12b}', "i"),
+    ('\u{12d}', "i"), ('\u{12f}', "i"), ('\u{133}', "ij"), ('\u{135}', "j"), ('\u{137}', "k"),
+    ('\u{13a}', "l"), ('\u{13c}', "l"), ('\u{13e}', "l"), ('\u{140}', "l"), ('\u{144}', "n"),
+    ('\u{146}', "n"), ('\u{148}', "n"), ('\u{149}', "n"), ('\u{14d}', "o"), ('\u{14f}', "o"),
+    ('\u{151}', "o"), ('\u{155}', "r"), ('\u{157}', "r"), ('\u{159}', "r"), ('\u{15b}', "s"),
+    ('\u{15d}', "s"), ('\u{15f}', "s"), ('\u{161}', "s"), ('\u{163}', "t"), ('\u{165}', "t"),
+    ('\u{169}', "u"), ('\u{16b}', "u"), ('\u{16d}', "u"), ('\u{16f}', "u"), ('\u{171}', "u"),
+    ('\u{173}', "u"), ('\u{175}', "w"), ('\u{177}', "y"), ('\u{17a}', "z"), ('\u{17c}', "z"),
+    ('\u{17e}', "z"), ('\u{17f}', "s"), ('\u{1a1}', "o"), ('\u{1b0}', "u"), ('\u{1c6}', "dz"),
+    ('\u{1c9}', "lj"), ('\u{1cc}', "nj"), ('\u{1ce}', "a"), ('\u{1d0}', "i"), ('\u{1d2}', "o"),
+    ('\u{1d4}', "u"), ('\u{1d6}', "u"), ('\u{1d8}', "u"), ('\u{1da}', "u"), ('\u{1dc}', "u"),
+    ('\u{1df}', "a"), ('\u{1e1}', "a"), ('\u{1e7}', "g"), ('\u{1e9}', "k"), ('\u{1eb}', "o"),
+    ('\u{1ed}', "o"), ('\u{1f0}', "j"), ('\u{1f3}', "dz"), ('\u{1f5}', "g"), ('\u{1f9}', "n"),
+    ('\u{1fb}', "a"), ('\u{201}', "a"), ('\u{203}', "a"), ('\u{205}', "e"), ('\u{207}', "e"),
+    ('\u{209}', "i"), ('\u{20b}', "i"), ('\u{20d}', "o"), ('\u{20f}', "o"), ('\u{211}', "r"),
+    ('\u{213}', "r"), ('\u{215}', "u"), ('\u{217}', "u"), ('\u{219}', "s"), ('\u{21b}', "t"),
+    ('\u{21f}', "h"), ('\u{227}', "a"), ('\u{229}', "e"), ('\u{22b}', "o"), ('\u{22d}', "o"),
+    ('\u{22f}', "o"), ('\u{231}', "o"), ('\u{233}', "y"), ('\u{1e01}', "a"), ('\u{1e03}', "b"),
+    ('\u{1e05}', "b"), ('\u{1e07}', "b"), ('\u{1e09}', "c"), ('\u{1e0b}', "d"), ('\u{1e0d}', "d"),
+    ('\u{1e0f}', "d"), ('\u{1e11}', "d"), ('\u{1e13}', "d"), ('\u{1e15}', "e"), ('\u{1e17}', "e"),
+    ('\u{1e19}', "e"), ('\u{1e1b}', "e"), ('\u{1e1d}', "e"), ('\u{1e1f}', "f"), ('\u{1e21}', "g"),
+    ('\u{1e23}', "h"), ('\u{1e25}', "h"), ('\u{1e27}', "h"), ('\u{1e29}', "h"), ('\u{1e2b}', "h"),
+    ('\u{1e2d}', "i"), ('\u{1e2f}', "i"), ('\u{1e31}', "k"), ('\u{1e33}', "k"), ('\u{1e35}', "k"),
+    ('\u{1e37}', "l"), ('\u{1e39}', "l"), ('\u{1e3b}', "l"), ('\u{1e3d}', "l"), ('\u{1e3f}', "m"),
+    ('\u{1e41}', "m"), ('\u{1e43}', "m"), ('\u{1e45}', "n"), ('\u{1e47}', "n"), ('\u{1e49}', "n"),
+    ('\u{1e4b}', "n"), ('\u{1e4d}', "o"), ('\u{1e4f}', "o"), ('\u{1e51}', "o"), ('\u{1e53}', "o"),
+    ('\u{1e55}', "p"), ('\u{1e57}', "p"), ('\u{1e59}', "r"), ('\u{1e5b}', "r"), ('\u{1e5d}', "r"),
+    ('\u{1e5f}', "r"), ('\u{1e61}', "s"), ('\u{1e63}', "s"), ('\u{1e65}', "s"), ('\u{1e67}', "s"),
+    ('\u{1e69}', "s"), ('\u{1e6b}', "t"), ('\u{1e6d}', "t"), ('\u{1e6f}', "t"), ('\u{1e71}', "t"),
+    ('\u{1e73}', "u"), ('\u{1e75}', "u"), ('\u{1e77}', "u"), ('\u{1e79}', "u"), ('\u{1e7b}', "u"),
+    ('\u{1e7d}', "v"), ('\u{1e7f}', "v"), ('\u{1e81}', "w"), ('\u{1e83}', "w"), ('\u{1e85}', "w"),
+    ('\u{1e87}', "w"), ('\u{1e89}', "w"), ('\u{1e8b}', "x"), ('\u{1e8d}', "x"), ('\u{1e8f}', "y"),
+    ('\u{1e91}', "z"), ('\u{1e93}', "z"), ('\u{1e95}', "z"), ('\u{1e96}', "h"), ('\u{1e97}', "t"),
+    ('\u{1e98}', "w"), ('\u{1e99}', "y"), ('\u{1e9a}', "a"), ('\u{1e9b}', "s"), ('\u{1ea1}', "a"),
+    ('\u{1ea3}', "a"), ('\u{1ea5}', "a"), ('\u{1ea7}', "a"), ('\u{1ea9}', "a"), ('\u{1eab}', "a"),
+    ('\u{1ead}', "a"), ('\u{1eaf}', "a"), ('\u{1eb1}', "a"), ('\u{1eb3}', "a"), ('\u{1eb5}', "a"),
+    ('\u{1eb7}', "a"), ('\u{1eb9}', "e"), ('\u{1ebb}', "e"), ('\u{1ebd}', "e"), ('\u{1ebf}', "e"),
+    ('\u{1ec1}', "e"), ('\u{1ec3}', "e"), ('\u{1ec5}', "e"), ('\u{1ec7}', "e"), ('\u{1ec9}', "i"),
+    ('\u{1ecb}', "i"), ('\u{1ecd}', "o"), ('\u{1ecf}', "o"), ('\u{1ed1}', "o"), ('\u{1ed3}', "o"),
+    ('\u{1ed5}', "o"), ('\u{1ed7}', "o"), ('\u{1ed9}', "o"), ('\u{1edb}', "o"), ('\u{1edd}', "o"),
+    ('\u{1edf}', "o"), ('\u{1ee1}', "o"), ('\u{1ee3}', "o"), ('\u{1ee5}', "u"), ('\u{1ee7}', "u"),
+    ('\u{1ee9}', "u"), ('\u{1eeb}', "u"), ('\u{1eed}', "u"), ('\u{1eef}', "u"), ('\u{1ef1}', "u"),
+    ('\u{1ef3}', "y"), ('\u{1ef5}', "y"), ('\u{1ef7}', "y"), ('\u{1ef9}', "y"), ('\u{2000}', " "),
+    ('\u{2001}', " "), ('\u{2002}', " "), ('\u{2003}', " "), ('\u{2004}', " "), ('\u{2005}', " "),
+    ('\u{2006}', " "), ('\u{2007}', " "), ('\u{2008}', " "), ('\u{2009}', " "), ('\u{200a}', " "),
+    ('\u{2017}', " "), ('\u{2024}', "."), ('\u{2025}', ".."), ('\u{2026}', "..."), ('\u{202f}', " "),
+    ('\u{203c}', "!!"), ('\u{203e}', " "), ('\u{2047}', "??"), ('\u{2048}', "?!"), ('\u{2049}', "!?"),
+    ('\u{205f}', " "), ('\u{fb00}', "ff"), ('\u{fb01}', "fi"), ('\u{fb02}', "fl"), ('\u{fb03}', "ffi"),
+    ('\u{fb04}', "ffl"), ('\u{fb05}', "st"), ('\u{fb06}', "st"),
+];
 
 /// One `.theme` file, read but not yet merged with its base.
 struct File {
@@ -935,6 +1021,92 @@ mod tests {
         assert_eq!(slug("  Red   Graphite "), "red-graphite");
         assert_eq!(slug("D.Boring"), "d-boring");
         assert_eq!(slug("Shibuya Lo-fi"), "shibuya-lo-fi");
+    }
+
+    /// NFKD folds past Latin-1, as `tools/bear_theme.py` does; the letters
+    /// NFKD leaves whole fold by hand on both sides.
+    #[test]
+    fn names_fold_accents_beyond_latin_1() {
+        assert_eq!(slug("Šibenik"), "sibenik");
+        assert_eq!(slug("Erdős"), "erdos");
+        assert_eq!(slug("Łódź Nights"), "lodz-nights");
+        assert_eq!(slug("Bjørn"), "bjorn");
+        assert_eq!(slug("Straße"), "strasse");
+        assert_eq!(slug("Ærø"), "aero");
+        assert_eq!(slug("Việt Nam"), "viet-nam");
+        assert_eq!(slug("ﬁre"), "fire");
+        assert_eq!(slug("Ｎｏｒｄ"), "nord");
+        assert_eq!(slug("x²"), "x2");
+        // A no-break space and an ellipsis part words; a script NFKD cannot
+        // fold to ASCII is dropped, as the tool drops it.
+        assert_eq!(slug("Rosé\u{a0}Pine…Dawn"), "rose-pine-dawn");
+        assert_eq!(slug("Ночь"), "");
+    }
+
+    /// Every file the built-ins were generated from slugs to the name its
+    /// palette carries.
+    #[test]
+    fn every_bear_file_name_slugs_to_its_built_in_name() {
+        let mut want: Vec<&str> = THEMES
+            .iter()
+            .filter(|t| !HAND_TUNED.contains(&t.name))
+            .chain(BEAR_BASES)
+            .map(|t| t.name)
+            .collect();
+        want.sort();
+        let manifest = manifest();
+        let mut got: Vec<&str> = manifest.keys().map(String::as_str).collect();
+        got.sort();
+        assert_eq!(got.len(), 39);
+        assert_eq!(got, want);
+    }
+
+    /// `slug` agrees with `tools/bear_theme.py` over every character its
+    /// table covers, plus the hand-folded letters. Where `python3` is not
+    /// installed this checks nothing.
+    #[test]
+    fn slug_agrees_with_the_python_tool() {
+        let mut samples: Vec<String> = NFKD_ASCII
+            .iter()
+            .chain(LETTERS)
+            .map(|(c, _)| format!("a{c}b"))
+            .collect();
+        for c in NFKD_ASCII.iter().chain(LETTERS).map(|(c, _)| *c) {
+            samples.extend(c.to_uppercase().map(|u| format!("a{u}b")));
+        }
+        samples.extend(
+            ["Rosé Pine Dawn", "Ｎｏｒｄ　Ｌｉｇｈｔ", "Rose\u{301} Pine"].map(String::from),
+        );
+        let tool = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools");
+        let script = "import json, sys\n\
+                      sys.path.insert(0, sys.argv[1])\n\
+                      from bear_theme import slug\n\
+                      print(json.dumps([slug(s) for s in json.load(sys.stdin)]))";
+        let child = std::process::Command::new("python3")
+            // `-B`: importing the tool must not leave `__pycache__` in the repo.
+            .args(["-B", "-c", script])
+            .arg(&tool)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn();
+        let Ok(mut child) = child else {
+            eprintln!("note: no python3; slug not compared with the tool.");
+            return;
+        };
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(serde_json::to_string(&samples).unwrap().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "the tool's slug did not run");
+        let theirs: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+        for (sample, theirs) in samples.iter().zip(&theirs) {
+            assert_eq!(&slug(sample), theirs, "{sample:?}");
+        }
+        assert_eq!(samples.len(), theirs.len());
     }
 
     /// A theme file's keys and values reach the terminal through a

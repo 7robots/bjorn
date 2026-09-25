@@ -159,8 +159,15 @@ def derived_semantics(d: dict, dark: bool) -> tuple[str, str, str]:
     )
 
 
+# Letters NFKD does not decompose, so the ASCII fold below would drop them
+# (`Bjørn` would be `bjrn`). `LETTERS` in src/ui/bear_theme.rs is the same list.
+LETTERS = str.maketrans({"ß": "ss", "æ": "ae", "œ": "oe", "ø": "o", "ð": "d", "đ": "d",
+                         "ħ": "h", "ı": "i", "ł": "l", "ŧ": "t", "þ": "th"})
+
+
 def slug(bear_name: str) -> str:
-    ascii_ = unicodedata.normalize("NFKD", bear_name).encode("ascii", "ignore").decode()
+    folded = bear_name.lower().translate(LETTERS)
+    ascii_ = unicodedata.normalize("NFKD", folded).encode("ascii", "ignore").decode()
     return "-".join("".join(c if c.isalnum() else " " for c in ascii_).lower().split())
 
 
