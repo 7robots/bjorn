@@ -24,3 +24,4 @@ pub mod templates;
 pub mod todos;
 pub mod ui;
 pub mod util;
+pub mod wiki;

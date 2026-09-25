@@ -302,7 +302,7 @@ impl Triage {
                             .any(|o| o != *t && o.starts_with(&format!("{t}/")))
                     })
                     .take(2)
-                    .map(|t| display_tag(t))
+                    .map(|t| crate::util::strip_bidi(&display_tag(t)))
                     .collect();
                 out.push(TriageLine::Blank);
                 out.push(TriageLine::Header {

@@ -4,7 +4,7 @@
 
 # editor = "nvim"               # overrides $VISUAL / $EDITOR
 export_dir = "~/Downloads"      # where `x` proposes to write
-export_format = "md"            # preselected in the export picker: md | html | txt | rtf | textbundle
+export_format = "md"            # preselected in the export picker: md | html | txt | rtf | pdf | textbundle
 poll_seconds = 5                # 0 disables the background refresh
 # workspace = "work"            # start scoped to this tag
 # bearcli = "/usr/local/bin/bearcli"  # default searches PATH, then Bear.app
@@ -31,11 +31,14 @@ remctl = ""                     # path to remctl; default searches PATH
 # [[actions]]
 # name = "Copy as plain text"
 # command = "pbcopy"
-# format = "txt"                # md | html | txt | rtf | textbundle
+# format = "txt"                # md | html | txt | rtf | pdf | textbundle
 # confirm = false               # ask before running
 # timeout = 300                 # seconds; a captured command that overruns is killed
 # default = true                # what `!` runs
 # prompt = "Ask for what?"      # ask for a line of text first; the answer is $BJORN_ACTION_INPUT
+# interactive = false           # give the command the window and keyboard instead of capturing it
+# output = "toast"              # toast | append | new-note | replace: where stdout goes
+# section = "## Summary"        # with output = "append": the heading to add under
 
 # The daily note: `D` opens today's, `bjorn capture "text"` adds a line to it.
 # `title` and `tag` are strftime formats (%-d is the day without a leading 0).

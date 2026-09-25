@@ -392,7 +392,10 @@ async fn capture_starts_a_missing_section_then_grows_it() {
         .unwrap();
     // A section already there is grown in place, above whatever follows it.
     let id = id_of(&fake, TITLE).await;
-    client.append(&id, "\n## Later\nkeep me", "").await.unwrap();
+    client
+        .append(&id, "\n## Later\nkeep me", None)
+        .await
+        .unwrap();
     daily::capture(&client, &config, "two", &at())
         .await
         .unwrap();
@@ -452,7 +455,11 @@ async fn capture_refuses_blank_text_and_a_section_that_is_not_a_heading() {
     assert_eq!(count_titled(&fake, TITLE).await, 0);
     // The fake refuses a plain-text address the way bearcli does.
     let id = fake.client().create("N", &[], "text\n").await.unwrap();
-    let err = fake.client().append(&id, "x", "text").await.unwrap_err();
+    let err = fake
+        .client()
+        .append(&id, "x", Some("text"))
+        .await
+        .unwrap_err();
     assert!(err.message.contains("Section not found"), "{}", err.message);
 }
 

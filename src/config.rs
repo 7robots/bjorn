@@ -285,7 +285,8 @@ impl Config {
 }
 
 /// `[[actions]]`: a name and a shell command, plus the optional `format`,
-/// `confirm`, `timeout` and `default`. An entry without a name or a command is
+/// `confirm`, `prompt`, `interactive`, `timeout`, `default`, `output` and
+/// `section`. An entry without a name or a command is
 /// dropped rather than raised, so a half-written action never stops the app.
 fn parse_actions(value: Option<&Value>) -> Vec<Action> {
     let Some(Value::Array(entries)) = value else {
@@ -308,9 +309,24 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
         return None;
     }
     let name = text(entry.get("name"), "").trim().to_string();
-    let format = text(entry.get("format"), crate::export::DEFAULT_FORMAT)
-        .trim()
-        .to_lowercase();
+    // An unknown `format` is kept as written and stops the action from
+    // running, the way an unknown `output` does: falling back to Markdown would
+    // hand a command that expects HTML or a PDF's source the wrong file, and a
+    // form edit would then write "md" over the typo without a word.
+    let markdown = || crate::export::DEFAULT_FORMAT.to_string();
+    let (format, format_error) = match entry.get("format") {
+        None => (markdown(), None),
+        Some(Value::String(value)) => {
+            let id = value.trim().to_lowercase();
+            match crate::export::FORMATS.iter().find(|f| f.id == id) {
+                Some(known) => (known.id.to_string(), None),
+                // A blank one is no format at all, as a blank prompt is.
+                None if id.is_empty() => (markdown(), None),
+                None => (markdown(), Some(format!("{value:?}"))),
+            }
+        }
+        Some(other) => (markdown(), Some(other.to_string())),
+    };
     let timeout = match entry.get("timeout") {
         None => DEFAULT_TIMEOUT_SECONDS,
         Some(Value::Integer(i)) => (*i).max(1) as u64,
@@ -328,6 +344,26 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
         Some(Value::String(title)) if !title.trim().is_empty() => Some(title.trim().to_string()),
         _ => None,
     };
+    // An unknown `output` is kept as written and stops the action from running
+    // (`Action::misconfigured`): a typo must never send a command's output
+    // somewhere it was not meant to go, nor spend a paid call on nothing.
+    let (output, output_error) = match entry.get("output") {
+        None => (crate::actions::ActionOutput::Toast, None),
+        Some(Value::String(value)) => match crate::actions::ActionOutput::parse(value) {
+            Some(output) => (output, None),
+            None => (
+                crate::actions::ActionOutput::Toast,
+                Some(format!("{value:?}")),
+            ),
+        },
+        Some(other) => (crate::actions::ActionOutput::Toast, Some(other.to_string())),
+    };
+    let section = match entry.get("section") {
+        Some(Value::String(heading)) if !heading.trim().is_empty() => {
+            Some(heading.trim().to_string())
+        }
+        _ => None,
+    };
     Some(Action {
         name: if name.is_empty() {
             command.clone()
@@ -335,10 +371,14 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
             name
         },
         command,
-        // An unknown format falls back to Markdown, as `export_format` does.
-        format: crate::export::format_by_id(&format).id.to_string(),
+        format,
+        format_error,
         confirm: truthy(entry.get("confirm"), false),
         prompt,
+        interactive: truthy(entry.get("interactive"), false),
+        output,
+        section,
+        output_error,
         timeout: std::time::Duration::from_secs(timeout),
         default: truthy(entry.get("default"), false),
     })
@@ -505,6 +545,67 @@ mod tests {
                 .actions
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn output_and_section_are_read_and_a_typo_is_kept_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[[actions]]\nname = \"Sum\"\ncommand = \"llm\"\noutput = \"append\"\nsection = \" ## Summary \"\n\n\
+             [[actions]]\nname = \"Typo\"\ncommand = \"llm\"\noutput = \"apend\"\nsection = \"\"\n\n\
+             [[actions]]\nname = \"Odd\"\ncommand = \"llm\"\noutput = 3\n\n\
+             [[actions]]\nname = \"Plain\"\ncommand = \"llm\"\n",
+        );
+        let actions = Config::load(Some(&path)).unwrap().actions;
+        use crate::actions::ActionOutput;
+        assert_eq!(actions[0].output, ActionOutput::Append);
+        assert_eq!(actions[0].section.as_deref(), Some("## Summary"));
+        assert_eq!(actions[0].output_error, None);
+        assert_eq!(actions[1].output, ActionOutput::Toast, "an unknown output");
+        assert_eq!(actions[1].output_error.as_deref(), Some("\"apend\""));
+        assert!(
+            actions[1]
+                .misconfigured()
+                .unwrap()
+                .contains("toast, append, new-note, replace"),
+            "the error lists what is valid"
+        );
+        assert_eq!(actions[1].section, None, "a blank section is none");
+        assert_eq!(
+            actions[2].output_error.as_deref(),
+            Some("3"),
+            "a non-string output"
+        );
+        assert_eq!(actions[3].output, ActionOutput::Toast);
+        assert_eq!(actions[3].output_error, None);
+    }
+
+    #[test]
+    fn an_unknown_format_is_kept_as_an_error_not_turned_into_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[[actions]]\nname = \"Print\"\ncommand = \"weasyprint\"\nformat = \"pfd\"\n\n\
+             [[actions]]\nname = \"Loud\"\ncommand = \"cat\"\nformat = \" HTML \"\n\n\
+             [[actions]]\nname = \"Blank\"\ncommand = \"cat\"\nformat = \"\"\n\n\
+             [[actions]]\nname = \"Odd\"\ncommand = \"cat\"\nformat = 3\n",
+        );
+        let actions = Config::load(Some(&path)).unwrap().actions;
+        assert_eq!(actions[0].format_error.as_deref(), Some("\"pfd\""));
+        assert!(
+            actions[0]
+                .misconfigured()
+                .unwrap()
+                .contains("format = \"pfd\" is not one of md, html"),
+            "{:?}",
+            actions[0].misconfigured()
+        );
+        assert_eq!(actions[1].format, "html", "case and spaces do not matter");
+        assert_eq!(actions[1].format_error, None);
+        assert_eq!(actions[2].format, "md", "a blank format is the default");
+        assert_eq!(actions[2].format_error, None);
+        assert_eq!(actions[3].format_error.as_deref(), Some("3"));
     }
 
     #[test]

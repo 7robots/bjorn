@@ -88,7 +88,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("b", "open the note in Bear.app"),
             (
                 "x",
-                "export as Markdown, HTML, plain text, RTF or TextBundle; ← → pick, export_format in the config sets the default",
+                "export as Markdown, HTML, plain text, RTF, TextBundle or PDF; ← → pick, export_format in the config sets the default",
             ),
         ],
     ),
@@ -107,6 +107,24 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "",
                 "in the menu: enter runs · + New action adds one · ctrl+e edits · ctrl+d deletes (asks first) · esc closes",
             ),
+        ],
+    ),
+    (
+        "Links",
+        &[
+            (
+                "L",
+                "the note's [[wiki links]] and the notes linking to it, under a search box; enter follows. A missing note is offered for creation. Backlinks read at most 200 candidates per search (Notes and Archive), and say so when the list may be incomplete",
+            ),
+            (
+                "click",
+                "a link in the reader (or a table) follows it; [[Title/Heading]] lands on the heading",
+            ),
+            (
+                "backspace",
+                "back to the note you followed a link from, list and scroll included (also ctrl+o, alt+←, alt+b); edits the query while the search box is open",
+            ),
+            ("alt+→", "forward again (also alt+f)"),
         ],
     ),
     (

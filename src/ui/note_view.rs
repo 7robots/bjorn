@@ -6,7 +6,8 @@ use regex::Regex;
 
 use crate::bear::Note;
 use crate::ui::highlight::highlight_line;
-use crate::ui::markdown::{Heading, RLine, render_with_headings, wrap};
+use crate::ui::markdown::{Heading, Placed, RLine, render_with_headings, wrap_mapped};
+use crate::wiki::WikiLink;
 
 /// Glyph per column count: a hollow block for each hidden column.
 pub fn column_glyph(count: u8) -> &'static str {
@@ -15,6 +16,16 @@ pub fn column_glyph(count: u8) -> &'static str {
         2 => "▯▮▮",
         _ => "▮▮▮",
     }
+}
+
+/// One screen row of the wrapped note: what it draws, the block and line it
+/// came from, and where that line's spans landed on it.
+#[derive(Debug, Clone)]
+struct Row {
+    line: Line<'static>,
+    block: usize,
+    source: usize,
+    placed: Vec<Placed>,
 }
 
 /// The headings the outline lists for `query`: their indices into
@@ -35,7 +46,7 @@ pub struct Reader {
     pub note: Option<Note>,
     pub full_text: Option<String>,
     lines: Vec<RLine>,
-    wrapped: Vec<(Line<'static>, usize)>,
+    wrapped: Vec<Row>,
     wrapped_width: usize,
     pub scroll: usize,
     pub header: String,
@@ -159,7 +170,7 @@ impl Reader {
         self.match_index = (self.match_index + delta).rem_euclid(n);
         let block = self.matches[self.match_index as usize];
         self.ensure_wrapped(width);
-        if let Some(row) = self.wrapped.iter().position(|(_, b)| *b == block) {
+        if let Some(row) = self.wrapped.iter().position(|r| r.block == block) {
             self.scroll = row;
         }
         self.set_header();
@@ -171,8 +182,8 @@ impl Reader {
         let block = self.headings.get(index)?.block;
         self.ensure_wrapped(width);
         // Block ids only grow down the note, so the rows are sorted by block.
-        let row = self.wrapped.partition_point(|(_, b)| *b < block);
-        (self.wrapped.get(row).map(|(_, b)| *b) == Some(block)).then_some(row)
+        let row = self.wrapped.partition_point(|r| r.block < block);
+        (self.wrapped.get(row).map(|r| r.block) == Some(block)).then_some(row)
     }
 
     /// The section the viewport is in: the heading last jumped to while it
@@ -312,8 +323,61 @@ impl Reader {
         self.wrapped = self
             .lines
             .iter()
-            .flat_map(|l| wrap(l, width).into_iter().map(move |row| (row, l.block)))
+            .enumerate()
+            .flat_map(|(source, l)| {
+                wrap_mapped(l, width)
+                    .into_iter()
+                    .map(move |(line, placed)| Row {
+                        line,
+                        block: l.block,
+                        source,
+                        placed,
+                    })
+            })
             .collect();
+    }
+
+    /// The wiki link drawn at `col`, `row` of the viewport, if any.
+    pub fn link_at(&mut self, col: usize, row: usize, width: usize) -> Option<WikiLink> {
+        if self.message.is_some() {
+            return None;
+        }
+        self.ensure_wrapped(width);
+        let drawn = self.wrapped.get(self.scroll + row)?;
+        let span = drawn
+            .placed
+            .iter()
+            .find(|p| p.start <= col && col < p.end)?
+            .span;
+        self.lines[drawn.source]
+            .links
+            .iter()
+            .find(|(index, _)| *index == span)
+            .map(|(_, link)| link.clone())
+    }
+
+    /// Scroll to the first heading called `section`, ignoring case, as
+    /// `scroll_to_heading` does. It looks the name up in `headings`, so a
+    /// heading inside a quote matches on its text, without the quote bars.
+    /// False when the note has no such heading.
+    pub fn scroll_to_section(&mut self, section: &str, width: usize, height: usize) -> bool {
+        let wanted = section.trim().to_lowercase();
+        match self
+            .headings
+            .iter()
+            .position(|h| h.text.to_lowercase() == wanted)
+        {
+            Some(index) => self.scroll_to_heading(index, width, height),
+            None => false,
+        }
+    }
+
+    /// The note's wiki links in order, as drawn (none from inside code).
+    pub fn wiki_links(&self) -> Vec<WikiLink> {
+        self.full_text
+            .as_deref()
+            .map(crate::ui::markdown::wiki_links)
+            .unwrap_or_default()
     }
 
     pub fn row_count(&mut self, width: usize) -> usize {
@@ -350,9 +414,9 @@ impl Reader {
             .iter()
             .skip(self.scroll)
             .take(height)
-            .map(|(line, _)| match &pattern {
-                Some(p) => highlight_line(line.clone(), p),
-                None => line.clone(),
+            .map(|row| match &pattern {
+                Some(p) => highlight_line(row.line.clone(), p),
+                None => row.line.clone(),
             })
             .collect()
     }

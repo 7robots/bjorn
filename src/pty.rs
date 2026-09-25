@@ -50,6 +50,8 @@ impl PtySession {
         command: &[String],
         rows: u16,
         cols: u16,
+        env: &[(String, String)],
+        cwd: Option<&std::path::Path>,
         sink: impl Sink,
     ) -> std::io::Result<PtySession> {
         let (program, args) = command
@@ -70,6 +72,12 @@ impl PtySession {
         cmd.env("TERM", TERM);
         cmd.env_remove("COLUMNS");
         cmd.env_remove("LINES");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        if let Some(cwd) = cwd {
+            cmd.cwd(cwd);
+        }
         let mut child = pair
             .slave
             .spawn_command(cmd)
@@ -607,7 +615,7 @@ mod tests {
             "-c".to_string(),
             "printf 'hello pty'; read -r line; printf '\\n[%s]' \"$line\"".to_string(),
         ];
-        let mut session = PtySession::spawn(&command, 5, 20, sink).expect("spawn");
+        let mut session = PtySession::spawn(&command, 5, 20, &[], None, sink).expect("spawn");
         assert_eq!(session.size(), (5, 20));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !session.contents().contains("hello pty") {

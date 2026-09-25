@@ -389,16 +389,16 @@ pub async fn capture(
     let id = ensure(client, &daily).await.map_err(|e| e.message)?;
     let line = capture_line(config, &text, now);
     if section.is_empty() {
-        return client.append(&id, &line, "").await.map_err(|e| e.message);
+        return client.append(&id, &line, None).await.map_err(|e| e.message);
     }
     // bearcli refuses a section that is not there, so look first (ignoring
     // case) and start the section at the end of the note when it is missing.
     let note = client.cat(&id).await.map_err(|e| e.message)?;
     match find_section(&note.content, section) {
-        Some(heading) => client.append(&id, &line, &heading).await,
+        Some(heading) => client.append(&id, &line, Some(&heading)).await,
         None => {
             client
-                .append(&id, &format!("\n{section}\n{line}"), "")
+                .append(&id, &format!("\n{section}\n{line}"), None)
                 .await
         }
     }

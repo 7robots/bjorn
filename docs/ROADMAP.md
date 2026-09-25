@@ -14,8 +14,13 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Deferred (carried from bjorn's ROADMAP, still open here)
 
-- PDF export (headless-browser concern recorded in bjorn's ROADMAP).
 - EPUB export.
+- Math in the HTML export. Bear renders `$x$` and `$$…$$`; Bjorn prints them as
+  the note wrote them, because typesetting them needs an engine (KaTeX, MathML
+  with a font) that the binary does not carry and would not be able to fetch.
+  Ruled fine as it stands 2026-09-19, with the note that the text is at least
+  never lost. Bear's callout icons are the other thing an exported note does
+  not draw — the panel's color and bar carry the type instead.
 - Search-box completion inside a multi-word tag; completion candidate cycling.
 - Notes list snippet line (first body line, as Bear shows).
 - Permanent delete from Trash (no bearcli command yet).
@@ -26,6 +31,50 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
+- An action's output can go back into Bear (`output` in its config entry):
+  `append` adds it to the note or under a `section` heading, `new-note` makes a
+  note of it, tagged the way `n` tags one, and `replace` writes it over the
+  note after asking, hash-guarded like the editor, keeping the old text in a
+  temp file. Empty output, a failed command, anything over 1 MB or not UTF-8,
+  and a note trashed meanwhile never write; output that is not written is
+  kept in a private temp file. An action whose entry cannot work (an unknown
+  `output`, `replace` on a non-Markdown format) does not run at all.
+- An action can take the window and the keyboard (`interactive = true`), running
+  in a pty like the editor does, for commands that ask their own questions
+  rather than printing one line and leaving.
+- Wiki links: `[[Title]]`, `[[Title/Heading]]` and `[[Title|shown text]]` are
+  drawn as links and followed by a click or from the `L` list, which also
+  shows the notes linking in (a `bearcli search` for `[[Title` in Notes and
+  the Archive, at most 200 candidates per search, each hit's body checked, so
+  prefixes and mentions in code are dropped). A missing title offers to create the note; `backspace` / `alt+→`
+  walk back and forward.
+- Hugo publishing, as an action rather than a key: `contrib/hugo-publish`
+  (Python 3, standard library only) writes the note an action hands over as a
+  post, a draft unless the entry says `--live`. It started as `P` inside the
+  binary (PR #11) and moved out on 2026-09-25, the user's call: publishing is
+  an integration like AI, which already goes through actions, so Bjorn keeps
+  no Hugo knowledge, no `[hugo]` config and no YAML dependency. The guards
+  the built-in had, and the review's fixes (never replacing a hand-written
+  post or an existing image, front matter written key by key and quoted, no
+  YAML aliases, wiki and local links reduced to text, shortcodes and raw
+  HTML refused), live in the script and `tests/hugo_action.rs`. See
+  `docs/actions.md`.
+- PDF export, as the sixth format in the picker. The headless-browser concern
+  recorded in bjorn's ROADMAP is why nothing draws a page inside the binary:
+  the HTML rendering is handed to a converter the user already has, WeasyPrint
+  or a Chromium browser (Chrome, Chromium, Brave, Edge, Vivaldi), the way RTF
+  is handed to `textutil`. macOS ships neither (its own `cupsfilter` refuses
+  HTML), so a machine without one gets a plain error naming both rather than a
+  format that fails blankly. A browser is given a
+  throwaway profile and no network, and the note's body handed to either
+  converter is parsed and rebuilt from an allowlist (`ammonia`): no scripts,
+  styles, frames or SVG, and an image only when it is already a `data:` URI.
+  A note's inline HTML would otherwise reach the converter as written, and a
+  remote image in one is a note telling somebody it was printed, while a local
+  one bakes a file off the disk into a PDF that is usually about to be sent
+  on. Attachments are `data:` URIs by then, so nothing that was going to print
+  is lost, and the note's own words (a `url(` in a sentence, `<img>` in a code
+  block) are text to the parser and come through untouched.
 - Work notes: `D` opens today's daily note (title, dated tag and template
   from `[daily]`, found or made with `create --if-not-exists`), `N` makes a
   note from a template in `~/.config/bjorn/templates/` with `{{date}}`-style
