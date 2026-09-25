@@ -93,12 +93,12 @@ pub fn extension_for(fmt: Format, has_attachments: bool) -> &'static str {
     }
 }
 
-/// A filename from a note title: path separators and control characters
-/// become spaces, whitespace collapses, leading dots go.
 /// The most bytes `safe_filename` gives a name, leaving room for an extension
 /// and a `(2)` under APFS's 255.
 const NAME_BYTES: usize = 200;
 
+/// A filename from a note title: path separators and control characters
+/// become spaces, whitespace collapses, leading dots go.
 pub fn safe_filename(title: &str) -> String {
     let name = UNSAFE_RE.replace_all(title, " ");
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
