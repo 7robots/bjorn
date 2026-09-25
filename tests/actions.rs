@@ -328,7 +328,9 @@ async fn actions_come_from_the_config_file() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| receipt.exists()).await;
+    // `cp` creates the copy before it has written it; the toast marks the end.
+    h.until(|app| app.toast_messages().iter().any(|m| m == "Done."))
+        .await;
     let text = std::fs::read_to_string(&receipt).unwrap();
     assert!(text.starts_with("Sprint Planning\n"), "{text}");
     assert!(!text.contains("- [ ]"), "txt renders the checkbox: {text}");
@@ -640,7 +642,9 @@ async fn ctrl_d_deletes_an_action_after_asking() {
 }
 
 /// An action that records `$BJORN_ACTION_INPUT`, and nothing else, so an empty
-/// answer is visible as an empty file rather than a missing one.
+/// answer is visible as an empty file rather than a missing one. It says
+/// `sent` once the file is written, and the tests wait for that toast: the
+/// redirect creates the file before `printf` has filled it.
 fn recording_input(dir: &std::path::Path, name: &str) -> Action {
     let receipt = dir.join(format!("{name}.receipt"));
     Action {
@@ -673,7 +677,7 @@ async fn a_prompt_action_asks_for_a_line_and_passes_it_to_the_command() {
         h.press(key);
     }
     h.press("enter");
-    h.until(|_| fake.dir.path().join("Sync.receipt").exists())
+    h.until(|app| app.toast_messages().iter().any(|m| m == "sent"))
         .await;
     assert_eq!(receipt(&fake, "Sync"), "last-week");
 }
@@ -701,7 +705,7 @@ async fn an_empty_answer_still_runs_and_escape_cancels() {
     // Enter on an empty field is an answer: the command decides what it means.
     h.press("!");
     h.press("enter");
-    h.until(|_| fake.dir.path().join("Sync.receipt").exists())
+    h.until(|app| app.toast_messages().iter().any(|m| m == "sent"))
         .await;
     assert_eq!(receipt(&fake, "Sync"), "");
 }
@@ -727,7 +731,7 @@ async fn a_prompt_action_that_confirms_quotes_the_answer() {
     assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Confirm"));
     assert!(h.text().contains("Run “Sync” on “2w”?"), "{}", h.text());
     h.press("y");
-    h.until(|_| fake.dir.path().join("Sync.receipt").exists())
+    h.until(|app| app.toast_messages().iter().any(|m| m == "sent"))
         .await;
     assert_eq!(receipt(&fake, "Sync"), "2w");
 }
@@ -753,7 +757,8 @@ async fn an_action_without_a_prompt_still_gets_the_variable_set_and_empty() {
     let mut h = fake.harness_with(config, None);
     h.load().await;
     h.press("!");
-    h.until(|_| receipt.exists()).await;
+    h.until(|app| app.toast_messages().iter().any(|m| m == "sent"))
+        .await;
     assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "[]");
 }
 

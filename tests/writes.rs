@@ -58,7 +58,9 @@ async fn visual_beats_editor_and_config_beats_both() {
     ]));
     h.load().await;
     h.press("e");
-    h.until(|_| marker.exists()).await;
+    // The redirect creates the marker before `printf` writes into it.
+    h.until(|_| std::fs::read_to_string(&marker).is_ok_and(|s| !s.is_empty()))
+        .await;
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "visual");
     let configured = fake_editor(
         fake.dir.path(),
@@ -315,7 +317,9 @@ async fn b_opens_the_note_in_bear() {
     h.load().await;
     h.press("b");
     let log = fake.dir.path().join("bear.json.opened");
-    h.until(|_| log.exists()).await;
+    // The log exists before its line is written; wait for the whole line.
+    h.until(|_| std::fs::read_to_string(&log).is_ok_and(|s| s.ends_with('\n')))
+        .await;
     let last: serde_json::Value = serde_json::from_str(
         std::fs::read_to_string(&log)
             .unwrap()
