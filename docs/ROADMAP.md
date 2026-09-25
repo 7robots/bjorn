@@ -6,10 +6,9 @@ plan lives in `docs/plans/bjorn-rust.md`.
 ## Next
 
   or the two keep coexisting (gate passed 2026-09-11; numbers in the README).
-- `bjorn capture -- "text"` appending a line into today's section of a
-  configured note. Left out here because a `capture` subcommand is landing on
-  another branch, and the two must agree on one command rather than fight over
-  it; the append helper comes back with its first caller.
+- Appending a line into today's section of a configured note from the shell.
+  The daily-notes PR (#10) adds `bjorn capture`; once both are in, this becomes
+  an option of that command rather than a second one.
 - Search-box completion candidates could be shown as a popup list now that
   the box is drawn by hand; the Python version was limited to one ghost line.
 - A theme that follows the terminal's own palette, for people who dress their

@@ -221,7 +221,8 @@ impl Config {
 /// `[sections]`: the dated-section template, the day tag and the date heading
 /// (both strftime patterns), and where a new section goes. An empty or missing
 /// value keeps the built-in default, so a half-written block never stops the
-/// app — the same leniency the rest of the file gets.
+/// app — the same leniency the rest of the file gets. An `insert` it does not
+/// recognize keeps the default too, but is remembered so start-up can warn.
 fn parse_sections(section: &toml::Table) -> SectionsConfig {
     let defaults = SectionsConfig::default();
     let read = |key: &str, fallback: &str| {
@@ -231,6 +232,13 @@ fn parse_sections(section: &toml::Table) -> SectionsConfig {
             fallback.to_string()
         } else {
             trimmed.to_string()
+        }
+    };
+    let (insert, unknown_insert) = {
+        let raw = read("insert", defaults.insert.as_str());
+        match InsertPosition::parse(&raw) {
+            Some(position) => (position, None),
+            None => (defaults.insert, Some(raw)),
         }
     };
     SectionsConfig {
@@ -246,7 +254,8 @@ fn parse_sections(section: &toml::Table) -> SectionsConfig {
         },
         day_tag: read("day_tag", &defaults.day_tag),
         heading_format: read("heading_format", &defaults.heading_format),
-        insert: InsertPosition::parse(&read("insert", defaults.insert.as_str())),
+        insert,
+        unknown_insert,
     }
 }
 
@@ -450,6 +459,21 @@ mod tests {
         assert_eq!(cfg.day_tag, "journal/%Y-%m-%d");
         assert_eq!(cfg.heading_format, "%Y-%m-%d");
         assert_eq!(cfg.insert, InsertPosition::Top);
+        assert_eq!(cfg.unknown_insert, None);
+        assert_eq!(
+            cfg.problem(chrono::NaiveDate::from_ymd_opt(2026, 9, 19).unwrap()),
+            None
+        );
+
+        // A misspelled position keeps the default and is named at start-up.
+        let path = write(&dir, "[sections]\ninsert = \"Botom\"\n");
+        let cfg = Config::load(Some(&path)).unwrap().sections;
+        assert_eq!(cfg.insert, InsertPosition::BeforeFirstDatedSection);
+        assert_eq!(cfg.unknown_insert.as_deref(), Some("Botom"));
+        let problem = cfg
+            .problem(chrono::NaiveDate::from_ymd_opt(2026, 9, 19).unwrap())
+            .unwrap();
+        assert!(problem.contains("insert = \"Botom\""), "{problem}");
 
         // An empty value is no value: the default stands.
         let path = write(&dir, "[sections]\ntemplate = \"\"\nday_tag = \"\"\n");

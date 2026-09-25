@@ -366,9 +366,10 @@ async fn b_opens_bear_at_the_section() {
     open_day(&mut h).await;
     h.press("b");
     let opened = fake.state().with_extension("json.opened");
-    h.until(move |_| opened.exists()).await;
-    let logged =
-        std::fs::read_to_string(fake.state().with_extension("json.opened")).unwrap_or_default();
+    // The log exists before its line is written; wait for the whole line.
+    h.until(|_| std::fs::read_to_string(&opened).is_ok_and(|s| s.ends_with('\n')))
+        .await;
+    let logged = std::fs::read_to_string(&opened).unwrap();
     let heading = SectionsConfig::default().heading_text(fake.today);
     assert!(logged.contains("NOTE-FIELD"), "{logged}");
     assert!(logged.contains(&heading), "{logged}");
@@ -929,9 +930,10 @@ async fn b_quotes_a_section_headed_like_a_flag() {
     }
     h.press("b");
     let opened = fake.state().with_extension("json.opened");
-    h.until(move |_| opened.exists()).await;
-    let logged =
-        std::fs::read_to_string(fake.state().with_extension("json.opened")).unwrap_or_default();
+    // The log exists before its line is written; wait for the whole line.
+    h.until(|_| std::fs::read_to_string(&opened).is_ok_and(|s| s.ends_with('\n')))
+        .await;
+    let logged = std::fs::read_to_string(&opened).unwrap();
     assert!(
         logged.contains("\"header\":\"--version\""),
         "the heading arrived as a value: {logged}"
@@ -941,6 +943,32 @@ async fn b_quotes_a_section_headed_like_a_flag() {
         "{:?}",
         h.app.toast_messages()
     );
+}
+
+/// A misspelled `insert` still writes (at the default place), but start-up
+/// names the value instead of leaving the user to wonder where sections went.
+#[tokio::test]
+async fn an_insert_value_that_is_not_a_position_says_so_at_start_up() {
+    let fake = Fake::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[sections]\ninsert = \"end\"\n").unwrap();
+    let loaded = Config::load(Some(&path)).unwrap();
+    assert_eq!(
+        loaded.sections.insert,
+        InsertPosition::BeforeFirstDatedSection
+    );
+    let config = Config {
+        sections: loaded.sections,
+        ..fake.config()
+    };
+    let mut h = fake.harness_with(config, None);
+    h.until(|app| {
+        app.toast_messages()
+            .iter()
+            .any(|m| m.contains("insert = \"end\"") && m.contains("before-first-dated-section"))
+    })
+    .await;
 }
 
 #[tokio::test]

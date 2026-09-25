@@ -163,8 +163,8 @@ The template's placeholders are `{{date}}` (the `heading_format` date),
 `{{date:FMT}}` and `{{time:FMT}}` (any strftime pattern), `{{time}}` (`%H:%M`),
 `{{tag}}` (the day tag as Bear writes it, `#` and all) and `{{title}}` (the
 note's title). An unknown name is left as written, so a typo shows up in the
-note instead of vanishing. `config/templates/section.md` in this repo is the
-default, kept as a starting point to copy and edit.
+note instead of vanishing. `config/sections/section.md` in this repo is the
+default, kept as a starting point to copy into `template` and edit.
 
 ## Todo triage
 
@@ -206,7 +206,7 @@ school = "emoji:🎓"
 [sections]                    # dated sections: `s` writes one, `T` lists a day
 day_tag = "log/%Y/%m/%d"      # the day tag, as a strftime pattern; the time axis
 heading_format = "%B %-d, %Y (%A)"   # the date heading, as a strftime pattern
-insert = "before-first-dated-section"  # top | bottom | before-first-dated-section
+insert = "before-first-dated-section"  # top | bottom | before-first-dated-section; anything else warns at start-up
 # what `s` writes; the placeholders are listed under Dated sections
 template = """
 ## {{date}}

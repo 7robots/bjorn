@@ -40,8 +40,11 @@ pub const DEFAULT_DAY_TAG: &str = "log/%Y/%m/%d";
 /// The date heading, as a strftime pattern: `September 19, 2026 (Saturday)`.
 pub const DEFAULT_HEADING_FORMAT: &str = "%B %-d, %Y (%A)";
 /// The starting-point template, kept in the repo so it can be copied into a
-/// config file and edited. `include_str!` means the two can never drift.
-pub const DEFAULT_TEMPLATE: &str = include_str!("../config/templates/section.md");
+/// config file and edited. `include_str!` means the two can never drift. It
+/// stays out of `config/templates/`, where whole-note templates are kept to be
+/// copied into the templates directory: this is a fragment of a note, and a
+/// copy of that directory would offer it as a note of its own.
+pub const DEFAULT_TEMPLATE: &str = include_str!("../config/sections/section.md");
 /// How much of a section's body the day view shows.
 pub const SNIPPET_LIMIT: usize = 90;
 /// Shorter than this, a date heading is too common a string to search for.
@@ -68,13 +71,18 @@ pub enum InsertPosition {
 }
 
 impl InsertPosition {
-    /// `top`, `bottom`, `before-first-dated-section` (underscores accepted).
-    /// Anything else is the default, the way the rest of the config is lenient.
-    pub fn parse(text: &str) -> InsertPosition {
+    /// `top`, `bottom`, `before-first-dated-section`, in any case and with
+    /// underscores for hyphens; None for anything else. The caller keeps the
+    /// default for a None, the way the rest of the config is lenient, but
+    /// also remembers the value so `problem` can say it was not understood:
+    /// a typo here would otherwise put every section somewhere unexpected
+    /// with nothing to say why.
+    pub fn parse(text: &str) -> Option<InsertPosition> {
         match text.trim().to_lowercase().replace('_', "-").as_str() {
-            "top" => InsertPosition::Top,
-            "bottom" | "end" => InsertPosition::Bottom,
-            _ => InsertPosition::BeforeFirstDatedSection,
+            "top" => Some(InsertPosition::Top),
+            "bottom" => Some(InsertPosition::Bottom),
+            "before-first-dated-section" => Some(InsertPosition::BeforeFirstDatedSection),
+            _ => None,
         }
     }
 
@@ -94,6 +102,10 @@ pub struct SectionsConfig {
     pub day_tag: String,
     pub heading_format: String,
     pub insert: InsertPosition,
+    /// An `insert` value the config gave that `InsertPosition::parse` did not
+    /// recognize, kept only so `problem` can name it; `insert` holds the
+    /// default in its place.
+    pub unknown_insert: Option<String>,
 }
 
 impl Default for SectionsConfig {
@@ -103,6 +115,7 @@ impl Default for SectionsConfig {
             day_tag: DEFAULT_DAY_TAG.to_string(),
             heading_format: DEFAULT_HEADING_FORMAT.to_string(),
             insert: InsertPosition::default(),
+            unknown_insert: None,
         }
     }
 }
@@ -204,10 +217,11 @@ impl SectionsConfig {
 }
 
 impl SectionsConfig {
-    /// What is wrong with the patterns, in one sentence, or None when they
-    /// work. Checked once at start-up: a `day_tag` with no date in it (or a
-    /// heading format that renders nothing) leaves the day screen empty
-    /// forever with nothing to say why.
+    /// What is wrong with the block, in one sentence, or None when it works.
+    /// Checked once at start-up: a `day_tag` with no date in it (or a heading
+    /// format that renders nothing) leaves the day screen empty forever with
+    /// nothing to say why, and a misspelled `insert` quietly puts every new
+    /// section at the default place.
     pub fn problem(&self, today: NaiveDate) -> Option<String> {
         let tag = self.day_tag_for(today);
         if tag.is_empty() {
@@ -226,6 +240,12 @@ impl SectionsConfig {
             return Some(format!(
                 "[sections] heading_format = {:?} renders nothing; s would write a section with no heading.",
                 self.heading_format
+            ));
+        }
+        if let Some(value) = &self.unknown_insert {
+            return Some(format!(
+                "[sections] insert = {value:?} is not one of top, bottom or before-first-dated-section; s uses {}.",
+                self.insert.as_str()
             ));
         }
         None
@@ -1211,15 +1231,38 @@ mod tests {
 
     #[test]
     fn insert_position_parses_leniently() {
-        assert_eq!(InsertPosition::parse("Top"), InsertPosition::Top);
-        assert_eq!(InsertPosition::parse("bottom"), InsertPosition::Bottom);
+        assert_eq!(InsertPosition::parse("Top"), Some(InsertPosition::Top));
+        assert_eq!(
+            InsertPosition::parse(" bottom "),
+            Some(InsertPosition::Bottom)
+        );
         assert_eq!(
             InsertPosition::parse("before_first_dated_section"),
-            InsertPosition::BeforeFirstDatedSection
+            Some(InsertPosition::BeforeFirstDatedSection)
         );
-        assert_eq!(
-            InsertPosition::parse("nonsense"),
-            InsertPosition::BeforeFirstDatedSection
-        );
+        // Every position's own name reads back as itself.
+        for insert in [
+            InsertPosition::Top,
+            InsertPosition::Bottom,
+            InsertPosition::BeforeFirstDatedSection,
+        ] {
+            assert_eq!(InsertPosition::parse(insert.as_str()), Some(insert));
+        }
+        // No undocumented aliases: `end` is a typo like any other.
+        for typo in ["nonsense", "end", "botom", ""] {
+            assert_eq!(InsertPosition::parse(typo), None, "{typo:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_insert_value_is_reported_by_name() {
+        let today = date(2026, 9, 19);
+        let config = SectionsConfig {
+            unknown_insert: Some("botom".into()),
+            ..SectionsConfig::default()
+        };
+        let problem = config.problem(today).unwrap();
+        assert!(problem.contains("insert = \"botom\""), "{problem}");
+        assert!(problem.contains("before-first-dated-section"), "{problem}");
     }
 }
