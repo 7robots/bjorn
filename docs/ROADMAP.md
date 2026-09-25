@@ -26,13 +26,17 @@ plan lives in `docs/plans/bjorn-rust.md`.
 
 ## Closed since
 
-- Hugo publishing: `P` (and `g` in the `x` picker) writes the note as a post
-  into a Hugo site from `[hugo]` in the config: front matter from the title
-  and tags, dated at publish time, an allow-list of the note's own front
-  matter keys; front matter read with a YAML parser and written as text, a
-  republish updating the same file with its URL and hand-added keys kept,
-  images staged for upload or placed in a page bundle. No network: upload,
-  preview and commit are action recipes (`docs/actions.md`).
+- Hugo publishing, as an action rather than a key: `contrib/hugo-publish`
+  (Python 3, standard library only) writes the note an action hands over as a
+  post, a draft unless the entry says `--live`. It started as `P` inside the
+  binary (PR #11) and moved out on 2026-09-25, the user's call: publishing is
+  an integration like AI, which already goes through actions, so Bjorn keeps
+  no Hugo knowledge, no `[hugo]` config and no YAML dependency. The guards
+  the built-in had, and the review's fixes (never replacing a hand-written
+  post or an existing image, front matter written key by key and quoted, no
+  YAML aliases, wiki and local links reduced to text, shortcodes and raw
+  HTML refused), live in the script and `tests/hugo_action.rs`. See
+  `docs/actions.md`.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog

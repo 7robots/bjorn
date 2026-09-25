@@ -1,0 +1,1603 @@
+#!/usr/bin/env python3
+"""Write the Bear note a Bjorn action hands over as a post in a Hugo site.
+
+Run it from an `[[actions]]` entry (see docs/actions.md, "Publish to Hugo"):
+Bjorn renders the note, sets $BJORN_NOTE_FILE and the other BJORN_NOTE_*
+variables, and shows the first line this prints as a toast. It needs only
+Python 3 and its standard library; macOS has python3 once the Command Line
+Tools are installed (`xcode-select --install`).
+
+    hugo-publish --site ~/site [--section posts] [--draft | --live | --ask]
+                 [--tag-prefix blog/] [--bundle] [--allow-html]
+
+A post is a draft unless --live is given (or --ask and the action's prompt
+was answered `yes`). Nothing leaves the machine: the script writes files
+under <site>/content/<section> and stops there.
+
+What it guards, and why:
+
+- The post lands inside content/<section> and nowhere else. Every folder
+  under the site is opened without following symlinks, and a symlink
+  anywhere on the way is refused rather than followed.
+- A file it did not write for this note is never replaced. Every post it
+  writes carries `bjorn_note:` (a hash of the note's id, so no Bear id reaches
+  the site); an existing file without this note's mark is refused, as is an
+  image or other file already in a bundle.
+- Front matter is written by this script, key by key, from a fixed list,
+  every string JSON-quoted (a valid YAML double-quoted scalar), so nothing in
+  a note can add a key or break a line. The note's own front matter is read
+  by a small `key: value` reader, not a YAML library: no anchors, aliases,
+  tags or block scalars, at most 64 KB.
+- The note's private parts stay home: its tags (only tags under
+  --tag-prefix are published, prefix removed), wiki links (reduced to their
+  text), links to bear://, file://, other apps and local paths (reduced to
+  their text), and a note that mentions /Users/... is refused.
+- Hugo shortcodes and raw HTML would run on the site; a note carrying
+  either is refused unless --allow-html says it was meant.
+- Everything is worked out before anything is written; files are created
+  with O_EXCL|O_NOFOLLOW under a temporary name and moved into place, and a
+  failure part way removes what this run added.
+
+Exit status 0 means the post was written; anything else means nothing was,
+and the first line of stderr says why.
+"""
+
+import argparse
+import bisect
+import datetime
+import hashlib
+import json
+import os
+import re
+import secrets
+import stat
+import sys
+import unicodedata
+import urllib.parse
+
+MARK_KEY = "bjorn_note"
+FRONT_MATTER_LIMIT = 64 * 1024
+NOTE_LIMIT = 8 * 1024 * 1024
+POST_LIMIT = 4 * 1024 * 1024
+IMAGE_LIMIT = 50 * 1024 * 1024
+SLUG_LIMIT = 80
+# How far the search for this note's earlier post looks: deep enough for
+# year/month folders and bundles, bounded for a huge section.
+WALK_DEPTH = 8
+WALK_ENTRIES = 50_000
+IMAGE_EXTENSIONS = ("png", "jpg", "jpeg", "gif", "webp", "avif")
+# Link schemes a public post keeps. Everything else (bear:, file:, things:,
+# obsidian:, message:, x-devonthink-item: ...) opens something on this Mac.
+WEB_SCHEMES = ("http", "https", "mailto")
+# A link to /<one of these>/... is a path on this Mac, not a page of the site.
+LOCAL_ROOTS = (
+    "users",
+    "volumes",
+    "private",
+    "var",
+    "tmp",
+    "library",
+    "system",
+    "applications",
+    "home",
+    "opt",
+    "etc",
+    "usr",
+    "bin",
+    "sbin",
+    "dev",
+    "net",
+    "cores",
+    "root",
+    "mnt",
+    "srv",
+)
+# The note's own front matter keys that reach the post. `draft` is read only
+# to say it was ignored: the action decides that, per run.
+NOTE_KEYS = (
+    "title",
+    "slug",
+    "date",
+    "description",
+    "cover",
+    "tags",
+    "draft",
+    "summary",
+    "showtoc",
+)
+# `cover` is the one nested key, and only with these fields.
+COVER_KEYS = {
+    "image": "text",
+    "alt": "text",
+    "caption": "text",
+    "relative": "bool",
+    "hidden": "bool",
+}
+
+TAG_TOKEN = r"#[^\s#][^#\n]*?#(?=\s|$)|#[^\s#]+"
+TAG_LINE_RE = re.compile(r"^\s*(?:%s)(?:\s+(?:%s))*\s*$" % (TAG_TOKEN, TAG_TOKEN))
+HEADING_RE = re.compile(r"^#{1,6}\s+\S")
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)[ \t]*:(?:[ \t]+(.*))?$")
+# Any top-level key of a post's existing front matter, for keeping a post's
+# hand-added keys as written.
+POST_KEY_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*)[ \t]*:(?:[ \t]|$)")
+# `[text](target "title")` and `![alt](target)`. The text holds no brackets;
+# anything fancier is caught by the final check and refused.
+LINK_RE = re.compile(
+    r"(?<!\\)(!?)\[([^\[\]\n]*)\]\([ \t]*(<[^<>\n]*>|[^()\s<>]+)"
+    r"((?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*)\)"
+)
+DESTINATION_RE = re.compile(r"\]\([ \t]*<?([^()\s<>]+)")
+REFERENCE_RE = re.compile(r"^[ ]{0,3}\[([^\]\n]+)\]:[ \t]*<?([^\s<>]+)>?")
+BARE_URL_RE = re.compile(r"<?\b([A-Za-z][A-Za-z0-9+.-]*)://[^\s<>)\]\"']*>?")
+SHORTCODE_RE = re.compile(r"\{\{[<%]")
+# An HTML tag, comment, declaration or processing instruction. An autolink
+# (`<https://...>`, `<me@example.com>`) has `:` or `@` after its first word
+# and does not match.
+HTML_RE = re.compile(r"<(?:/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>])|!--|![A-Za-z\[]|\?)")
+MORE = "<!--more-->"
+LOCAL_PATH_RE = re.compile(r"/Users/[^/\s]")
+TOKEN_OPEN, TOKEN_CLOSE = "\ufdd0", "\ufdd1"
+TOKEN_RE = re.compile("\ufdd0([0-9]+)\ufdd1")
+DATE_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})"
+    r"(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?[ \t]*(Z|[+-]\d{2}:?\d{2})?)?$"
+)
+
+
+class Refusal(Exception):
+    """Why nothing was written; the first line is the toast."""
+
+
+# -- text helpers ------------------------------------------------------------
+
+
+def strip_control(text):
+    """Control and invisible format characters out; tabs and line breaks
+    become spaces."""
+    out = []
+    for ch in text:
+        if ch in "\t\n\r\x0b\x0c\x85\u2028\u2029":
+            out.append(" ")
+        elif unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp"):
+            continue
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def one_line(text):
+    return " ".join(strip_control(text).split())
+
+
+def yaml_string(text):
+    """A YAML double-quoted scalar. JSON's string syntax is a subset of it;
+    the few characters YAML reads as line breaks or cannot hold raw are
+    escaped as well, so the value is always exactly one line."""
+    out = []
+    for ch in json.dumps(text, ensure_ascii=False):
+        code = ord(ch)
+        if code > 0x7F and unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"):
+            out.append("\\U%08x" % code if code > 0xFFFF else "\\u%04x" % code)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def slugify(text):
+    """Lower-case ASCII letters and digits, every other run one hyphen.
+    Accents fold first (NFKD, so `é` is `e` and the Kelvin sign is `k`)."""
+    folded = unicodedata.normalize("NFKD", text)
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    slug = re.sub(r"[^a-z0-9]+", "-", folded.lower().encode("ascii", "ignore").decode())
+    slug = slug.strip("-")
+    if len(slug) > SLUG_LIMIT:
+        slug = slug[:SLUG_LIMIT].rsplit("-", 1)[0] or slug[:SLUG_LIMIT]
+    return slug
+
+
+def note_mark(note_id):
+    """What a post carries to say which note wrote it: a hash of the note's
+    id, so the id itself never reaches a public site."""
+    return hashlib.sha256(("bjorn-note:" + note_id).encode()).hexdigest()[:16]
+
+
+def md_escape(text):
+    """Text shown in place of a wiki link, made inert as markdown."""
+    return re.sub(r"([\\`*_\[\]{}<>#|~=!&])", r"\\\1", text)
+
+
+def is_tag_line(line):
+    return bool(line.strip()) and not HEADING_RE.match(line) and bool(TAG_LINE_RE.match(line))
+
+
+def normalize_tag(tag):
+    tag = tag.strip()
+    if tag.startswith("#"):
+        tag = tag[1:]
+    if tag.endswith("#"):
+        tag = tag[:-1]
+    return tag.strip()
+
+
+# -- dates ---------------------------------------------------------------------
+
+
+def parse_date(text):
+    """A front matter date: a day, or a time with or without an offset (local
+    time without). None for anything else; the caller refuses, never guesses."""
+    m = DATE_RE.match(text.strip())
+    if not m:
+        return None
+    year, month, day, hour, minute, second, frac, zone = m.groups()
+    try:
+        micro = int((frac or "0")[:6].ljust(6, "0"))
+        dt = datetime.datetime(
+            int(year),
+            int(month),
+            int(day),
+            int(hour or 0),
+            int(minute or 0),
+            int(second or 0),
+            micro,
+        )
+    except ValueError:
+        return None
+    if zone is None:
+        return dt.astimezone()
+    if zone == "Z":
+        offset = datetime.timedelta(0)
+    else:
+        sign = -1 if zone[0] == "-" else 1
+        digits = zone[1:].replace(":", "")
+        offset = sign * datetime.timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+        if abs(offset) >= datetime.timedelta(hours=24):
+            return None
+    return dt.replace(tzinfo=datetime.timezone(offset))
+
+
+def stamp(dt):
+    return dt.replace(microsecond=0).isoformat()
+
+
+# -- the note's own front matter ------------------------------------------------
+
+
+def split_comment(text):
+    """A plain scalar without its trailing ` # comment`."""
+    m = re.search(r"[ \t]#", text)
+    return (text[: m.start()] if m else text).strip()
+
+
+def scalar(raw):
+    """One YAML scalar as text, or None when it is anything but plain,
+    single-quoted or double-quoted text: anchors, aliases, tags, block
+    scalars and flow mappings are never read, so never expanded."""
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if raw[0] == '"':
+        try:
+            value, end = json.JSONDecoder().raw_decode(raw)
+        except ValueError:
+            return None
+        rest = raw[end:].strip()
+        if not isinstance(value, str) or (rest and not rest.startswith("#")):
+            return None
+        return value
+    if raw[0] == "'":
+        out, i = [], 1
+        while i < len(raw):
+            if raw[i] == "'":
+                if raw[i + 1 : i + 2] == "'":
+                    out.append("'")
+                    i += 2
+                    continue
+                rest = raw[i + 1 :].strip()
+                if rest and not rest.startswith("#"):
+                    return None
+                return "".join(out)
+            out.append(raw[i])
+            i += 1
+        return None
+    if raw[0] in "&*!|>%@`{[":
+        return None
+    return split_comment(raw)
+
+
+def flow_list(raw):
+    """`[a, "b", 'c']` of plain or quoted scalars; None for anything else."""
+    raw = split_comment(raw) if not raw.rstrip().endswith("]") else raw.strip()
+    if not (raw.startswith("[") and raw.endswith("]")):
+        return None
+    inner = raw[1:-1].strip()
+    if not inner:
+        return []
+    items, current, quote = [], [], None
+    for ch in inner:
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+            current.append(ch)
+        elif ch == ",":
+            items.append("".join(current))
+            current = []
+        elif ch in "[]{}":
+            return None
+        else:
+            current.append(ch)
+    if quote:
+        return None
+    items.append("".join(current))
+    values = [scalar(item) for item in items]
+    return None if any(v is None for v in values) else values
+
+
+def read_note_front(lines):
+    """The key/value pairs of the note's front matter, and what was dropped.
+
+    Only top-level `key: value`, `key:` with `- item` lines, and `cover:` with
+    its own fields are understood; each key is read on its own and anything
+    else about it drops that key alone. Values are text or lists of text."""
+    text_size = sum(len(line.encode()) + 1 for line in lines)
+    if text_size > FRONT_MATTER_LIMIT:
+        raise Refusal("The note's front matter is over 64 KB; the script reads at most that much.")
+    blocks, current = [], None
+    for number, line in enumerate(lines, 2):
+        if not line.strip() or line.startswith("#"):
+            continue
+        if line[:1] in (" ", "\t", "-"):
+            if current is None:
+                raise Refusal("The note's front matter line %d is indented under no key." % number)
+            current[2].append(line)
+            continue
+        m = KEY_RE.match(line)
+        if not m:
+            raise Refusal(
+                "The note's front matter line %d is not `key: value`; "
+                "front matter must be YAML keys at the very top of the note." % number
+            )
+        current = (m.group(1), m.group(2) or "", [])
+        blocks.append(current)
+    values, dropped, seen = {}, [], set()
+    for key, raw, children in blocks:
+        lower = key.lower()
+        if lower in seen:
+            raise Refusal("The note's front matter has “%s” twice (keys ignore case)." % key)
+        seen.add(lower)
+        if lower not in NOTE_KEYS:
+            dropped.append(key)
+            continue
+        value = block_value(lower, raw, children)
+        if value is None:
+            dropped.append("%s (not a simple value)" % key)
+        else:
+            values[lower] = value
+    return values, dropped
+
+
+def block_value(key, raw, children):
+    children = [c for c in children if c.strip() and not c.strip().startswith("#")]
+    if key == "cover":
+        if split_comment(raw) or not children:
+            return None
+        cover = {}
+        for child in children:
+            m = re.match(r"^[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*:(?:[ \t]+(.*))?$", child)
+            if not m or m.group(1).lower() not in COVER_KEYS or m.group(1).lower() in cover:
+                return None
+            value = scalar(m.group(2) or "")
+            if value is None:
+                return None
+            cover[m.group(1).lower()] = value
+        return cover
+    if children:
+        if split_comment(raw) or key != "tags":
+            return None
+        items = []
+        for child in children:
+            m = re.match(r"^[ \t]*-[ \t]+(.*)$", child)
+            item = scalar(m.group(1)) if m else None
+            if item is None:
+                return None
+            items.append(item)
+        return items
+    if key == "tags" and raw.strip().startswith("["):
+        return flow_list(raw)
+    return scalar(raw)
+
+
+def as_bool(value):
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    return None
+
+
+# -- wiki links (the rules of Bjorn's src/wiki.rs) ------------------------------
+
+
+def wiki_parts(text, split=True):
+    """(title, heading, alias) of the text between `[[` and `]]`: `\\` before
+    ASCII punctuation escapes it, the first unescaped `/` starts the heading,
+    the first unescaped `|` the text shown instead."""
+    parts, at, i = ["", "", ""], 0, 0
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1 : i + 2]
+        if (
+            ch == "\\"
+            and nxt
+            and nxt.isascii()
+            and not nxt.isalnum()
+            and nxt.isprintable()
+            and not nxt.isspace()
+        ):
+            parts[at] += nxt
+            i += 2
+            continue
+        if ch == "/" and at == 0 and split:
+            at = 1
+        elif ch == "|" and at < 2:
+            at = 2
+        else:
+            parts[at] += ch
+        i += 1
+    title, heading, alias = (p.strip() for p in parts)
+    if not title and not heading:
+        return None
+    return title, heading, alias
+
+
+def collapse_doubled_escapes(text):
+    """`\\\\/` (a doubled escape, as some Bear links carry) read as `\\/`."""
+    return re.sub(r"\\\\(?=[!-/:-@\[-`{-~])(?!\\)", r"\\", text)
+
+
+def wiki_display(inner):
+    """What a public post shows for a wiki link: the alias when there is one;
+    else, for a link that escapes no `/`, the whole text read as a title (so
+    `[[A/B testing]]` and `[[Note/Heading]]` read as written); else the title,
+    or the heading of a `[[/Heading]]`."""
+    text = collapse_doubled_escapes(inner)
+    parts = wiki_parts(text)
+    if parts is None:
+        return None
+    title, heading, alias = parts
+    if alias:
+        return alias
+    if title and heading and "\\/" not in text:
+        whole = wiki_parts(text, split=False)
+        if whole and whole[0]:
+            return whole[0]
+    return title or heading
+
+
+def backtick_run(line, i):
+    j = i
+    while j < len(line) and line[j] == "`":
+        j += 1
+    return j - i
+
+
+def scan_wiki(line):
+    """(start, end, display) for each wiki link on a line. A link runs from
+    `[[` to the first `]]` after it; a `]` right after that belongs to the
+    title while a `[` in it is still open, so `[[Plan [v2]]]` names
+    `Plan [v2]`. A code span that opens before a `[[` hides it."""
+    if "[[" not in line:
+        return []
+    n = len(line)
+
+    def pair_at(i, ch):
+        return i + 1 < n and line[i] == ch and line[i + 1] == ch
+
+    next_close, next_open, closers = [n] * (n + 1), [n] * (n + 1), [0] * (n + 1)
+    for p in range(n - 1, -1, -1):
+        next_close[p] = p if pair_at(p, "]") else next_close[p + 1]
+        next_open[p] = p if pair_at(p, "[") else next_open[p + 1]
+        closers[p] = closers[p + 1] + 1 if line[p] == "]" else 0
+    depth = [0] * (n + 1)
+    for p, ch in enumerate(line):
+        depth[p + 1] = depth[p] + (1 if ch == "[" else -1 if ch == "]" else 0)
+    runs, p = {}, 0
+    while p < n:
+        if line[p] == "`":
+            run = backtick_run(line, p)
+            runs.setdefault(run, []).append(p)
+            p += run
+        else:
+            p += 1
+    out, i = [], 0
+    while i < n:
+        if line[i] == "`":
+            run = backtick_run(line, i)
+            starts = runs.get(run, [])
+            k = bisect.bisect_left(starts, i + run)
+            i = starts[k] + run if k < len(starts) else i + run
+            continue
+        if pair_at(i, "[") and next_close[i + 2] < n:
+            first = next_close[i + 2]
+            still_open = max(depth[first] - depth[i + 2], 0)
+            end = first + min(still_open, closers[first] - 2)
+            nested = next_open[i + 2] + 2 <= end
+            if not nested:
+                shown = wiki_display(line[i + 2 : end])
+                if shown is not None:
+                    out.append((i, end + 2, shown))
+                    i = end + 2
+                    continue
+        i += 1
+    return out
+
+
+# -- links, tags and code -------------------------------------------------------
+
+
+def code_states(lines):
+    """(in_code, line) for each line: fence lines and what is between them
+    are code. A fence closes on a run of the same character, at least as
+    long, with nothing after it."""
+    fence = None
+    for line in lines:
+        m = FENCE_RE.match(line)
+        if fence:
+            closes = (
+                m is not None
+                and m.group(1)[0] == fence[0]
+                and len(m.group(1)) >= len(fence)
+                and not line.strip().strip(fence[0])
+            )
+            if closes:
+                fence = None
+            yield True, line
+        elif m:
+            fence = m.group(1)
+            yield True, line
+        else:
+            yield False, line
+
+
+def destination_kind(target, bundle_assets):
+    """What a link target is: `web` (kept), `local` (a place on this Mac or
+    in another app: dropped), `asset` (a TextBundle attachment) or
+    `relative` (a path within the site)."""
+    target = target.strip()
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1]
+    decoded = urllib.parse.unquote(target)
+    if decoded.startswith("#") or decoded.startswith("//"):
+        return "web"
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):", decoded)
+    if m:
+        return "web" if m.group(1).lower() in WEB_SCHEMES else "local"
+    if decoded.startswith("~") or "\\" in decoded:
+        return "local"
+    if decoded.startswith("/"):
+        first = decoded.lstrip("/").split("/", 1)[0].lower()
+        return "local" if first in LOCAL_ROOTS else "relative"
+    if bundle_assets is not None and decoded.startswith("assets/"):
+        return "asset"
+    return "relative"
+
+
+def split_code_spans(line):
+    """The line as (is_code, text) pieces: a code span closes at the next run
+    of exactly as many backticks; an unclosed run is text."""
+    pieces, start, i, n = [], 0, 0, len(line)
+    while i < n:
+        if line[i] != "`":
+            i += 1
+            continue
+        run = backtick_run(line, i)
+        close, j = None, i + run
+        while True:
+            at = line.find("`" * run, j)
+            if at < 0:
+                break
+            length = backtick_run(line, at)
+            if length == run:
+                close = at
+                break
+            j = at + length
+        if close is None:
+            i += run
+            continue
+        pieces.append((False, line[start:i]))
+        pieces.append((True, line[i : close + run]))
+        i = start = close + run
+    pieces.append((False, line[start:]))
+    return pieces
+
+
+def strip_inline_tags(text, known):
+    """The note's own tags out of prose where they start a word: `#tag`,
+    `#multi word#`, `#tag.` (the period stays), `(#tag)` (both parentheses
+    go). A `#` inside a word, as in a URL's `/#anchor`, stays."""
+    known = sorted((k for k in known if k), key=len, reverse=True)
+    if not known or "#" not in text:
+        return text
+    cuts = []
+    for m in re.finditer("#", text):
+        i = m.start()
+        before = text[i - 1] if i else ""
+        if before and not (before.isspace() or before in "(["):
+            continue
+        rest = text[i + 1 :]
+        for tag in known:
+            head = rest[: len(tag)]
+            if head.lower() != tag:
+                continue
+            after = rest[len(tag) :]
+            end = i + 1 + len(tag)
+            if " " in tag:
+                ok = after.startswith("#")
+                end += 1 if ok else 0
+            elif not after or after[0].isspace():
+                ok = True
+            elif after[0] == "#":
+                ok, end = True, end + 1
+            else:
+                punct = re.match(r"[.,;:!?)\]}\"']+", after)
+                ok = bool(punct) and (len(after) == punct.end() or after[punct.end()].isspace())
+            if ok:
+                cuts.append((i, end))
+                break
+    if not cuts:
+        return text
+    out, last = "", 0
+    for start, end in cuts:
+        if text[:start].endswith("(") and text[end:].startswith(")"):
+            start, end = start - 1, end + 1
+        if start < last:
+            continue
+        out += text[last:start]
+        last = end
+        nxt = text[end : end + 1]
+        if not nxt or nxt == " " or nxt in ".,;:!?)":
+            if out.endswith(" "):
+                out = out[:-1]
+            elif not out and nxt == " ":
+                last += 1
+    return out + text[last:]
+
+
+class Cleaner:
+    """Makes the note's markdown fit for a public site, and says what it
+    changed. Code (fenced and inline) is published exactly as written, so it
+    is checked for local details instead of rewritten."""
+
+    def __init__(self, known_tags, assets, allow_html):
+        self.known = known_tags
+        self.assets = assets  # {decoded "assets/name": real name} or None
+        self.allow_html = allow_html
+        self.images = []  # attachment names, in the order linked
+        self.notes = []
+
+    def check_code(self, text, where):
+        lower = text.lower()
+        for mark in ("bear://", "file://"):
+            if mark in lower:
+                raise Refusal(
+                    "%s holds a %s link, and code is published as written; remove it first."
+                    % (where, mark)
+                )
+        if LOCAL_PATH_RE.search(text):
+            raise Refusal(
+                "%s holds a /Users/... path, and code is published as written; "
+                "write ~/... or $HOME/... instead." % where
+            )
+
+    def link(self, m):
+        bang, text, target, title = m.group(1), m.group(2), m.group(3), m.group(4)
+        kind = destination_kind(target, self.assets)
+        raw = target[1:-1] if target.startswith("<") else target
+        if bang and urllib.parse.unquote(raw).strip().lower().startswith("data:"):
+            raise Refusal(
+                "The note has an inline data: image; only attached or web images are published."
+            )
+        if kind == "asset":
+            name = self.assets.get(unicodedata.normalize("NFC", urllib.parse.unquote(raw)))
+            if name is None:
+                if bang:
+                    raise Refusal(
+                        "The image %s is not among the note's attachments." % one_line(raw)[:80]
+                    )
+                self.notes.append("A link to a missing attachment became its text.")
+                return text
+            if name.rsplit(".", 1)[-1].lower() not in IMAGE_EXTENSIONS or "." not in name:
+                if bang:
+                    raise Refusal(
+                        "%s is not a %s image; only those are published."
+                        % (one_line(name)[:80], "/".join(IMAGE_EXTENSIONS))
+                    )
+                self.notes.append(
+                    "The link to the attachment %s became its text." % one_line(name)[:80]
+                )
+                return text
+            if name not in self.images:
+                self.images.append(name)
+            return "%s[%s](%s%d%s%s)" % (
+                bang,
+                text,
+                TOKEN_OPEN,
+                self.images.index(name),
+                TOKEN_CLOSE,
+                title,
+            )
+        if kind == "local":
+            if bang:
+                raise Refusal(
+                    "The image %s is on this Mac, not the web; "
+                    'use format = "textbundle" so the action gets the note\'s images.'
+                    % one_line(raw)[:80]
+                )
+            self.notes.append("A link to a local file or another app became its text.")
+            return text
+        if bang and kind == "relative":
+            raise Refusal(
+                "The image %s is not an attachment the action was given, so it would be a broken link; "
+                'use format = "textbundle".' % one_line(raw)[:80]
+            )
+        return m.group(0)
+
+    def prose(self, text, number):
+        if not self.allow_html:
+            for m in HTML_RE.finditer(text):
+                if text.startswith(MORE, m.start()):
+                    continue
+                raise Refusal(
+                    "Line %d has raw HTML, which a Hugo site may render as is; "
+                    "remove it, or add --allow-html to the action." % number
+                )
+        text = LINK_RE.sub(self.link, text)
+
+        def bare(m):
+            if m.group(1).lower() in WEB_SCHEMES:
+                return m.group(0)
+            self.notes.append("A %s:// address was taken out." % m.group(1).lower())
+            return ""
+
+        text = BARE_URL_RE.sub(bare, text)
+        if LOCAL_PATH_RE.search(text):
+            raise Refusal(
+                "Line %d mentions a /Users/... path, which names this Mac's account; "
+                "write ~/... instead." % number
+            )
+        return strip_inline_tags(text, self.known)
+
+    def line(self, line, number):
+        found = scan_wiki(line)
+        shown = []
+        if found:
+            out, last = "", 0
+            for start, end, display in found:
+                display = one_line(display)
+                if LOCAL_PATH_RE.search(display):
+                    raise Refusal("Line %d links to a note named after a /Users/... path." % number)
+                out += line[last:start] + TOKEN_OPEN + "w%d" % len(shown) + TOKEN_CLOSE
+                shown.append(md_escape(display))
+                last = end
+            line = out + line[last:]
+        pieces = []
+        for is_code, text in split_code_spans(line):
+            if is_code:
+                self.check_code(text, "Line %d's code" % number)
+                pieces.append(text)
+            else:
+                pieces.append(self.prose(text, number))
+        line = "".join(pieces)
+        return re.sub(
+            TOKEN_OPEN + r"w([0-9]+)" + TOKEN_CLOSE, lambda m: shown[int(m.group(1))], line
+        )
+
+    def reference(self, line, number):
+        """A `[id]: target` definition: kept, dropped with its target, or
+        refused, by the same rules as an inline link."""
+        m = REFERENCE_RE.match(line)
+        if not m:
+            return line
+        kind = destination_kind(m.group(2), None)
+        if kind == "local":
+            self.notes.append("A link definition pointing at this Mac was taken out.")
+            return None
+        return line
+
+    def body(self, lines):
+        out = []
+        numbers = [number for number, _ in lines]
+        for number, (in_code, line) in zip(numbers, code_states(text for _, text in lines)):
+            if in_code:
+                self.check_code(line, "Line %d (in a code block)" % number)
+                out.append(line)
+                continue
+            if is_tag_line(line):
+                continue
+            line = self.reference(line, number)
+            if line is None:
+                continue
+            out.append(self.line(line, number))
+        return out
+
+
+def check_final(body):
+    """The last look before writing: no link that would leave the site for
+    this Mac or another app survived the cleaning. A link the cleaner could
+    not take apart (brackets inside its text, say) is refused, not guessed."""
+    for in_code, line in code_states(body):
+        if in_code:
+            continue
+        for is_code, text in split_code_spans(line):
+            if is_code:
+                continue
+            for d in DESTINATION_RE.finditer(text):
+                if destination_kind(d.group(1), None) == "local":
+                    raise Refusal(
+                        "A link to %s could not be cleaned; simplify it (plain [text](url)) and try again."
+                        % one_line(urllib.parse.unquote(d.group(1)))[:60]
+                    )
+            for d in BARE_URL_RE.finditer(text):
+                if d.group(1).lower() not in WEB_SCHEMES:
+                    raise Refusal("A %s:// address could not be cleaned." % d.group(1).lower())
+
+
+# -- the note ---------------------------------------------------------------------
+
+
+def read_note(path):
+    """(markdown, {"assets/<name>": name} or None, assets folder) from what
+    the action was handed: a Markdown file, or a TextBundle folder."""
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        raise Refusal("Cannot read the note (%s): %s" % (path, e.strerror)) from None
+    if stat.S_ISDIR(st.st_mode):
+        text_path = os.path.join(path, "text.md")
+        assets_dir = os.path.join(path, "assets")
+        assets = {}
+        try:
+            names = os.listdir(assets_dir)
+        except FileNotFoundError:
+            names = []
+        for name in names:
+            full = os.path.join(assets_dir, name)
+            if "/" in name or name.startswith(".") or not stat.S_ISREG(os.lstat(full).st_mode):
+                continue
+            assets[unicodedata.normalize("NFC", "assets/" + name)] = name
+        return read_text(text_path), assets, assets_dir
+    if not stat.S_ISREG(st.st_mode):
+        raise Refusal("%s is not a file or a TextBundle." % path)
+    return read_text(path), None, None
+
+
+def read_text(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        data = read_capped(fd, NOTE_LIMIT, "The note")
+    finally:
+        os.close(fd)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Refusal("The note is not UTF-8 text.") from None
+
+
+def read_capped(fd, limit, what):
+    chunks, size = [], 0
+    while True:
+        chunk = os.read(fd, 1 << 16)
+        if not chunk:
+            return b"".join(chunks)
+        size += len(chunk)
+        if size > limit:
+            raise Refusal("%s is over %d MB." % (what, limit // (1024 * 1024)))
+        chunks.append(chunk)
+
+
+class Note:
+    def __init__(self, text, env_title, tags, assets, allow_html):
+        text = text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+        text = text.replace(TOKEN_OPEN, "\ufffd").replace(TOKEN_CLOSE, "\ufffd")
+        lines = text.split("\n")
+        self.front, self.dropped, start = {}, [], 0
+        if lines and lines[0].rstrip() == "---":
+            end = next(
+                (i for i in range(1, len(lines)) if lines[i].rstrip() in ("---", "...")), None
+            )
+            if end is None:
+                raise Refusal("The note starts with --- but its front matter never closes.")
+            self.front, self.dropped = read_note_front(lines[1:end])
+            start = end + 1
+        numbered = list(enumerate(lines, 1))[start:]
+        while numbered and not numbered[0][1].strip():
+            numbered.pop(0)
+        heading = ""
+        if numbered:
+            first = numbered[0][1]
+            if first.startswith("# "):
+                heading = first[2:].strip()
+                numbered.pop(0)
+            elif (
+                env_title.strip()
+                and first.lstrip("#").strip() == env_title.strip().lstrip("#").strip()
+            ):
+                numbered.pop(0)
+        while numbered and (not numbered[0][1].strip() or is_tag_line(numbered[0][1])):
+            numbered.pop(0)
+        known = [normalize_tag(t).lower() for t in tags]
+        self.cleaner = Cleaner(known, assets, allow_html)
+        if not allow_html:
+            for number, line in numbered:
+                if SHORTCODE_RE.search(line):
+                    raise Refusal(
+                        "Line %d has a Hugo shortcode ({{< or {{%%), which the site would run; "
+                        "remove it, or add --allow-html to the action." % number
+                    )
+        body = self.cleaner.body(numbered)
+        while body and not body[0].strip():
+            body.pop(0)
+        while body and not body[-1].strip():
+            body.pop()
+        check_final(body)
+        self.body = body
+        raw_title = self.front.get("title") if isinstance(self.front.get("title"), str) else ""
+        self.title = self.clean_value(raw_title.strip() or heading or env_title, "title")
+        if not self.title:
+            raise Refusal("The note has no title.")
+
+    def clean_value(self, value, key):
+        """Front matter text: one line, wiki links as their text, the note's
+        tags out, markdown links as their text. A value naming a local
+        path or another app is refused rather than published."""
+        line = one_line(value)
+        found = scan_wiki(line)
+        out, last = "", 0
+        for start, end, display in found:
+            out += line[last:start] + one_line(display)
+            last = end
+        line = out + line[last:]
+        # Front matter is not rendered as markdown: a link is just its text.
+        line = LINK_RE.sub(lambda m: m.group(2), line)
+        if (
+            LOCAL_PATH_RE.search(line)
+            or re.search(r"\b(?:file|bear):", line, re.IGNORECASE)
+            or any(d.group(1).lower() not in WEB_SCHEMES for d in BARE_URL_RE.finditer(line))
+        ):
+            raise Refusal(
+                "The note's %s names a local path or another app's link; remove it first." % key
+            )
+        return " ".join(strip_inline_tags(line, self.cleaner.known).split())
+
+
+# -- tags ---------------------------------------------------------------------------
+
+
+def post_tags(note_tags, prefix):
+    """Only tags under `prefix`, prefix removed; only the most specific of a
+    nested path; lower case with hyphens. No prefix, no tags: a public site
+    gets only tags the note was given for it."""
+    prefix = normalize_tag(prefix).strip("/").lower()
+    if not prefix:
+        return []
+    kept = []
+    for tag in note_tags:
+        tag = normalize_tag(tag)
+        if tag.lower().startswith(prefix + "/"):
+            rest = tag[len(prefix) + 1 :].strip("/")
+            if rest:
+                kept.append(rest)
+    leaves = [t for t in kept if not any(o.lower().startswith(t.lower() + "/") for o in kept)]
+    out = []
+    for tag in leaves:
+        words = [one_line(w).lower() for w in re.split(r"[/\s]+", tag) if w]
+        tag = "-".join(w for w in words if w)
+        if tag and tag not in out:
+            out.append(tag)
+    return out
+
+
+# -- the site, opened without following symlinks ----------------------------------
+
+
+class Site:
+    """Folders under the site opened one component at a time with
+    O_NOFOLLOW, so a symlink anywhere below the site root is refused, not
+    followed, and nothing is written outside content/<section>."""
+
+    def __init__(self, root, section):
+        root = os.path.realpath(os.path.expanduser(root))
+        if not os.path.isdir(root):
+            raise Refusal("%s is not a folder." % root)
+        self.root = root
+        self.fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        parts = [p for p in section.strip("/").split("/") if p]
+        if not parts or any(
+            p in (".", "..") or not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$", p) for p in parts
+        ):
+            raise Refusal(
+                "--section must be a folder name inside content/, got “%s”." % one_line(section)
+            )
+        self.section = parts
+        self.created = []
+        for depth in range(1, len(self.section_parts()) + 1):
+            fd = self.open_dirs(self.section_parts()[:depth])
+            if fd is None:
+                if depth == 1:
+                    raise Refusal("%s has no content folder; is it a Hugo site?" % root)
+                break
+            os.close(fd)
+
+    def open_dirs(self, parts, create=False):
+        """A descriptor for root/parts..., None when a part is missing and
+        `create` is false. Refuses a symlink or a non-folder on the way."""
+        fd = os.dup(self.fd)
+        walked = []
+        try:
+            for part in parts:
+                walked.append(part)
+                try:
+                    st = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    if not create:
+                        os.close(fd)
+                        return None
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                    self.created.append(list(walked))
+                    st = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISLNK(st.st_mode):
+                    raise Refusal(
+                        "%s is a symlink; refusing to write through it." % "/".join(walked)
+                    )
+                if not stat.S_ISDIR(st.st_mode):
+                    raise Refusal("%s is not a folder." % "/".join(walked))
+                nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = nfd
+            return fd
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+
+    def section_parts(self):
+        return ["content"] + self.section
+
+    def remove_created(self):
+        for parts in reversed(self.created):
+            parent = self.open_dirs(parts[:-1])
+            if parent is None:
+                continue
+            try:
+                os.rmdir(parts[-1], dir_fd=parent)
+            except OSError:
+                pass
+            finally:
+                os.close(parent)
+
+
+def lstat_in(dfd, name):
+    try:
+        return os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def read_in(dfd, name, limit):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+    try:
+        return read_capped(fd, limit, name)
+    finally:
+        os.close(fd)
+
+
+def write_in(dfd, name, data, replace):
+    """Write `name` in the folder `dfd` whole or not at all: a temp file made
+    with O_EXCL|O_NOFOLLOW, synced, then renamed over the old file
+    (`replace`) or hard-linked in, which fails if the name was taken since."""
+    tmp = ".hugo-publish-%s.tmp" % secrets.token_hex(8)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
+    try:
+        try:
+            os.fchmod(fd, 0o644)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if replace:
+            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        else:
+            os.link(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            os.unlink(tmp, dir_fd=dfd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+        raise
+
+
+# -- a post's own front matter ---------------------------------------------------
+
+
+def post_front(text):
+    """The front matter lines of an existing post, or None without any."""
+    lines = text.split("\n")
+    if not lines or lines[0].rstrip() != "---":
+        return None
+    for i in range(1, len(lines)):
+        if lines[i].rstrip() in ("---", "..."):
+            return lines[1:i]
+    return None
+
+
+def post_mark(text):
+    front = post_front(text[: FRONT_MATTER_LIMIT * 2])
+    if front is None:
+        return None
+    for line in front:
+        m = re.match(r"^%s:[ \t]*\"([0-9a-f]{16})\"[ \t]*$" % MARK_KEY, line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def post_blocks(front, where):
+    """Top-level keys of a post as text blocks: the comment lines above a
+    key, its own line and anything indented under it. Refuses a layout it
+    cannot keep as written."""
+    blocks, lead = [], []
+    for line in front:
+        m = POST_KEY_RE.match(line)
+        if m:
+            blocks.append([m.group(1).lower(), lead + [line]])
+            lead = []
+        elif not line.strip() or line.startswith("#"):
+            lead.append(line)
+        elif line[:1] in (" ", "\t", "-") and blocks:
+            blocks[-1][1].extend(lead + [line])
+            lead = []
+        else:
+            raise Refusal(
+                "%s: its front matter is laid out in a way the script cannot keep; fix it by hand."
+                % where
+            )
+    return blocks
+
+
+def post_value(blocks, key):
+    for k, lines in blocks:
+        if k == key:
+            own = next(line for line in lines if POST_KEY_RE.match(line))
+            return scalar(own.split(":", 1)[1])
+    return None
+
+
+# -- publishing -----------------------------------------------------------------
+
+
+def find_own_post(site, mark):
+    """The one post under content/<section> carrying this note's mark, as
+    folder parts and file name. Symlinks are not followed."""
+    base = os.path.join(site.root, *site.section_parts())
+    if not os.path.isdir(base) or os.path.islink(base):
+        return None
+    found, budget = [], WALK_ENTRIES
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        depth = os.path.relpath(dirpath, base).count(os.sep)
+        if depth >= WALK_DEPTH:
+            dirnames[:] = []
+        budget -= len(dirnames) + len(filenames)
+        if budget < 0:
+            break
+        for name in filenames:
+            if not name.endswith(".md"):
+                continue
+            full = os.path.join(dirpath, name)
+            try:
+                st = os.lstat(full)
+                if not stat.S_ISREG(st.st_mode) or st.st_size > POST_LIMIT:
+                    continue
+                with open(full, "rb") as f:
+                    head = f.read(FRONT_MATTER_LIMIT * 2).decode("utf-8", "replace")
+            except OSError:
+                continue
+            if post_mark(head) == mark:
+                found.append(os.path.relpath(full, base))
+    if len(found) > 1:
+        raise Refusal(
+            "More than one post was written for this note (%s); delete all but one."
+            % ", ".join(sorted(found))
+        )
+    if not found:
+        return None
+    rel = found[0].split(os.sep)
+    return rel[:-1], rel[-1]
+
+
+def image_name(name, taken):
+    stem, _, ext = name.rpartition(".")
+    stem = slugify(stem) or "image"
+    if stem in ("index", "_index"):
+        stem = "image-" + stem.strip("_")
+    candidate, n = "%s.%s" % (stem, ext.lower()), 2
+    while candidate in taken:
+        candidate, n = "%s-%d.%s" % (stem, n, ext.lower()), n + 1
+    taken.add(candidate)
+    return candidate
+
+
+class ImageRef:
+    """A front matter value naming one of the post's images, by its index,
+    until the image's name in the bundle is known."""
+
+    def __init__(self, index):
+        self.index = index
+
+
+def front_matter(fields, image_names):
+    def text(value):
+        if isinstance(value, ImageRef):
+            value = image_names[value.index]
+        return yaml_string(value)
+
+    lines = ["---"]
+    for key, value in fields:
+        if isinstance(value, bool):
+            lines.append("%s: %s" % (key, "true" if value else "false"))
+        elif isinstance(value, list):
+            lines.append("%s: [%s]" % (key, ", ".join(yaml_string(v) for v in value)))
+        elif isinstance(value, dict):
+            lines.append("%s:" % key)
+            for sub, subvalue in value.items():
+                if isinstance(subvalue, bool):
+                    lines.append("  %s: %s" % (sub, "true" if subvalue else "false"))
+                else:
+                    lines.append("  %s: %s" % (sub, text(subvalue)))
+        else:
+            lines.append("%s: %s" % (key, text(value)))
+    return lines
+
+
+def publish(args, env):
+    note_path = env.get("BJORN_NOTE_FILE", "")
+    note_id = env.get("BJORN_NOTE_ID", "").strip()
+    if not note_path or not note_id:
+        raise Refusal(
+            "Run this from a Bjorn action: BJORN_NOTE_FILE and BJORN_NOTE_ID are not set."
+        )
+    fmt = env.get("BJORN_NOTE_FORMAT", "")
+    if fmt and fmt not in ("md", "textbundle"):
+        raise Refusal(
+            'Set format = "textbundle" (or "md") on the action; it is "%s".' % one_line(fmt)
+        )
+    if args.ask:
+        live = env.get("BJORN_ACTION_INPUT", "").strip().lower() == "yes"
+    else:
+        live = bool(args.live)
+
+    text, assets, assets_dir = read_note(note_path)
+    tags = [t for t in env.get("BJORN_NOTE_TAGS", "").split(",") if t.strip()]
+    note = Note(text, env.get("BJORN_NOTE_TITLE", ""), tags, assets, args.allow_html)
+    front, report = note.front, []
+    dropped = list(note.dropped)
+    if "draft" in front:
+        dropped.append("draft (--draft or --live decides)")
+
+    site = Site(args.site, args.section)
+    mark = note_mark(note_id)
+    now = datetime.datetime.now().astimezone()
+
+    # Where: this note's earlier post wherever it is, or a new file.
+    own = find_own_post(site, mark)
+    if own:
+        folder, file_name = own
+        bundle = file_name == "index.md"
+    else:
+        slug = slugify(front["slug"]) if isinstance(front.get("slug"), str) else ""
+        slug = slug or slugify(note.title) or "note-" + mark[:8]
+        bundle = args.bundle
+        folder, file_name = ([slug], "index.md") if bundle else ([], slug + ".md")
+        # Hugo would see a bundle and a file of the same name as one page.
+        twin = ([], slug + ".md") if bundle else ([slug], "index.md")
+        tdir = site.open_dirs(site.section_parts() + twin[0])
+        if tdir is not None:
+            try:
+                if lstat_in(tdir, twin[1]) is not None:
+                    raise Refusal(
+                        "content/%s already exists; give the note a slug: of its own."
+                        % "/".join(site.section + twin[0] + [twin[1]])
+                    )
+            finally:
+                os.close(tdir)
+    display = "content/" + "/".join(site.section + folder + [file_name])
+    if note.cleaner.images and not bundle:
+        raise Refusal(
+            "The note has images; add --bundle to the action so they go beside the post"
+            + (" (this post is a single file: move it to a folder as index.md)." if own else ".")
+        )
+
+    # What is there now: nothing, or this note's own post.
+    existing, seen = None, None
+    dfd = site.open_dirs(site.section_parts() + folder)
+    if dfd is not None:
+        try:
+            st = lstat_in(dfd, file_name)
+            if st is not None:
+                if not stat.S_ISREG(st.st_mode):
+                    raise Refusal(
+                        "%s is not a plain file (a symlink?); refusing to replace it." % display
+                    )
+                data = read_in(dfd, file_name, POST_LIMIT)
+                try:
+                    existing = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise Refusal(
+                        "%s is not UTF-8 text; refusing to replace it." % display
+                    ) from None
+                owner = post_mark(existing)
+                if owner is None:
+                    raise Refusal(
+                        "%s exists and was not written by this script; refusing to replace it."
+                        % display
+                    )
+                if owner != mark:
+                    raise Refusal(
+                        "%s was written for another note; refusing to replace it." % display
+                    )
+                seen = (st.st_ino, st.st_mtime_ns, st.st_size)
+        finally:
+            os.close(dfd)
+
+    kept_blocks, was_live, date, slug_value = [], False, None, None
+    if existing is not None:
+        blocks = post_blocks(post_front(existing) or [], display)
+        raw_date = post_value(blocks, "date")
+        if raw_date is not None:
+            date = parse_date(raw_date)
+            if date is None:
+                raise Refusal(
+                    "%s: its date is not one the script can read; fix it or delete the line."
+                    % display
+                )
+        slug_value = post_value(blocks, "slug")
+        was_live = (post_value(blocks, "draft") or "").strip().lower() == "false"
+        managed = {"title", "slug", "date", "lastmod", "draft", MARK_KEY}
+        managed.update(("tags", "description", "summary", "showtoc", "cover"))
+        kept_blocks = [(k, lines) for k, lines in blocks if k not in managed]
+        # Hand-added values of the note keys stay when the note gives none.
+        post_has = {k: lines for k, lines in blocks}
+    else:
+        post_has = {}
+
+    if date is None:
+        raw = front.get("date") if existing is None else None
+        if isinstance(raw, str) and raw.strip():
+            date = parse_date(raw)
+            if date is None:
+                raise Refusal(
+                    "The note's date: %s is not a date (use 2026-09-25 or 2026-09-25T10:00:00-04:00)."
+                    % one_line(raw)[:40]
+                )
+        date = date or now
+    if slug_value is None or not slugify(slug_value):
+        slug_value = folder[-1] if bundle and folder else file_name[:-3]
+    slug_value = slugify(slug_value)
+
+    tag_list = post_tags(tags, args.tag_prefix)
+    if "tags" in front:
+        if isinstance(front["tags"], list):
+            tag_list = [t for t in (note.clean_value(v, "tags") for v in front["tags"]) if t]
+        else:
+            dropped.append("tags (not a list)")
+
+    fields = [
+        ("title", note.title),
+        ("slug", slug_value),
+        ("date", stamp(date)),
+    ]
+    if existing is not None:
+        fields.append(("lastmod", stamp(now)))
+    fields.append(("draft", not live))
+    extra_blocks = []
+    if tag_list or "tags" not in post_has:
+        fields.append(("tags", tag_list))
+    else:
+        extra_blocks.append(post_has["tags"])
+    for key in ("description", "summary"):
+        if isinstance(front.get(key), str):
+            fields.append((key, note.clean_value(front[key], key)))
+        elif key in post_has:
+            extra_blocks.append(post_has[key])
+    if "showtoc" in front:
+        flag = as_bool(front["showtoc"]) if isinstance(front["showtoc"], str) else None
+        if flag is None:
+            dropped.append("showtoc (not true or false)")
+        else:
+            fields.append(("showtoc", flag))
+    elif "showtoc" in post_has:
+        extra_blocks.append(post_has["showtoc"])
+
+    images = list(note.cleaner.images)
+    cover = front.get("cover")
+    if isinstance(cover, dict):
+        clean = {}
+        for sub, value in cover.items():
+            if COVER_KEYS[sub] == "bool":
+                flag = as_bool(value)
+                if flag is None:
+                    dropped.append("cover.%s (not true or false)" % sub)
+                else:
+                    clean[sub] = flag
+            elif sub == "image":
+                kind = destination_kind(value, None)
+                asset = (
+                    assets.get(unicodedata.normalize("NFC", "assets/" + value)) if assets else None
+                )
+                if asset and asset.rsplit(".", 1)[-1].lower() in IMAGE_EXTENSIONS and bundle:
+                    if asset not in images:
+                        images.append(asset)
+                    clean[sub] = ImageRef(images.index(asset))
+                elif (
+                    kind == "web"
+                    and not value.startswith("#")
+                    and not value.lower().startswith("mailto:")
+                ):
+                    clean[sub] = one_line(value)
+                else:
+                    dropped.append("cover.image (not a web address or an attachment in a bundle)")
+            else:
+                clean[sub] = note.clean_value(value, "cover.%s" % sub)
+        if clean:
+            fields.append(("cover", clean))
+    elif "cover" in post_has:
+        extra_blocks.append(post_has["cover"])
+    fields.append((MARK_KEY, mark))
+
+    # Images: renamed for the web, never over a file already there.
+    written_names, image_plan = {}, []
+    if images:
+        bdir = site.open_dirs(site.section_parts() + folder)
+        taken = set()
+        try:
+            for index, name in enumerate(images):
+                afd = os.open(assets_dir, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    if not stat.S_ISREG(os.stat(name, dir_fd=afd, follow_symlinks=False).st_mode):
+                        raise Refusal(
+                            "The attachment %s is not a plain file." % one_line(name)[:80]
+                        )
+                    data = read_in(afd, name, IMAGE_LIMIT)
+                finally:
+                    os.close(afd)
+                while True:
+                    target = image_name(name, taken)
+                    st = lstat_in(bdir, target) if bdir is not None else None
+                    if st is None:
+                        image_plan.append((target, data))
+                        break
+                    if stat.S_ISREG(st.st_mode) and read_in(bdir, target, IMAGE_LIMIT) == data:
+                        break  # the same image, from an earlier run
+                    report.append(
+                        "%s was already there and differs; kept it and wrote this image under a new name."
+                        % target
+                    )
+                written_names[index] = target
+        finally:
+            if bdir is not None:
+                os.close(bdir)
+
+    def resolve(text):
+        return TOKEN_RE.sub(lambda m: written_names[int(m.group(1))], text)
+
+    fm = front_matter(fields, written_names)
+    for lines in extra_blocks + [lines for _, lines in kept_blocks]:
+        fm.extend(lines)
+    fm.append("---")
+    body = "\n".join(resolve(line) for line in note.body)
+    post = "\n".join(fm) + "\n" + ("\n" + body + "\n" if body.strip() else "")
+
+    # Writing: images first, then the post; a failure removes what was added.
+    added = []
+    dfd = site.open_dirs(site.section_parts() + folder, create=True)
+    try:
+        for target, data in image_plan:
+            write_in(dfd, target, data, replace=False)
+            added.append(target)
+        if existing is None:
+            write_in(dfd, file_name, post.encode("utf-8"), replace=False)
+        else:
+            st = lstat_in(dfd, file_name)
+            if st is None or (st.st_ino, st.st_mtime_ns, st.st_size) != seen:
+                raise Refusal(
+                    "%s changed while the post was being made; run the action again." % display
+                )
+            write_in(dfd, file_name, post.encode("utf-8"), replace=True)
+    except BaseException:
+        for target in added:
+            try:
+                os.unlink(target, dir_fd=dfd)
+            except OSError:
+                pass
+        os.close(dfd)
+        site.remove_created()
+        raise
+    os.close(dfd)
+
+    if live:
+        head = "Published (live): %s" % display
+    else:
+        head = "Draft saved: %s" % display
+        if was_live:
+            head += " (was live; now a draft)"
+    if existing is not None:
+        head += " (updated)"
+    lines = [head]
+    if image_plan:
+        lines.append("Images beside it: %s" % ", ".join(t for t, _ in image_plan))
+    lines.extend(report)
+    if dropped:
+        lines.append(
+            "Not published from the note's front matter: %s" % ", ".join(sorted(set(dropped)))
+        )
+    lines.extend(sorted(set(note.cleaner.notes)))
+    return lines
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="hugo-publish",
+        description="Write the Bear note a Bjorn action hands over as a Hugo post. "
+        "A draft unless --live is given.",
+    )
+    parser.add_argument(
+        "--site", required=True, help="the Hugo site's root (the folder with content/)"
+    )
+    parser.add_argument(
+        "--section", default="posts", help="the folder under content/ (default: posts)"
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--draft", action="store_true", help="write draft: true (the default)")
+    mode.add_argument("--live", action="store_true", help="write draft: false: the post goes live")
+    mode.add_argument(
+        "--ask",
+        action="store_true",
+        help="live when $BJORN_ACTION_INPUT is `yes` (the action's prompt), else a draft",
+    )
+    parser.add_argument(
+        "--tag-prefix",
+        default="",
+        help="publish only the note's tags under this one, without it (blog/rust -> rust); "
+        "without it no tags are published",
+    )
+    parser.add_argument(
+        "--bundle",
+        action="store_true",
+        help="write a new post as <slug>/index.md with its images beside it",
+    )
+    parser.add_argument(
+        "--allow-html",
+        action="store_true",
+        help="publish raw HTML and Hugo shortcodes instead of refusing the note",
+    )
+    args = parser.parse_args(argv)
+    try:
+        lines = publish(args, os.environ)
+    except Refusal as e:
+        print(str(e).replace("\n", " "), file=sys.stderr)
+        return 1
+    except OSError as e:
+        print("Nothing was published: %s" % e, file=sys.stderr)
+        return 1
+    print("\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

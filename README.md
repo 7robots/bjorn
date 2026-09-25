@@ -43,8 +43,7 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `enter` | move into the reader for the highlighted note, at the first match while searching | `1`–`7` | Notes, Untagged, Todo, Today, Pinned, Archive, Trash |
 | `n` | new note (title, tags), then edit | `d` | move the note to the trash, after a confirm |
 | `e` | edit in `$VISUAL` / `$EDITOR` | `u` | restore from Trash or Archive |
-| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle, or Hugo (`←` `→` pick, `enter` confirms) |
-| `P` | publish as a Hugo post, after a confirm (see [Publishing to Hugo](#publishing-to-hugo)) | | |
+| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle (`←` `→` pick, `enter` confirms) |
 | `b` | open in Bear.app | `!` / `a` | run the default action / open the action menu (see [Actions](#actions)) |
 | `w` | make the highlighted tag the workspace; again on it to leave | `W` | clear the workspace |
 | `f` | fold / unfold the highlighted tag's subtree | `F` | fold every tag, or unfold them all when all are folded |
@@ -130,9 +129,6 @@ enabled = false               # off by default
 list = "Bear"                 # target list; remctl's default when empty
 due = "today"                 # due date for new reminders; "" for none
 remctl = ""                   # path to remctl; default searches PATH
-
-[hugo]                        # `P` publishes a note as a Hugo post; see Publishing to Hugo
-site = ""                     # the site root (the folder with content/); empty disables `P`
 
 [[actions]]                   # shell commands for `!` and `a`; see Actions below
 ```
@@ -221,81 +217,6 @@ away from everything in the window: prompt themes, `eza`/`lsd` file icons,
 Neovim statuslines. Bjorn's Material Design glyphs live above U+F0000 and are
 unaffected.
 
-## Publishing to Hugo
-
-`P` (or `x` then `g`) turns the note into a post in a [Hugo](https://gohugo.io)
-site: one Markdown file with YAML front matter, written under
-`content/<section>/` in the site you name. Bjorn only writes files; uploading
-images, building and committing stay with you (see the
-[recipes](docs/actions.md#hugo-recipes)). Nothing is written until you confirm
-a dialog that shows, each on its own line, the note's title, the file, the
-URL, draft or live, the tags, any of the note's keys that were not published,
-and anything unusual (a slug already taken, a post that went missing).
-
-```toml
-[hugo]
-site = "~/sites/blog"                 # required: the site root (the folder with content/)
-section = "posts"                     # under content/
-path = "{year}/{month}/{slug}.md"     # a new post's file: {year} {month} {day} {slug}; ending in /index.md makes a page bundle
-permalink = "/:year/:month/:day/:slug/"  # the site's permalink for the section; only shown in the dialog
-tag_prefix = "blog"                   # publish only #blog/... tags, without the prefix; "" publishes no tags
-publish_tag = "blog/published"        # draft: false with this tag; "" means always a draft
-media_url = "https://media.example.com/blog"  # where uploaded images are served from
-media_dir = "~/Downloads/bjorn-media" # where images wait for your upload
-summary_divider = true                # <!--more--> after the lead paragraph
-```
-
-What a new post gets from the note:
-
-| Front matter | From |
-|---|---|
-| `title` | the note's `# ` title (a plain or `##` first line equal to the note's title also goes), the note's own tags taken out |
-| `slug` | the title, lower case with every run of other characters a hyphen (`new-post.sh`'s rule: `C++ & Rust: 2026?` is `c-rust-2026`) |
-| `date` | when you publish, local time with its offset, as `new-post.sh` does |
-| `draft` | `true` unless the note has `publish_tag` |
-| `tags` | the note's tags under `tag_prefix`, prefix removed, most specific only, lower case with hyphens: `#blog/image processing#` is `image-processing`. With no `tag_prefix`, no tags: a public site gets only tags you meant for it |
-| `description` | `""`, for you to fill in |
-
-A note can start with its own front matter between `---` fences, at the very
-top and nowhere else. Only `title`, `slug`, `date`, `description`, `cover`,
-`tags`, `draft`, `summary` and `showtoc` are published, written fresh from what
-was parsed; anything else (`layout`, `url`, `aliases`, `markup`, `outputs`,
-`build`, `type`...) is dropped and listed in the dialog. A note that starts
-with `---` but not with YAML keys is refused.
-
-**Publishing again** updates the same file, even after the note's title
-changed: which note wrote which file is kept in `hugo-published.json` beside
-the config file, outside the site, so the post carries no Bear id and no local
-path. `slug` and `date` stay as the post has them (the note's own `slug:` and
-`date:` only shape a new post), so the URL never moves; `title`, `tags`, the
-body and a new `lastmod` are refreshed; keys you added by hand and comments
-stay. A post's tags are kept when the note has none to give, and when Bjorn
-did not write the post, unless the note's own front matter names `tags:`. A live post (`draft: false`, or no `draft`) stays live whatever the note
-says. If the post Bjorn wrote is gone, the dialog says so; before writing a new
-file Bjorn looks for a post with the same slug in the section and offers to
-update it; a second note whose slug is taken gets `-2`. A post whose front
-matter Bjorn cannot read (TOML, JSON, broken YAML, keys twice, not UTF-8) is
-refused rather than rewritten, and everything Bjorn writes is parsed again
-before it is written.
-
-**Images**: only png, jpg, jpeg, gif, webp and avif attachments are published.
-Each linked one is renamed `<slug>-<name>` (web-safe), copied to
-`media_dir/YYYY/MM/`, and its link points at `media_url/YYYY/MM/<file>`; the
-toast lists what to upload. `media_dir` defaults to outside any site, since a
-site repository may be public. With a bundle `path` (`.../{slug}/index.md`)
-images go beside the post instead. A note is refused when an image link would
-break: an image that is not one of its attachments, an svg or other type, or
-images with neither `media_url` nor a bundle. A link to a non-image attachment
-becomes its text.
-
-**Kept off a public site**: the note's tags (tag lines, inline, in the title),
-`bear://` links (reduced to their text), `[[wiki links]]` (reduced to their
-text); a `file://` link refuses the publish. The same pass runs over the
-title (before the slug is made from it) and every value in the note's own
-front matter. Code blocks and inline code are
-left exactly as written. Posts and images are written 0644, the ledger 0600,
-and nothing is written through a symlink or outside `content/<section>`.
-
 ## Actions
 
 `x` exports a note to a file you pick. `!` and `a` hand that same file to a
@@ -334,6 +255,13 @@ as `$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in
 the environment; the file goes away when the command ends. The first line
 the command prints comes back as a toast, and a non-zero exit is reported
 with its stderr. Full reference: [docs/actions.md](docs/actions.md).
+
+Publishing to a [Hugo](https://gohugo.io) site is an action too:
+[`contrib/hugo-publish`](contrib/hugo-publish) writes the note as a post
+(a draft unless you pick the entry that publishes live), keeps its tags,
+wiki links and local links off the site, and never replaces a file it did
+not write. Bjorn itself stays free of Hugo code and network calls. Setup and
+what it guards: [Publish to Hugo](docs/actions.md#publish-to-hugo).
 
 ## Development
 
