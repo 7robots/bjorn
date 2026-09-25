@@ -726,3 +726,134 @@ async fn a_failed_reload_after_d_forgets_the_note_it_was_to_show() {
     h.settle().await;
     assert_eq!(h.app.notes.current().unwrap().id, first);
 }
+
+/// The fake bearcli, run by a `Runner` the tests can put in front of it.
+fn fake_runner(fake: &Fake) -> bjorn::bear::ProcessRunner {
+    bjorn::bear::ProcessRunner {
+        command: vec![env!("CARGO_BIN_EXE_fake-bearcli").to_string()],
+        envs: vec![(
+            "BJORN_FAKE_BEAR_STATE".to_string(),
+            fake.state().to_string_lossy().into_owned(),
+        )],
+    }
+}
+
+/// A bearcli whose `create --if-not-exists` checks and creates apart, and
+/// always loses the race: another process made the note in between, so this
+/// one makes a second.
+struct LosesTheRace(bjorn::bear::ProcessRunner);
+
+impl bjorn::bear::Runner for LosesTheRace {
+    fn run<'a>(
+        &'a self,
+        args: &'a [String],
+        stdin: Option<&'a str>,
+    ) -> futures::future::BoxFuture<'a, Result<bjorn::bear::RawOutput, bjorn::bear::BearError>>
+    {
+        Box::pin(async move {
+            let args: Vec<String> = args
+                .iter()
+                .filter(|a| *a != "--if-not-exists")
+                .cloned()
+                .collect();
+            self.0.run(&args, stdin).await
+        })
+    }
+    fn describe(&self) -> String {
+        "loses-the-race".into()
+    }
+}
+
+#[tokio::test]
+async fn a_duplicate_daily_note_from_a_race_is_warned_about() {
+    let fake = Fake::new();
+    let client = bjorn::bear::BearClient::from_runner(Box::new(LosesTheRace(fake_runner(&fake))));
+    let mut h =
+        bjorn::harness::Harness::new(steady(&fake), std::sync::Arc::new(client), None, (120, 40));
+    h.load().await;
+    // A capture hook in another process makes today's note after Bjorn's
+    // listing, so `D` does not see it and asks bearcli, which makes another.
+    fake.client()
+        .create(TITLE, &[], "## Work log\n")
+        .await
+        .unwrap();
+    h.press("D");
+    h.until(|app| {
+        app.toast_messages().iter().any(|m| {
+            m.to_lowercase()
+                .contains(&format!("“{}” now exists 2 times", TITLE.to_lowercase()))
+        })
+    })
+    .await;
+    assert_eq!(count_titled(&fake, TITLE).await, 2);
+}
+
+/// A bearcli that answers `create` with an id no listing holds: a note
+/// deleted in Bear between the create and Bjorn's next reload.
+struct GhostCreate(bjorn::bear::ProcessRunner);
+
+impl bjorn::bear::Runner for GhostCreate {
+    fn run<'a>(
+        &'a self,
+        args: &'a [String],
+        stdin: Option<&'a str>,
+    ) -> futures::future::BoxFuture<'a, Result<bjorn::bear::RawOutput, bjorn::bear::BearError>>
+    {
+        Box::pin(async move {
+            if args.first().is_some_and(|a| a == "create") {
+                return Ok(bjorn::bear::RawOutput {
+                    status: 0,
+                    stdout: br#"[{"id": "GHOST", "location": "notes"}]"#.to_vec(),
+                    stderr: String::new(),
+                });
+            }
+            self.0.run(args, stdin).await
+        })
+    }
+    fn describe(&self) -> String {
+        "ghost-create".into()
+    }
+}
+
+#[tokio::test]
+async fn d_says_so_when_todays_note_cannot_be_shown() {
+    let fake = Fake::new();
+    let client = bjorn::bear::BearClient::from_runner(Box::new(GhostCreate(fake_runner(&fake))));
+    let mut h =
+        bjorn::harness::Harness::new(steady(&fake), std::sync::Arc::new(client), None, (120, 40));
+    h.load().await;
+    let first = h.app.notes.current().unwrap().id.clone();
+    let view = h.app.selection.clone();
+    h.press("D");
+    h.until(|app| {
+        app.toast_messages()
+            .iter()
+            .any(|m| m == bjorn::app::GONE_FROM_THE_LIST)
+    })
+    .await;
+    assert!(
+        !h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.starts_with("Today:")),
+        "{:?}",
+        h.app.toast_messages()
+    );
+    assert_eq!(h.app.notes.current().unwrap().id, first);
+    assert_eq!(h.app.selection, view, "nothing moved");
+}
+
+#[tokio::test]
+async fn d_names_todays_note_once_it_is_shown() {
+    let fake = Fake::new();
+    let mut h = fake.harness_with(steady(&fake), None);
+    h.load().await;
+    h.press("D");
+    h.until(|app| {
+        app.toast_messages()
+            .iter()
+            .any(|m| m == &format!("Today: “{TITLE}”"))
+    })
+    .await;
+    assert_eq!(h.app.notes.current().unwrap().title, TITLE);
+}

@@ -57,6 +57,8 @@ pub const CONTENT_CACHE_BYTES: usize = 24 * 1024 * 1024;
 pub const PREFETCH_RADIUS: usize = 3;
 /// Read-aheads allowed in flight at once; bearcli is a process per call.
 pub const PREFETCH_INFLIGHT: usize = 2;
+/// What a screen says when the note behind a row cannot be shown any more.
+pub const GONE_FROM_THE_LIST: &str = "That note is no longer in the list — press r to refresh.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -489,7 +491,18 @@ impl App {
             self.edit_note(note);
         }
         if let Some(id) = self.pending_reveal.take() {
-            self.reveal_note(&id);
+            if self.reveal_note(&id) {
+                // Said only once the note is on screen. The title is Bear's,
+                // so it is shown without control characters.
+                let title: String = self
+                    .notes
+                    .current()
+                    .map(|n| n.title.chars().filter(|c| !c.is_control()).collect())
+                    .unwrap_or_default();
+                self.notify(&format!("Today: “{title}”"), Duration::from_secs(3));
+            } else {
+                self.notify(GONE_FROM_THE_LIST, Duration::from_secs(5));
+            }
         }
     }
 
@@ -604,7 +617,9 @@ impl App {
             },
             Msg::DailyReady { title, result } => match result {
                 Ok(id) => {
-                    self.notify(&format!("Today: “{title}”"), Duration::from_secs(3));
+                    // A second note by this title is what a race with another
+                    // process leaves behind; the reload below warns about it.
+                    self.note_written(&title);
                     self.pending_reveal = Some(id);
                     self.start_reload(None, None, false);
                 }
@@ -1393,7 +1408,9 @@ impl App {
             .find(|n| n.location == Location::Notes && n.title.to_lowercase() == wanted)
             .map(|n| n.id.clone());
         if let Some(id) = known {
-            self.reveal_note(&id);
+            if !self.reveal_note(&id) {
+                self.notify(GONE_FROM_THE_LIST, Duration::from_secs(5));
+            }
             return;
         }
         let client = self.client.clone();
@@ -1410,9 +1427,14 @@ impl App {
     /// Select `id` in the notes list and show it in the reader. When the list
     /// in view does not hold it, widen to the view its location belongs in,
     /// leaving the workspace only when the note is outside it.
-    pub fn reveal_note(&mut self, id: &str) {
+    ///
+    /// False means the jump did not happen, and the caller must say so rather
+    /// than report the note as shown. An id the snapshot does not hold is
+    /// refused before anything is touched, so the view and the cursor stay
+    /// where they were.
+    pub fn reveal_note(&mut self, id: &str) -> bool {
         let Some(note) = self.snapshot.by_id(id).cloned() else {
-            return;
+            return false;
         };
         if !self.notes.select_id(id) {
             if !in_workspace(&note, &self.selection.workspace) {
@@ -1423,11 +1445,14 @@ impl App {
                 Location::Archive => View::Archive,
                 _ => View::All,
             });
-            self.notes.select_id(id);
+            if !self.notes.select_id(id) {
+                return false;
+            }
         }
         if let Some(current) = self.notes.current().cloned() {
             self.schedule_preview(current, true, false);
         }
+        true
     }
 
     fn create_note(&mut self, title: String, tags: String, content: String) {
