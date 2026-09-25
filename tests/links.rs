@@ -798,3 +798,91 @@ async fn backspace_goes_on_back_past_a_restored_search() {
     assert_eq!(h.app.notes.search.value, "velocit");
     assert_eq!(h.app.forward.len(), 1);
 }
+
+#[tokio::test]
+async fn a_link_with_a_bare_slash_tries_the_whole_title_first() {
+    let fake = Fake::new();
+    let client = fake.client();
+    let a = client
+        .create("A", &[], "# A\n\n## B testing\n\nRuns.\n")
+        .await
+        .unwrap();
+    let linker = client
+        .create("Linker", &[], "# Linker\n\nSee [[A/B testing]].\n")
+        .await
+        .unwrap();
+    let mut h = fake.harness();
+    h.load().await;
+    h.app.follow_note(&linker);
+    h.until(|app| reader_on(app, &linker)).await;
+
+    // Only `A` exists: the link is its heading.
+    h.press("L");
+    h.until(backlinks_loaded).await;
+    h.press("enter");
+    assert!(h.app.overlay.is_none(), "{:?}", h.app.overlay);
+    h.until(|app| reader_on(app, &a)).await;
+    assert!(
+        !h.app
+            .toast_messages()
+            .iter()
+            .any(|m| m.starts_with("No heading")),
+        "“B testing” is a heading of A: {:?}",
+        h.app.toast_messages()
+    );
+
+    // Once a note is called `A/B testing`, the link is that note.
+    let whole = client
+        .create("A/B testing", &[], "# A/B testing\n\nThe note.\n")
+        .await
+        .unwrap();
+    h.press("r");
+    h.until(|app| app.resolve_title("A/B testing").is_some())
+        .await;
+    h.app.follow_note(&linker);
+    h.until(|app| reader_on(app, &linker)).await;
+    h.press("L");
+    h.until(backlinks_loaded).await;
+    let (outgoing, _) = link_lists(&h);
+    assert_eq!(labels(&outgoing), vec!["A/B testing"]);
+    h.press("enter");
+    h.until(|app| reader_on(app, &whole)).await;
+
+    // And it finds the link back, though the slash is not escaped.
+    h.press("L");
+    h.until(backlinks_loaded).await;
+    let (_, backlinks) = link_lists(&h);
+    assert_eq!(labels(&backlinks), vec!["Linker"]);
+}
+
+#[tokio::test]
+async fn a_link_with_a_bare_slash_to_nothing_offers_the_whole_title() {
+    let fake = Fake::new();
+    let editor = fake_editor(fake.dir.path(), "exit 0");
+    let environ: HashMap<String, String> = [("EDITOR".to_string(), editor)].into();
+    let client = fake.client();
+    let linker = client
+        .create("Linker", &[], "# Linker\n\nSee [[A/B testing]].\n")
+        .await
+        .unwrap();
+    let mut h = fake.harness_env(environ);
+    h.load().await;
+    h.app.follow_note(&linker);
+    h.until(|app| reader_on(app, &linker)).await;
+    h.press("L");
+    h.until(backlinks_loaded).await;
+    let (outgoing, _) = link_lists(&h);
+    assert_eq!(labels(&outgoing), vec!["A/B testing"]);
+    assert!(outgoing[0].missing);
+    h.press("enter");
+    match &h.app.overlay {
+        Some(Overlay::Confirm { message, .. }) => {
+            assert!(message.contains("“A/B testing”"), "{message}")
+        }
+        other => panic!("expected the confirm dialog: {other:?}"),
+    }
+    h.press("y");
+    h.until(|app| app.resolve_title("A/B testing").is_some())
+        .await;
+    assert!(h.app.resolve_title("A").is_none());
+}

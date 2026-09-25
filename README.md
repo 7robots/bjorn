@@ -99,8 +99,11 @@ ASCII punctuation is one, and `[[/Heading]]` points into the note itself.
 Some links carry a doubled escape (`[[Cloud Arch \\/ EA/Apr 19]]`, for the
 note `Cloud Arch / EA`); rather than guess the rule, a link is read as
 written first and then with each doubled escape taken as one, and the first
-reading that names a note wins. Only when no reading does is creating a note
-offered. Whatever is between the brackets is the title, markdown
+reading that names a note wins. A link that escapes no `/` is also read
+whole first: `[[A/B testing]]` is the note `A/B testing` if there is one, and
+otherwise the heading `B testing` in `A`. Only when no reading names a note
+is creating one offered, under the first reading's title (`A/B testing`, so
+nothing the link says is dropped). Whatever is between the brackets is the title, markdown
 or not (`[[Q&A]]`, a backtick, `*`); brackets in a title work as long as they
 pair up (`[[[Draft] Plan]]`), but a title holding `]]` cannot be linked.
 Brackets inside code, inline or fenced, are left as written.
@@ -109,7 +112,8 @@ Brackets inside code, inline or fenced, are left as written.
 that link to it, under a search box like the action menu's; `enter` follows.
 The backlinks come from a `bearcli search` for the phrase `[[Title`, with the
 title's `/` and `#` escaped as Bear writes them (a title needing that is
-searched for in both the single and the doubled form), run in the background,
+searched for in both the single and the doubled form, and a title with a `/`
+also with the slash bare), run in the background,
 one search at a time. Bear matches a phrase as a prefix, so
 Bjorn parses every candidate's body and keeps only real links to this title:
 not `[[Title 2]]`, not a mention inside code, nothing from the trash. At most

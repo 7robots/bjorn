@@ -2625,11 +2625,14 @@ impl App {
     /// one. A title no note has offers to create that note.
     pub fn follow_link(&mut self, link: WikiLink) {
         let Some((note, link)) = self.link_target(&link) else {
-            // No reading names a note: offer the one as written.
+            // No reading names a note: offer the first, the most literal.
+            // For `[[A/B testing]]` that is the whole text, so nothing the
+            // link says is dropped, and the link then resolves to what it made.
+            let title = link.readings().swap_remove(0).title;
             self.overlay = Some(Overlay::Confirm {
-                message: format!("No note is called “{}”. Create it?", link.title),
+                message: format!("No note is called “{title}”. Create it?"),
                 confirm_label: "Create".into(),
-                action: Pending::CreateLinked(link.title),
+                action: Pending::CreateLinked(title),
             });
             return;
         };
@@ -2913,8 +2916,10 @@ impl App {
 
     fn outgoing_row(&self, link: WikiLink) -> LinkRow {
         let target = self.link_target(&link);
-        // The reading that resolved names the target best.
-        let reading = target.as_ref().map_or(&link, |(_, r)| r);
+        // The reading that resolved names the target best; with none, the
+        // one `enter` would create.
+        let first = link.readings().swap_remove(0);
+        let reading = target.as_ref().map_or(&first, |(_, r)| r);
         let label = if link.alias.is_empty() {
             reading.target_label()
         } else {

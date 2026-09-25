@@ -12,7 +12,13 @@
 //! has more than one reading (`WikiLink::readings`): as written, then with
 //! each `\\` before punctuation taken as a single escape. Following a link
 //! takes the first reading whose title is a note; only when none is does it
-//! offer to create one.
+//! offer to create one, named by the first reading.
+//!
+//! A link that escapes no `/` may name a title with a slash in it:
+//! `[[A/B testing]]` is the note `A/B testing` as readily as the heading
+//! `B testing` in `A`. So such a link is first read whole, as a title, then
+//! split. Once a link escapes a `/` (`\/` or `\\/`), its bare `/` is the
+//! heading separator and there is no whole reading.
 //!
 //! A link runs from `[[` to the first `]]` after it on the same line; a `]`
 //! right after that belongs to the title while a `[` in it is still open, so
@@ -75,10 +81,12 @@ pub struct WikiLink {
 impl WikiLink {
     /// Parse the text between `[[` and `]]`; None when it names nothing.
     pub fn parse(inner: &str) -> Option<WikiLink> {
-        Self::parse_as(inner, inner)
+        Self::parse_as(inner, inner, true)
     }
 
-    fn parse_as(text: &str, raw: &str) -> Option<WikiLink> {
+    /// Parse `text`, keeping `raw` as the link as written. With `split`
+    /// false a bare `/` is part of the title, for the whole reading.
+    fn parse_as(text: &str, raw: &str, split: bool) -> Option<WikiLink> {
         // 0 title, 1 section, 2 alias.
         let mut parts = [String::new(), String::new(), String::new()];
         let mut at = 0;
@@ -88,7 +96,7 @@ impl WikiLink {
                 '\\' if chars.peek().is_some_and(char::is_ascii_punctuation) => {
                     parts[at].push(chars.next().unwrap_or(ch));
                 }
-                '/' if at == 0 => at = 1,
+                '/' if at == 0 && split => at = 1,
                 '|' if at < 2 => at = 2,
                 other => parts[at].push(other),
             }
@@ -104,9 +112,38 @@ impl WikiLink {
 
     /// The ways to read this link, most literal first: as written, then, when
     /// it holds a doubled escape (`\\/`), with each `\\` before punctuation
-    /// taken as one escape. A caller takes the first whose title resolves.
+    /// taken as one escape. A link that escapes no `/` and names a heading is
+    /// read whole, as a title, before it is split (`[[A/B testing]]`). A
+    /// caller takes the first whose title resolves.
     pub fn readings(&self) -> Vec<WikiLink> {
-        let mut out = vec![self.clone()];
+        let mut out: Vec<WikiLink> = Vec::new();
+        let whole = !self.raw.contains("\\/");
+        for (text, reading) in self.spellings() {
+            let mut add = |link: WikiLink| {
+                if !out
+                    .iter()
+                    .any(|r| (&r.title, &r.section) == (&link.title, &link.section))
+                {
+                    out.push(link);
+                }
+            };
+            if whole
+                && !reading.title.is_empty()
+                && !reading.section.is_empty()
+                && let Some(entire) = Self::parse_as(&text, &self.raw, false)
+            {
+                add(entire);
+            }
+            add(reading);
+        }
+        out
+    }
+
+    /// The link as written and, when it holds a doubled escape, with each
+    /// `\\` before punctuation collapsed to one: each with the text it was
+    /// parsed from. A link built by hand (no `raw`) has only itself.
+    fn spellings(&self) -> Vec<(String, WikiLink)> {
+        let mut out = vec![(self.raw.clone(), self.clone())];
         if self.raw.contains("\\\\") {
             let mut collapsed = String::with_capacity(self.raw.len());
             let mut chars = self.raw.chars().peekable();
@@ -123,23 +160,25 @@ impl WikiLink {
                     }
                 }
             }
-            if let Some(other) = Self::parse_as(&collapsed, &self.raw)
+            if let Some(other) = Self::parse_as(&collapsed, &self.raw, true)
                 && (&other.title, &other.section) != (&self.title, &self.section)
             {
-                out.push(other);
+                out.push((collapsed, other));
             }
         }
         out
     }
 
     /// What the reader shows in place of the brackets. A link with more than
-    /// one reading is shown as written, since which one Bear meant is only
-    /// known once a title resolves.
+    /// one spelling (a doubled escape) is shown as written, since which one
+    /// Bear meant is only known once a title resolves. The whole reading of
+    /// `[[A/B testing]]` does not count: it is drawn `A › B testing`, as
+    /// Bear's own heading-link syntax reads it.
     pub fn label(&self) -> String {
         if !self.alias.is_empty() {
             return self.alias.clone();
         }
-        if self.readings().len() > 1 {
+        if self.spellings().len() > 1 {
             return self.raw.clone();
         }
         self.target_label()
@@ -320,7 +359,9 @@ impl LinkTable {
 /// `[[Title`, with the title's `/` and `#` escaped the way Bear writes them
 /// (`\/`, `\#`; an escaped phrase matches escaped text and an unescaped one
 /// does not). Links with a doubled escape (`\\/`) exist too, so a title that
-/// needs escaping gets a second phrase written that way. Bear matches a
+/// needs escaping gets a second phrase written that way, and a title with a
+/// `/` a third with the slash bare, for `[[A/B testing]]` (see `readings`).
+/// Bear matches a
 /// phrase ignoring case and as a prefix, so `[[Title 2]]` and
 /// `[[Title/Heading]]` come back too; `backlinks` sorts them out.
 ///
@@ -348,6 +389,9 @@ pub fn backlink_queries(title: &str) -> Vec<String> {
     let mut out = vec![escaped("\\")];
     if usable.contains(BEAR_ESCAPES) {
         out.push(escaped("\\\\"));
+    }
+    if usable.contains('/') {
+        out.push(format!("\"[[{usable}\""));
     }
     out
 }
@@ -508,6 +552,53 @@ mod tests {
         assert_eq!(WikiLink::parse("Plain").unwrap().readings().len(), 1);
     }
 
+    #[test]
+    fn a_bare_slash_is_read_whole_before_it_is_split() {
+        let ab = WikiLink::parse("A/B testing").unwrap();
+        let readings: Vec<WikiLink> = ab.readings().into_iter().map(bare).collect();
+        assert_eq!(
+            readings,
+            vec![link_of("A/B testing", ""), link_of("A", "B testing")]
+        );
+        assert!(ab.points_to("a/b testing"));
+        assert!(ab.points_to("A"));
+        assert_eq!(ab.label(), "A › B testing", "drawn as Bear's heading link");
+        // The alias rides along on the whole reading.
+        let aliased = WikiLink::parse("Plan/Spring|see spring").unwrap();
+        assert_eq!(
+            aliased.readings().into_iter().map(bare).collect::<Vec<_>>(),
+            vec![
+                link("Plan/Spring", "", "see spring"),
+                link("Plan", "Spring", "see spring")
+            ]
+        );
+        // Nothing to split, or no title before the slash: one reading.
+        assert_eq!(WikiLink::parse("Plan").unwrap().readings().len(), 1);
+        assert_eq!(WikiLink::parse("/Tasks").unwrap().readings().len(), 1);
+    }
+
+    #[test]
+    fn a_link_that_escapes_a_slash_is_never_read_whole() {
+        // It spells the title's own slash `\/`, so the bare one is a heading.
+        let escaped = WikiLink::parse(r"New\/Modern DNS/ESXi").unwrap();
+        assert_eq!(
+            escaped.readings().into_iter().map(bare).collect::<Vec<_>>(),
+            vec![link_of("New/Modern DNS", "ESXi")]
+        );
+        let doubled = WikiLink::parse(r"Cloud Arch \\/ EA/Apr 19").unwrap();
+        assert!(
+            doubled.readings().iter().all(|r| !r.section.is_empty()),
+            "{:?}",
+            doubled.readings()
+        );
+    }
+
+    #[test]
+    fn a_hand_built_link_has_only_its_own_reading() {
+        let built = link_of("Sprint Planning", "Notes");
+        assert_eq!(built.readings(), vec![built.clone()]);
+    }
+
     fn link_of(title: &str, section: &str) -> WikiLink {
         link(title, section, "")
     }
@@ -571,7 +662,11 @@ mod tests {
         assert_eq!(backlink_queries("Garden Plan"), vec!["\"[[Garden Plan\""]);
         assert_eq!(
             backlink_queries("New/Modern"),
-            vec![r#""[[New\/Modern""#, r#""[[New\\/Modern""#]
+            vec![
+                r#""[[New\/Modern""#,
+                r#""[[New\\/Modern""#,
+                r#""[[New/Modern""#
+            ]
         );
         assert_eq!(
             backlink_queries("Presentation Session #1"),
