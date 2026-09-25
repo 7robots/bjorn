@@ -707,14 +707,12 @@ fn kill_group(child: &mut std::process::Child) {
     // The whole group, not just the one process: a browser leaves helpers
     // behind, and they are still writing to a profile that is about to be
     // deleted. `process_group(0)` made the child its own leader, so the
-    // negative pid names them all. `/bin/kill` rather than a `libc`
-    // dependency for the one call.
-    let _ = Command::new("/bin/kill")
-        .arg("-KILL")
-        .arg(format!("-{}", child.id()))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // group id is its pid. The same call a timed-out action gets.
+    // SAFETY: killpg takes plain integers; the group is the converter's own,
+    // so nothing else is in it.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
