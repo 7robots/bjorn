@@ -150,7 +150,7 @@ in Bear.app at that section, `/` filters, `r` reloads, `esc` or `q` closes.
 With `[reminders] enabled = true` and [remctl](https://github.com/7robots/remctl)
 on your PATH, `a` also pushes marked items to Apple Reminders. Each reminder's
 notes carry the note's `bear://` link and a `bear-todo: <key>` line (the same
-scheme remtui uses, so reminders it created are recognised); on every load
+scheme remtui uses, so reminders it created are recognized); on every load
 they are read back and rows show ⏰ for an open reminder or ✓ for one you
 completed in Reminders, ready to `x` in Bear. Nothing is written into Bear when
 a reminder is added.
@@ -257,15 +257,16 @@ directory, an absolute or `~/` path is taken as it is.
 ## Configuration
 
 `~/.config/bjorn/config.toml` (or `$XDG_CONFIG_HOME/bjorn/config.toml`), or
-`--config PATH`. Every key is optional:
+`--config PATH`. Every key is optional. The block below is a sample, not a
+list of defaults: each line says whether its value is the default or an example.
 
 ```toml
-editor = "nvim"               # overrides $VISUAL / $EDITOR
+editor = "nvim"               # example; unset falls back to $VISUAL, $EDITOR, vim
 export_dir = "~/Downloads"    # where `x` proposes to write
 export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle | pdf
 poll_seconds = 5              # 0 disables the background refresh
-workspace = "work"            # start scoped to this tag
-bearcli = "/usr/local/bin/bearcli"  # optional; default searches PATH, then Bear.app
+workspace = "work"            # example; unset starts unscoped
+bearcli = "/usr/local/bin/bearcli"  # example; unset searches PATH, then Bear.app
 icon_style = "auto"           # auto | nerd | emoji | lucide | none
 theme = "red-graphite-dark"   # see Themes below; `bjorn --list-themes` prints the names
 
@@ -275,7 +276,7 @@ school = "emoji:🎓"
 
 [reminders]                   # triage can push todos to Apple Reminders
 enabled = false               # off by default
-list = "Bear"                 # target list; remctl's default when empty
+list = "Bear"                 # example; unset uses remctl's own default list
 due = "today"                 # due date for new reminders; "" for none
 remctl = ""                   # path to remctl; default searches PATH
 
@@ -337,14 +338,37 @@ bjorn --theme nord
 
 They are generated from the theme files inside Bear.app by
 `tools/bear_theme.py`, which maps Bear's keys onto the app's palette fields
-(page, sidebar, headers, cursor, links, code, tags). The toast colours come
-from the palette a theme is named after, or from Bear's highlighter colours
+(page, sidebar, headers, cursor, links, code, tags). The toast colors come
+from the palette a theme is named after, or from Bear's highlighter colors
 for Bear's own designs; text over the accent is chosen for contrast. When a
 Bear update adds a theme, `python3 tools/bear_theme.py > src/ui/palettes.rs`
 picks it up. `?` inside the app lists the names and marks the one in use.
 
 An unknown name in the config falls back to the default with a warning rather
 than stopping the app. An unknown `--theme` on the command line is an error.
+
+#### Your own themes
+
+Bjorn also reads Bear's `.theme` format from `~/.config/bjorn/themes/` (or
+`$XDG_CONFIG_HOME/bjorn/themes/`; with `--config`, from `themes/` beside that
+file). Drop a file there and name it with `--theme` or `theme =`:
+`My Nord.theme` is `my-nord`. Symlinks are followed, so a dotfile manager can
+link files into place. The file is JSON with `base`, `sidebar`, `notes` and
+`editor` sections; a value may be a `$section.key` reference, and
+`meta."base theme"` names a theme to inherit from, looked up in the same
+directory first and then among the built-in themes. Only
+`base.background color`, `base.text color` and `base.accent color` are
+required. `--list-themes` reports on stderr any file it skipped and why, and
+`--theme` naming a file that did not load says what is wrong with it.
+
+Bear's own theme files are Shiny Frog's and are not in this repository, but
+you can copy any of them out of Bear.app as a starting point; see
+[`config/themes/`](config/themes/README.md) for the path, a manifest of their
+hashes, and a few themes written for Bjorn. Give the copy a new name: a
+built-in name always wins over a file.
+
+[`config/config.toml.example`](config/config.toml.example) is a commented
+config file with every key at its default.
 
 ### Icons
 
@@ -478,3 +502,7 @@ The plan and its status live in `docs/plans/bjorn-rust.md`; deferred work in
 
 Bjorn exists because of [Shiny Frog](https://shinyfrog.net) and Bear, and
 `bearcli` is what makes a terminal client possible at all. Thank you.
+
+Most of the built-in themes are color palettes derived from
+Bear's theme designs, which are Shiny Frog's. Their theme files are not
+included in this repository.

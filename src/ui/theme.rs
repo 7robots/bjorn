@@ -5,17 +5,21 @@
 //! coral red (`#CD5654`, sampled from Bear) for every accent. `textual-dark`
 //! is the original palette, a dark grey page with blue and amber accents. The
 //! rest, in `palettes`, are generated from Bear's own theme files by
-//! `tools/bear_theme.py`.
+//! `tools/bear_theme.py`. More can be added without a rebuild: any Bear
+//! `.theme` file in `themes_dir()` is offered after the built-ins, under its
+//! file name (see `bear_theme`).
 //!
-//! The active theme is a process-wide index into `THEMES`, set once from the
-//! config at startup, so drawing code can read it without threading a
-//! reference through every function.
+//! The active theme is a process-wide index into the built-ins followed by the
+//! user's themes, set once from the config at startup, so drawing code can read
+//! it without threading a reference through every function.
 
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};
 
-use super::palettes;
+use super::{bear_theme, palettes};
 
 pub const fn rgb(hex: u32) -> Color {
     Color::Rgb(
@@ -28,7 +32,7 @@ pub const fn rgb(hex: u32) -> Color {
 /// Every colour the app draws with. Panes carry their own surface and text
 /// colours because Bear's Red Graphite puts a graphite sidebar next to a white
 /// notes list; in `textual-dark` the two are simply equal.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
     pub name: &'static str,
     /// True when the terminal behind this theme is expected to be dark. Only
@@ -300,18 +304,101 @@ pub const DEFAULT_THEME: &str = "red-graphite-dark";
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
+static DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where the user's own `.theme` files live: `themes/` beside the config
+/// file, so `--config` brings its own themes along. That is
+/// `${XDG_CONFIG_HOME:-~/.config}/bjorn/themes` unless `use_config` named
+/// another file.
+pub fn themes_dir() -> PathBuf {
+    DIR.get().cloned().unwrap_or_else(|| themes_dir_for(None))
+}
+
+/// Read themes from beside `config` (the file `--config` named) rather than
+/// the default. Only the first call counts, and it has to come before
+/// anything asks for a theme past the built-ins.
+pub fn use_config(config: Option<&Path>) {
+    if config.is_some() {
+        let _ = DIR.set(themes_dir_for(config));
+    }
+}
+
+/// `themes/` in the directory holding `config`, or in the default config
+/// directory without one.
+fn themes_dir_for(config: Option<&Path>) -> PathBuf {
+    let Some(config) = config else {
+        return crate::config::config_dir().join("themes");
+    };
+    let config = crate::util::expand_tilde(&config.to_string_lossy());
+    match config.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join("themes"),
+        _ => PathBuf::from("themes"),
+    }
+}
+
+static USER: OnceLock<bear_theme::Loaded> = OnceLock::new();
+
+/// The themes directory, loaded: the themes it offers, which exclude any a
+/// built-in already names (the built-ins always win), and the files it set
+/// aside. Read once, and only when something asks past the built-ins.
+fn loaded() -> &'static bear_theme::Loaded {
+    USER.get_or_init(|| bear_theme::load_dir(&themes_dir(), THEMES))
+}
+
+fn user() -> &'static [Theme] {
+    &loaded().themes
+}
+
+/// The `.theme` files in `themes_dir()` that are not offered, and why.
+pub fn skipped() -> &'static [bear_theme::Skipped] {
+    &loaded().skipped
+}
+
+/// Why no theme is called `name` although a file of that name is in the
+/// themes directory: the file and what is wrong with it, on one line.
+/// `None` when there is such a theme, or no such file.
+pub fn why_not(name: &str) -> Option<String> {
+    if lookup(name).is_some() {
+        return None;
+    }
+    explain(name, skipped())
+}
+
+/// The line `why_not` gives, from the files set aside in `skipped`.
+fn explain(name: &str, skipped: &[bear_theme::Skipped]) -> Option<String> {
+    let wanted = bear_theme::slug(name);
+    skipped
+        .iter()
+        .find(|s| s.name() == wanted)
+        .map(|s| format!("{} did not load: {}", s.shown_path(), s.problem))
+}
+
 /// The theme every drawing function reads.
 #[inline]
 pub fn current() -> &'static Theme {
     // The index only ever comes from `set`, which bounds it.
-    &THEMES[ACTIVE.load(Ordering::Relaxed)]
+    let index = ACTIVE.load(Ordering::Relaxed);
+    THEMES
+        .get(index)
+        .unwrap_or_else(|| &user()[index - THEMES.len()])
 }
 
-/// The theme called `name`, spelling-insensitively; `None` when there is no
-/// such theme.
+/// The theme called `name`, ignoring case, spacing and accents (`Rosé Pine`,
+/// `rose-pine`); `None` when there is no such theme.
 pub fn lookup(name: &str) -> Option<usize> {
-    let wanted = name.trim().to_ascii_lowercase();
-    THEMES.iter().position(|t| t.name == wanted)
+    find(name, user)
+}
+
+/// `lookup` over the built-ins, then over `extra`, which is only called when
+/// no built-in matches, so naming a built-in never reads the themes directory.
+fn find(name: &str, extra: impl FnOnce() -> &'static [Theme]) -> Option<usize> {
+    let wanted = bear_theme::slug(name);
+    THEMES.iter().position(|t| t.name == wanted).or_else(|| {
+        extra()
+            .iter()
+            .position(|t| t.name == wanted)
+            .map(|i| THEMES.len() + i)
+    })
 }
 
 /// Make `name` the active theme; false (and no change) when there is no such
@@ -328,7 +415,7 @@ pub fn set(name: &str) -> bool {
 
 /// Every theme name, in the order they are offered.
 pub fn names() -> impl Iterator<Item = &'static str> {
-    THEMES.iter().map(|t| t.name)
+    THEMES.iter().chain(user()).map(|t| t.name)
 }
 
 // -- the styles the drawing code asks for ------------------------------------
@@ -530,8 +617,56 @@ mod tests {
             THEMES[lookup("  Red-Graphite ").unwrap()].name,
             "red-graphite"
         );
-        assert!(lookup("mauve").is_none());
-        assert_eq!(names().count(), THEMES.len());
+        assert_eq!(THEMES[lookup("Rosé Pine").unwrap()].name, "rose-pine");
+        assert_eq!(THEMES[lookup("D.Boring").unwrap()].name, "d-boring");
+    }
+
+    #[test]
+    fn built_in_names_never_read_the_themes_directory() {
+        let untouched = || -> &'static [Theme] { panic!("the themes directory was read") };
+        for theme in THEMES {
+            assert!(find(&theme.name.to_uppercase(), untouched).is_some());
+        }
+        assert_eq!(find("mauve", || &[]), None);
+        assert_eq!(find("mauve", || &THEMES[..1]), None);
+        assert_eq!(find("red-graphite-dark", || &[]), Some(0));
+    }
+
+    /// `--config` brings its own themes directory: `themes/` beside the file.
+    #[test]
+    fn the_themes_directory_sits_beside_the_config_file() {
+        assert_eq!(
+            themes_dir_for(None),
+            crate::config::config_dir().join("themes")
+        );
+        assert_eq!(
+            themes_dir_for(Some(Path::new("/etc/bjorn/work.toml"))),
+            Path::new("/etc/bjorn/themes")
+        );
+        assert_eq!(
+            themes_dir_for(Some(Path::new("~/dots/bjorn.toml"))),
+            crate::util::home_dir().join("dots/themes")
+        );
+        assert_eq!(
+            themes_dir_for(Some(Path::new("bjorn.toml"))),
+            Path::new("themes")
+        );
+    }
+
+    /// A theme that exists as a file but did not load is explained, by the
+    /// file and the reason, under any spelling of its name.
+    #[test]
+    fn a_file_that_did_not_load_is_explained_by_name() {
+        let skipped = [bear_theme::Skipped {
+            path: PathBuf::from("/t/My Nord.theme"),
+            problem: bear_theme::Problem::MissingColor("base.accent color".into()),
+        }];
+        assert_eq!(
+            explain("MY NORD", &skipped).as_deref(),
+            Some("/t/My Nord.theme did not load: missing color `base.accent color`")
+        );
+        assert_eq!(explain("my-nord", &skipped), explain("My Nord", &skipped));
+        assert_eq!(explain("mauve", &skipped), None);
     }
 
     #[test]

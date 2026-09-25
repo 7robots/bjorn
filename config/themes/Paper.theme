@@ -1,0 +1,40 @@
+{
+  "meta": {},
+  "base": {
+    "background color": "#FBF8F1",
+    "background secondary color": "#F1ECE0",
+    "background tertiary color": "#E6DFCF",
+    "text color": "#2E2A24",
+    "text secondary color": "#7A7266",
+    "accent color": "#2F6FA3",
+    "stroke color": "#DDD5C4"
+  },
+  "sidebar": {
+    "background color": "#2E2A24",
+    "background secondary color": "#443E35",
+    "text color": "#E9E3D6",
+    "text secondary color": "#B8AF9F",
+    "stroke color": "$sidebar.background color"
+  },
+  "notes": {
+    "selection background color": "$base.background secondary color"
+  },
+  "editor": {
+    "headers": { "text color": "$base.text color" },
+    "link color": "$base.accent color",
+    "list marker color": "$base.accent color",
+    "code": {
+      "text color": "$base.text color",
+      "background color": "$base.background secondary color"
+    },
+    "tag": {
+      "text color": "$base.text color",
+      "background color": "$base.background tertiary color"
+    },
+    "highlighter": {
+      "green": { "background color": "#CFE8C4" },
+      "yellow": { "background color": "#F4E3A1" },
+      "red": { "background color": "#F2C6C2" }
+    }
+  }
+}

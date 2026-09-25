@@ -73,7 +73,11 @@ Read this config file instead of
 A leading
 .B ~
 is expanded.
-This is also the file the action menu writes to.
+This is also the file the action menu writes to, and
+.I .theme
+files are then read from
+.I themes/
+beside it.
 .TP
 .B \-\-demo
 Run against a built\-in fake
@@ -88,14 +92,19 @@ so the sample library never stands in for the real one.
 .BI \-\-theme " NAME"
 Draw with this palette, overriding
 .I theme
-in the config file. A name typed here was typed just now, so an unknown one is
-an error that lists the names. An unknown name in the
+in the config file. The name is a built\-in or one of your own theme files (see
+.BR THEMES ).
+A name typed here was typed just now, so an unknown one is
+an error that lists the names and the directory searched, and a theme file that
+exists but does not load is named with the reason. An unknown name in the
 config file is not: it falls back to the default with a warning inside the app.
 .TP
 .B \-\-list\-themes
 Print the names
 .B \-\-theme
-accepts, one per line, and exit. This runs before the config file is read.
+accepts, one per line, and exit: the built\-ins, then your own theme files.
+A theme file that does not load is reported on standard error with the reason.
+This runs before the config file is read.
 .TP
 .B \-\-no\-mouse\-pixels
 Accepted and ignored. The Rust build never negotiates pixel mouse reporting;
@@ -1061,6 +1070,37 @@ and the rest. Their colors are generated from Bear's own theme files by
 .I tools/bear_theme.py
 and committed to the repository; no build step or code path reads Bear.app, so
 a Bear update cannot break a shipped Bjorn.
+.PP
+Your own themes are Bear\-format
+.I .theme
+files in
+.I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/themes/
+(or
+.I themes/
+beside the file
+.B \-\-config
+names). A file's name, lower\-cased with hyphens for spaces and accents
+folded, is its theme name:
+.I My Nord.theme
+is
+.BR my\-nord .
+Built\-in names always win, and naming a built\-in never reads the directory.
+A file needs only
+.BR "base.background color" ,
+.B "base.text color"
+and
+.BR "base.accent color" ;
+the rest falls back to the nearest color it has.
+.B $section.key
+references resolve, and
+.B meta.\(dqbase theme\(dq
+names a base looked up in the same directory and then among the built\-ins.
+Only top\-level files are read, a symlink is followed to a regular file only,
+and a file over 256 KB is skipped. Two files with one name resolve in file name
+order.
+.I config/themes/
+in the repository has three hand\-written examples (Paper, Paper Night, Nord
+Ember) and says where to copy Bear's own theme files from.
 .SH CONFIGURATION
 .IR "${XDG_CONFIG_HOME:\-~/.config}/bjorn/config.toml" ,
 or the file named with
@@ -1292,6 +1332,12 @@ and the test suite run. They have no effect on a real run.
 .TP
 .I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/config.toml
 The config file. Edited as text, so comments survive.
+.TP
+.I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/themes/
+Your own
+.I .theme
+files (see
+.BR THEMES ).
 .TP
 .I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/templates/
 Note templates for
