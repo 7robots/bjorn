@@ -48,6 +48,10 @@ pub struct Heading {
     pub block: usize,
 }
 
+/// The widest a table column is padded to, in terminal cells. Wider than any
+/// reader pane in practice, so a normal table still lines up exactly.
+const MAX_COLUMN_WIDTH: usize = 120;
+
 static MARK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^</?(mark|u|tags)>$").unwrap());
 
 /// Bear-only syntax rewritten into inline HTML the renderer understands, with
@@ -268,6 +272,10 @@ impl Renderer {
         theme::heading(level as u8)
     }
 
+    /// Cells are padded to their column's width so the rules line up, but a
+    /// column is never padded past `MAX_COLUMN_WIDTH`: a wider cell is drawn in
+    /// full and wraps. Padding every row to the widest cell let one huge cell
+    /// in the header ask for its width times the number of rows.
     fn end_table(&mut self, table: TableState) {
         let cols = table
             .aligns
@@ -280,7 +288,7 @@ impl Renderer {
                     .iter()
                     .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                     .sum();
-                widths[i] = widths[i].max(w);
+                widths[i] = widths[i].max(w.min(MAX_COLUMN_WIDTH));
             }
         }
         let prefix = self.quote_prefix();
@@ -795,6 +803,19 @@ mod tests {
             ],
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn a_huge_table_cell_does_not_pad_every_row_to_its_width() {
+        let wide = "x".repeat(64 * 1024);
+        let src = format!("| {wide} | b |\n|---|---|\n{}", "| 1 | 2 |\n".repeat(500));
+        let out = plain(&render(&src));
+        assert_eq!(out.len(), 502, "header, rule and 500 rows");
+        assert!(out[0].contains(&wide), "the wide cell is drawn in full");
+        let total: usize = out.iter().map(String::len).sum();
+        // Padded to the wide cell, the rows alone were over 32 MB.
+        assert!(total < 1024 * 1024, "{total} bytes");
+        assert!(out[2].starts_with(&format!("1{} │ 2", " ".repeat(MAX_COLUMN_WIDTH - 1))));
     }
 
     #[test]
