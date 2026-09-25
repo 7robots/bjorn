@@ -18,7 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 
 use crate::render::{PREVIEW_LIMIT, preview};
-use crate::util::{first_line, home_dir, is_executable, which};
+use crate::util::{first_line, home_dir, is_executable, strip_bidi, which};
 
 pub const ENV_COMMAND: &str = "BJORN_BEARCLI";
 pub const DEFAULT_COMMAND: &str = "bearcli";
@@ -305,7 +305,7 @@ impl Note {
             Some(Value::Array(items)) => items.len() as i64,
             other => int_of(other),
         };
-        let title = text_of(row.get("title")).trim().to_string();
+        let title = strip_bidi(text_of(row.get("title")).trim());
         Note {
             id: text_of(row.get("id")),
             title: if title.is_empty() {
@@ -323,10 +323,10 @@ impl Note {
             done: int_of(row.get("done")),
             attachments,
             locked: is_yes(row.get("locked")),
-            preview: match preview_text {
+            preview: strip_bidi(&match preview_text {
                 Some(text) => text.to_string(),
                 None => preview(&text_of(row.get("content")), PREVIEW_LIMIT),
-            },
+            }),
         }
     }
 
@@ -1236,6 +1236,26 @@ mod tests {
         assert_eq!(normalize_tag(" #tech "), "tech");
         assert_eq!(display_tag("work/CAD and Design"), "#work/CAD and Design#");
         assert_eq!(display_tag("tech/dev"), "#tech/dev");
+    }
+
+    #[test]
+    fn a_title_or_preview_cannot_reorder_itself_with_bidi_controls() {
+        let note = Note::from_row(
+            &json!({"id": "B", "title": "Invoice \u{202E}fdp.exe", "content": "# T\n\nsee \u{2067}this\u{2069}"}),
+            None,
+        );
+        assert_eq!(note.title, "Invoice fdp.exe");
+        assert_eq!(note.preview, "see this");
+        let toast = crate::ui::modals::Toast::new(
+            "\u{202E}title",
+            "msg\u{202D}",
+            crate::ui::modals::Severity::Error,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            (toast.title.as_str(), toast.message.as_str()),
+            ("title", "msg")
+        );
     }
 
     #[test]
