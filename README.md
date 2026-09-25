@@ -32,7 +32,9 @@ bjorn --tag work      # start scoped to a tag subtree
 bjorn --demo          # sample notes through the built-in fake bearcli, no Bear needed
 ```
 
-`git pull && ./install.sh` is the update path.
+`git pull && ./install.sh` is the update path. It also installs the man page:
+`man bjorn` is the full reference — every flag, key, config key and file — and
+its source is [docs/bjorn.1](docs/bjorn.1) if you would rather read it here.
 
 ## Keys
 
