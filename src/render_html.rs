@@ -171,6 +171,7 @@ hr {{ border: 0; border-top: 1px solid #ddd; margin: 2em 0; }}
   pre, code {{ background: #f5f5f5; color: #1a1a1a; }}
   pre {{ white-space: pre-wrap; }}
   th, td {{ border-color: #e0e0e0; }}
+  th {{ background: #f7f7f9; }}
   .tag {{ background: #ececec; color: #6b6b6b; }}
   /* A quote or a code block longer than the page has to be allowed to split. */
   li, tr, img {{ break-inside: avoid; }}
@@ -833,6 +834,23 @@ See [REV](https://www.revrobotics.com) and ![the frame](Front%20bed.png).\n";
         // The highlight palette is Bear's on screen and on paper alike.
         let print = css.split("@media print").nth(1).expect("a print block");
         assert!(!print.contains("mark {"), "{print}");
+    }
+
+    #[test]
+    fn a_page_printed_on_a_dark_machine_has_no_dark_ground_left() {
+        // The dark block applies to print media too, so each ground it darkens
+        // has to be set back in the print block, or a PDF made on a machine in
+        // dark mode prints a charcoal header row under near-black text.
+        let css = stylesheet(&theme::RED_GRAPHITE_DARK);
+        let print = css.split("@media print").nth(1).expect("a print block");
+        for rule in ["body {", "pre, code {", "th {", ".tag {"] {
+            let set = print
+                .split(rule)
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_else(|| panic!("{rule} is not reset for print\n{print}"));
+            assert!(set.contains("background: #"), "{rule}{set}");
+        }
     }
 
     #[test]
