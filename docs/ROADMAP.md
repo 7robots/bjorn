@@ -51,6 +51,17 @@ plan lives in `docs/plans/bjorn-rust.md`.
   the Archive, at most 200 candidates per search, each hit's body checked, so
   prefixes and mentions in code are dropped). A missing title offers to create the note; `backspace` / `alt+→`
   walk back and forward.
+- Hugo publishing, as an action rather than a key: `contrib/hugo-publish`
+  (Python 3, standard library only) writes the note an action hands over as a
+  post, a draft unless the entry says `--live`. It started as `P` inside the
+  binary (PR #11) and moved out on 2026-09-25, the user's call: publishing is
+  an integration like AI, which already goes through actions, so Bjorn keeps
+  no Hugo knowledge, no `[hugo]` config and no YAML dependency. The guards
+  the built-in had, and the review's fixes (never replacing a hand-written
+  post or an existing image, front matter written key by key and quoted, no
+  YAML aliases, wiki and local links reduced to text, shortcodes and raw
+  HTML refused), live in the script and `tests/hugo_action.rs`. See
+  `docs/actions.md`.
 - An action can ask for one line of text before it runs (`prompt` in its
   config entry, the answer in `$BJORN_ACTION_INPUT`). One action covers what
   used to need one entry per argument; with `confirm` as well the dialog

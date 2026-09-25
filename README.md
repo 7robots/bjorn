@@ -328,6 +328,13 @@ stops it running in a browser or in Chrome, but WeasyPrint ignores that and
 fetches the files and URLs the note's HTML points at, so keep WeasyPrint to
 notes you wrote yourself.
 
+Publishing to a [Hugo](https://gohugo.io) site is an action too:
+[`contrib/hugo-publish`](contrib/hugo-publish) writes the note as a post
+(a draft unless you pick the entry that publishes live), keeps its tags,
+wiki links and local links off the site, and never replaces a file it did
+not write. Bjorn itself stays free of Hugo code and network calls. Setup and
+what it guards: [Publish to Hugo](docs/actions.md#publish-to-hugo).
+
 ## Development
 
 ```sh
