@@ -272,12 +272,14 @@ pub fn export_rtf(
 /// `data:` URI by the time the HTML is written. The page around the body —
 /// the stylesheet and `@page` rules — is Bjorn's own and is left as it is.
 pub fn only_embedded(html: &str) -> String {
+    // Without the markers `render` writes, the whole page is filtered: it
+    // loses its styling, which is better than printing an unfiltered note.
     let (Some(open), Some(close)) = (html.find("<body>\n"), html.rfind("</body>")) else {
-        return html.to_string();
+        return SANITIZER.clean(html).to_string();
     };
     let body_at = open + "<body>\n".len();
     if close < body_at {
-        return html.to_string();
+        return SANITIZER.clean(html).to_string();
     }
     format!(
         "{}{}{}",
@@ -294,21 +296,76 @@ static SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
         .add_tags(["input", "mark", "u"])
         .add_tag_attributes("input", ["type", "disabled", "checked"])
         .add_generic_attributes(["class"])
-        // A link is followed by a reader, never fetched by the converter, so
-        // Bear's own scheme may stay; `data:` is allowed here for images and
-        // the filter below keeps it off everything else that loads.
-        .add_url_schemes(["bear", "data"])
+        // `data:` is allowed here for images; the filter below keeps it off
+        // links and vets what an image carries. A relative link would point
+        // into the temp directory the page was printed from, and a `bear:`
+        // link would act on the Bear of whoever clicks it in the PDF.
+        .add_url_schemes(["data"])
+        .url_relative(ammonia::UrlRelative::Deny)
         .link_rel(None)
-        .attribute_filter(|element, attribute, value| {
-            let data = value.trim_start().to_ascii_lowercase().starts_with("data:");
-            match (element, attribute) {
-                ("img", "src") if !data => None,
-                ("a", "href") if data => None,
-                _ => Some(value.into()),
-            }
+        .attribute_filter(|element, attribute, value| match (element, attribute) {
+            ("img", "src") => printable_image(value).then(|| value.into()),
+            ("a", "href") if scheme_is_data(value) => None,
+            _ => Some(value.into()),
         });
     builder
 });
+
+/// A URL's scheme is `data` the way a parser reads it: leading control
+/// characters and spaces are skipped, and tabs and newlines anywhere are
+/// dropped, so `da&#9;ta:` is still `data:`.
+fn scheme_is_data(value: &str) -> bool {
+    let bare: String = value
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .take(5)
+        .collect();
+    bare.eq_ignore_ascii_case("data:")
+}
+
+/// Raster formats whose bytes cannot be read as anything else, by their
+/// signature. SVG is not one: WeasyPrint fetches what an SVG image points at,
+/// `<image href>` and `<use>` included, remote or `file:`, and it tries any
+/// bytes Pillow cannot decode as SVG whatever the type says. Nor is anything
+/// Pillow hands to Ghostscript (EPS). An attachment in another format (SVG,
+/// HEIC, PDF) prints as an empty frame; neither converter drew HEIC anyway.
+const IMAGE_SIGNATURES: [&[u8]; 8] = [
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+    b"RIFF", // WebP: RIFF, a length, then WEBP (checked below)
+    b"BM",
+    b"II*\0",
+    b"MM\0*",
+];
+
+/// An image the converter may draw: a base64 `data:` URI whose bytes start
+/// with one of `IMAGE_SIGNATURES`. The declared type is not trusted.
+fn printable_image(value: &str) -> bool {
+    use base64::Engine;
+    if !scheme_is_data(value) {
+        return false;
+    }
+    let Some((head, payload)) = value.trim().split_once(',') else {
+        return false;
+    };
+    if !head.to_ascii_lowercase().ends_with(";base64") {
+        return false;
+    }
+    // Enough for the longest signature, rounded to whole base64 quanta.
+    let prefix: String = payload
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .take(16)
+        .collect();
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&prefix) else {
+        return false;
+    };
+    IMAGE_SIGNATURES.iter().any(|sig| bytes.starts_with(sig))
+        && (!bytes.starts_with(b"RIFF") || bytes.get(8..12) == Some(b"WEBP"))
+}
 
 /// What turns the HTML rendering into a PDF. macOS ships nothing that can:
 /// `textutil` stops at RTF, and `cupsfilter` refuses HTML outright ("No filter
@@ -395,9 +452,20 @@ impl Converter {
                     .arg("--proxy-server=127.0.0.1:1")
                     .arg("--proxy-bypass-list=<-loopback>")
                     .arg("--disable-remote-fonts")
+                    // A fresh profile would otherwise start its first-run and
+                    // background work (component updates, sync, a Keychain
+                    // prompt for the new profile's passwords).
+                    .arg("--no-first-run")
+                    .arg("--no-default-browser-check")
+                    .arg("--disable-background-networking")
+                    .arg("--disable-component-update")
+                    .arg("--disable-sync")
+                    .arg("--disable-extensions")
+                    .arg("--use-mock-keychain")
+                    .arg("--password-store=basic")
                     .arg("--no-pdf-header-footer")
                     .arg(format!("--print-to-pdf={}", destination.display()))
-                    .arg(format!("file://{}", source.display()));
+                    .arg(file_url(source));
                 command
             }
         }
@@ -454,12 +522,45 @@ pub fn export_pdf(
         .spawn()
         .map_err(|e| ExportError(format!("{}: {e}", converter.name())))?;
     wait_for_pdf(&mut child, &converter, &printed, &log)?;
-    // Across devices a rename fails, so fall back to a copy.
+    // Across devices a rename fails, so fall back to a copy — into a temp file
+    // beside the destination, renamed over it once whole, so a full disk
+    // leaves no stub and a symlink sitting at the destination is replaced
+    // rather than followed.
     if std::fs::rename(&printed, &destination).is_err() {
-        std::fs::copy(&printed, &destination)
-            .map_err(|e| ExportError(format!("{}: {e}", destination.display())))?;
+        let failed =
+            |e: &dyn std::fmt::Display| ExportError(format!("{}: {e}", destination.display()));
+        let parent = destination.parent().unwrap_or(Path::new("."));
+        let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(|e| failed(&e))?;
+        let mut pdf = std::fs::File::open(&printed).map_err(|e| failed(&e))?;
+        std::io::copy(&mut pdf, &mut staged).map_err(|e| failed(&e))?;
+        // A temp file is 0600; the PDF keeps the mode the converter gave it.
+        if let Ok(meta) = pdf.metadata() {
+            let _ = staged.as_file().set_permissions(meta.permissions());
+        }
+        staged.persist(&destination).map_err(|e| failed(&e.error))?;
     }
     Ok(destination)
+}
+
+/// The page as a `file://` URL. The temp directory's path comes from
+/// `$TMPDIR`, and a `#`, `%` or `?` in it, left bare, would send Chrome
+/// somewhere else — to its own error page, which it prints and exits 0.
+fn file_url(path: &Path) -> String {
+    const PATH: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'%')
+        .add(b'<')
+        .add(b'>')
+        .add(b'?')
+        .add(b'`')
+        .add(b'{')
+        .add(b'}');
+    format!(
+        "file://{}",
+        percent_encoding::utf8_percent_encode(&path.to_string_lossy(), PATH)
+    )
 }
 
 /// Wait for the PDF, not for the converter. WeasyPrint prints and exits, and
@@ -674,7 +775,7 @@ mod tests {
     #[test]
     fn only_embedded_keeps_the_note_and_drops_what_it_points_at() {
         let html = page(concat!(
-            r#"<p><img src="data:image/png;base64,iVBOR"> "#,
+            r#"<p><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="> "#,
             r#"<img src="https://tracker.test/p.png"> "#,
             r#"<img src="http://127.0.0.1:8080/x" srcset="http://a.test/2x 2x"> "#,
             r#"<img src="file:///Users/you/.ssh/id_rsa"> "#,
@@ -686,7 +787,7 @@ mod tests {
         ));
         let out = only_embedded(&html);
         assert!(
-            out.contains(r#"<img src="data:image/png;base64,iVBOR">"#),
+            out.contains(r#"<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==">"#),
             "an attachment is already embedded and stays\n{out}"
         );
         for gone in [
@@ -750,6 +851,122 @@ mod tests {
         assert!(out.contains("styled") && out.contains("nine"), "{out}");
     }
 
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn an_image_prints_only_when_its_bytes_are_a_raster_format() {
+        // WeasyPrint fetches what an SVG image points at, and reads bytes
+        // Pillow cannot decode as SVG whatever the declared type; EPS goes to
+        // Ghostscript. Only a known raster signature is let through.
+        let svg = b64(
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="https://svg.test/p"/></svg>"#,
+        );
+        let eps = b64(b"%!PS-Adobe-3.0 EPSF-3.0\n");
+        let webp = b64(b"RIFF\x1a\0\0\0WEBPVP8 ");
+        let riff = b64(b"RIFF\x1a\0\0\0AVI LIST");
+        let cases = [
+            (
+                format!(
+                    "data:image/png;base64,{}",
+                    b64(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")
+                ),
+                true,
+            ),
+            (
+                format!(
+                    "data:image/jpeg;base64,{}",
+                    b64(b"\xff\xd8\xff\xe0\0\x10JFIF")
+                ),
+                true,
+            ),
+            (
+                format!("data:image/gif;base64,{}", b64(b"GIF89a\x01\0\x01\0")),
+                true,
+            ),
+            (format!("data:image/webp;base64,{webp}"), true),
+            (
+                format!(
+                    "DATA:image/png;BASE64,{}",
+                    b64(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")
+                ),
+                true,
+            ),
+            (format!("data:image/svg+xml;base64,{svg}"), false),
+            (format!("data:image/png;base64,{svg}"), false),
+            (format!("data:image/png;base64,{eps}"), false),
+            (format!("data:image/webp;base64,{riff}"), false),
+            (
+                "data:image/svg+xml,<svg><image href='https://svg.test/q'/></svg>".into(),
+                false,
+            ),
+            ("data:image/png;base64,iVBOR".into(), false),
+            ("data:text/html;base64,PHNjcmlwdD4=".into(), false),
+        ];
+        for (src, prints) in cases {
+            let out = only_embedded(&page(&format!(r#"<img src="{src}">"#)));
+            assert_eq!(out.contains("src="), prints, "{src}\n{out}");
+        }
+    }
+
+    #[test]
+    fn a_link_in_the_pdf_goes_nowhere_it_should_not() {
+        let out = only_embedded(&page(concat!(
+            r#"<a href="&#1;data:text/html,one">one</a>"#,
+            r#"<a href="da&#9;ta:text/html,two">two</a>"#,
+            r#"<a href="bear://x-callback-url/trash?id=X">three</a>"#,
+            r#"<a href="plan.pdf">four</a>"#,
+            r#"<a href="https://example.test/">five</a>"#,
+        )));
+        for gone in ["data:", "da\tta", "bear:", "plan.pdf"] {
+            assert!(!out.contains(gone), "{gone} survived\n{out}");
+        }
+        assert!(
+            out.contains(r#"<a href="https://example.test/">five</a>"#),
+            "{out}"
+        );
+        assert!(
+            ["one", "two", "three", "four"]
+                .iter()
+                .all(|t| out.contains(t)),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_page_without_the_body_markers_is_filtered_whole() {
+        let out = only_embedded(
+            r#"<body class="x"><img src="https://tracker.test/p"><p>text</p></body>"#,
+        );
+        assert!(
+            !out.contains("tracker.test") && out.contains("text"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_markdown_image_is_held_to_the_same_rule() {
+        let svg = b64(
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="https://svg.test/p"/></svg>"#,
+        );
+        let note = format!(
+            "![](data:image/svg+xml;base64,{svg})\n\n![](https://md.test/p.png)\n\n![](file:///etc/hosts)\n"
+        );
+        let html = render_html::render(&note, "N", &HashMap::new(), &HashMap::new());
+        let out = only_embedded(&html);
+        for gone in ["svg+xml", "md.test", "/etc/hosts"] {
+            assert!(!out.contains(gone), "{gone} survived\n{out}");
+        }
+    }
+
+    #[test]
+    fn the_page_url_survives_a_temp_path_with_url_characters() {
+        let url = file_url(Path::new("/tmp/a b#c%d?e/note.html"));
+        assert_eq!(url, "file:///tmp/a%20b%23c%25d%3Fe/note.html");
+    }
+
     #[test]
     fn only_embedded_leaves_the_notes_own_words_alone() {
         let note = "Some url(s) here.\n\nAlso @import foo; bar.\n\n\
@@ -765,7 +982,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("<mark>marked</mark>") && out.contains("<u>under</u>"),
+            out.contains(">marked</mark>") && out.contains("<u>under</u>"),
             "{out}"
         );
         assert!(out.contains(r#"<span class="tag">"#), "{out}");
@@ -782,7 +999,10 @@ mod tests {
         let target = dir.path().join("Note.pdf");
         let note =
             "# Note\n\n<img src=\"https://tracker.test/pixel.png\">\n\n![](Front%20bed.png)\n";
-        let images = HashMap::from([("Front bed.png".to_string(), b"\x89PNG\r\n".to_vec())]);
+        let images = HashMap::from([(
+            "Front bed.png".to_string(),
+            b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec(),
+        )]);
         let Some(_) = Converter::find() else { return };
         let written = export_pdf(note, "Note", &target, &images).expect("a PDF");
         let bytes = std::fs::read(&written).unwrap();
