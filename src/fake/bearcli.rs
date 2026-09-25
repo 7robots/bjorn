@@ -6,7 +6,11 @@
 //! (exit 1) when they fail. State lives in a JSON file at
 //! $BJORN_FAKE_BEAR_STATE (default ~/.cache/bjorn/demo-bear.json), seeded with
 //! sample notes on first run. Every `app open` call is appended to
-//! `<state>.opened` so tests can assert on it.
+//! `<state>.opened` so tests can assert on it, and a `<state>.hold-<id>` file
+//! holds back a `cat` of that note until the test removes it. While a
+//! `<state>.overwrite-fails-after` file exists, `overwrite` writes the note and
+//! then fails anyway, the way a bearcli timed out after Bear saved would.
+//! $BJORN_FAKE_BEAR_FAIL_READ makes one read fail (see `run`).
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -105,10 +109,6 @@ fn note(
     }
 }
 
-/// A note whose body is dated sections, newest first: what the day screen
-/// (`T`) and `s` are for. The dates are relative to the day the state file is
-/// seeded, so `--demo` always has something to show; `days` is
-/// (days back, people, topic) per section, newest first.
 /// The day the sample sections are dated from: `$BJORN_FAKE_BEAR_TODAY`
 /// (`%Y-%m-%d`) when set, else today. Tests pin it so that a suite which
 /// starts a moment before midnight cannot seed one date and assert another.
@@ -119,6 +119,10 @@ fn seed_today() -> chrono::NaiveDate {
         .unwrap_or_else(|| chrono::Local::now().date_naive())
 }
 
+/// A note whose body is dated sections, newest first: what the day screen
+/// (`T`) and `s` are for. The dates are relative to the day the state file is
+/// seeded, so `--demo` always has something to show; `days` is
+/// (days back, people, topic) per section, newest first.
 fn dated_note(
     id: &str,
     title: &str,
@@ -167,7 +171,8 @@ fn seed_state() -> State {
         "2026-07-12T09:00:00Z",
         "2026-08-28T10:00:00Z",
         "# Garden Plan\n#home/garden\n\n- [ ] order bulbs for the front bed\n- [x] mulch the roses\n\n\
-         ## Next spring\n- [ ] move the hydrangea\n```\n- [ ] this is inside a code block\n```\n\n![](Front%20bed.png)\n"
+         ## Next spring\n- [ ] move the hydrangea\n```\n- [ ] this is inside a code block\n```\n\n![](Front%20bed.png)\n\n\
+         Weekends are planned in [[Sprint Planning/Notes]].\n"
             .into(),
     );
     garden.attachments = vec!["Front bed.png".into()];
@@ -186,7 +191,9 @@ fn seed_state() -> State {
             "2026-08-01T09:00:00Z",
             &today,
             "# Sprint Planning\n#work/sprint\n\n## Tasks\n- [x] book the retro room\n- [ ] write the release notes\n\
-             - [ ] ask Priya about the API deprecation\n  - [ ] confirm the sunset date\n\n## Notes\nVelocity is ==holding== steady.\n"
+             - [ ] ask Priya about the API deprecation\n  - [ ] confirm the sunset date\n\n## Notes\nVelocity is ==holding== steady.\n\n\
+             ## Links\nKeep [[Reading Queue|the reading list]] short, and draft the [[Team Offsite]] agenda. \
+             Bear writes a link as `[[Note title]]`.\n"
                 .into(),
         ),
         garden,
@@ -198,7 +205,10 @@ fn seed_state() -> State {
             "notes",
             "2026-06-01T09:00:00Z",
             "2026-08-15T12:00:00Z",
-            format!("# Reading Queue\n#home\n\nNo tasks here, just titles.\n\n{}\n", books.join("\n")),
+            format!(
+                "# Reading Queue\n#home\n\nNo tasks here, just titles. Next year: [[Garden Plan 2027]].\n\n{}\n",
+                books.join("\n")
+            ),
         ),
         note(
             "NOTE-DESIGN",
@@ -210,7 +220,7 @@ fn seed_state() -> State {
             "2026-08-01T12:00:00Z",
             "# CAD and Design\n#work/CAD and Design#\n\nMulti-word tag note.\n".into(),
         ),
-        note("NOTE-UNTAGGED", "Loose Thought", &[], &[], "notes", "2026-04-01T09:00:00Z", "2026-07-01T12:00:00Z", "# Loose Thought\n\nNo tags on this one.\n".into()),
+        note("NOTE-UNTAGGED", "Loose Thought", &[], &[], "notes", "2026-04-01T09:00:00Z", "2026-07-01T12:00:00Z", "# Loose Thought\n\nNo tags on this one. It points at [[Garden Plan/Next spring|the spring list]].\n\n```\n[[Sprint Planning]] in a fence is not a link\n```\n".into()),
         dated_note(
             "NOTE-FIELD",
             "Field Notes",
@@ -250,8 +260,8 @@ fn seed_state() -> State {
             &[(1, "solo", "rain all morning, dry by the col")],
             "2026-08-23T09:00:00Z",
         ),
-        note("NOTE-TRASHED", "Old Draft", &["work"], &[], "trash", "2026-03-01T09:00:00Z", "2026-06-01T12:00:00Z", "# Old Draft\n#work\n\nThrown away.\n".into()),
-        note("NOTE-ARCHIVED", "Finished Project", &["work"], &[], "archive", "2026-02-01T09:00:00Z", "2026-05-01T12:00:00Z", "# Finished Project\n#work\n\nDone and dusted.\n".into()),
+        note("NOTE-TRASHED", "Old Draft", &["work"], &[], "trash", "2026-03-01T09:00:00Z", "2026-06-01T12:00:00Z", "# Old Draft\n#work\n\nThrown away. Was part of [[Sprint Planning]].\n".into()),
+        note("NOTE-ARCHIVED", "Finished Project", &["work"], &[], "archive", "2026-02-01T09:00:00Z", "2026-05-01T12:00:00Z", "# Finished Project\n#work\n\nDone and dusted. It grew out of [[sprint planning]].\n".into()),
     ];
     State {
         notes,
@@ -420,11 +430,25 @@ fn parse_fields(spec: Option<&str>, default: &[&str], extra: &[&str]) -> Vec<Str
     out
 }
 
+/// A note by id (any location) or by title. Like bearcli, a title only finds
+/// notes in Notes: one in the Trash or the Archive needs its id, and
+/// `create --if-not-exists` makes a fresh note beside it.
 fn find_note(state: &State, note_id: Option<&str>, title: Option<&str>) -> Option<usize> {
     state.notes.iter().position(|n| {
         note_id.is_some_and(|id| n.id == id)
-            || title.is_some_and(|t| n.title.to_lowercase() == t.to_lowercase())
+            || title.is_some_and(|t| {
+                in_location(n, "notes") && n.title.to_lowercase() == t.to_lowercase()
+            })
     })
+}
+
+/// bearcli's message for a lookup that found nothing.
+fn not_found(target: &Target) -> &'static str {
+    if target.note_id.is_none() && target.title.is_some() {
+        "Note not found (in notes; use the note ID for trash/archive)"
+    } else {
+        "Note not found"
+    }
 }
 
 fn strip_tag(tag: &str) -> String {
@@ -542,6 +566,13 @@ fn with_ancestors(tags: &mut Vec<String>, tag: &str) {
 }
 
 // -- argv --------------------------------------------------------------------
+//
+// As strict as the real bearcli (swift-argument-parser), checked read-only
+// against it: a hyphen-leading positional is an unknown option unless it comes
+// after `--`, and a hyphen-leading option value must be attached with `=`
+// (`--filename=-x`); as its own argv entry it is a missing value. Only
+// `search --query` takes one either way, as bearcli documents. A lenient fake
+// would let a test pass that fails against Bear.
 
 #[derive(Parser)]
 #[command(
@@ -577,9 +608,8 @@ struct Listing {
 
 #[derive(Args)]
 struct Target {
-    #[arg(allow_hyphen_values = true)]
     note_id: Option<String>,
-    #[arg(short = 't', long, allow_hyphen_values = true)]
+    #[arg(short = 't', long)]
     title: Option<String>,
 }
 
@@ -592,7 +622,6 @@ enum Cmd {
         tag: Option<String>,
     },
     Search {
-        #[arg(allow_hyphen_values = true)]
         query_arg: Option<String>,
         #[arg(short = 'q', long, allow_hyphen_values = true)]
         query: Option<String>,
@@ -602,7 +631,7 @@ enum Cmd {
     Cat {
         #[command(flatten)]
         target: Target,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         section: Option<String>,
     },
     Show {
@@ -614,11 +643,11 @@ enum Cmd {
         cmd: Option<TagsCmd>,
     },
     Create {
-        #[arg(allow_hyphen_values = true)]
+        /// Like bearcli, a title starting with `-` needs `--` before it.
         title: Option<String>,
-        #[arg(short = 'c', long, allow_hyphen_values = true)]
+        #[arg(short = 'c', long)]
         content: Option<String>,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         tags: Option<String>,
         #[arg(long)]
         if_not_exists: bool,
@@ -626,25 +655,37 @@ enum Cmd {
     Overwrite {
         #[command(flatten)]
         target: Target,
-        #[arg(short = 'c', long, allow_hyphen_values = true)]
+        #[arg(short = 'c', long)]
         content: Option<String>,
         #[arg(long)]
         base: Option<String>,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         section: Option<String>,
         #[arg(long)]
         no_update_modified: bool,
         #[arg(long)]
         force: bool,
     },
+    Append {
+        #[command(flatten)]
+        target: Target,
+        #[arg(short = 'c', long, allow_hyphen_values = true)]
+        content: Option<String>,
+        #[arg(long, default_value = "end", value_parser = ["beginning", "end"])]
+        position: String,
+        #[arg(long, allow_hyphen_values = true)]
+        section: Option<String>,
+        #[arg(long)]
+        no_update_modified: bool,
+    },
     Edit {
         #[command(flatten)]
         target: Target,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         section: Option<String>,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         find: String,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long)]
         replace: Option<String>,
         #[arg(long)]
         delete: bool,
@@ -720,7 +761,7 @@ enum AttCmd {
     Save {
         #[command(flatten)]
         target: Target,
-        #[arg(short = 'f', long, allow_hyphen_values = true)]
+        #[arg(short = 'f', long)]
         filename: String,
     },
 }
@@ -730,11 +771,6 @@ enum AppCmd {
     Open {
         #[command(flatten)]
         target: Target,
-        // No `allow_hyphen_values`: a section heading that starts with `-`
-        // has to arrive as `--header=<heading>`, one argument, the way Bear's
-        // own argument parser wants it. Passing the heading as a separate
-        // argument fails here, which is the point — that is the bug this
-        // spelling avoids.
         #[arg(long)]
         header: Option<String>,
         #[arg(long)]
@@ -801,10 +837,37 @@ fn paginate(notes: &[FakeNote], offset: i64, limit: Option<i64>) -> Vec<FakeNote
     }
 }
 
+/// Split a query into terms: whitespace-separated words, with a `"quoted
+/// phrase"` (optionally `-"negated"`) kept whole, quotes included.
+fn query_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for ch in query.chars() {
+        match ch {
+            '"' => {
+                current.push(ch);
+                quoted = !quoted;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    terms.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+    terms
+}
+
 fn matches_query(note: &FakeNote, query: &str) -> bool {
     let (todos, _) = todo_counts(&note.content);
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    for term in query.split_whitespace() {
+    for term in query_terms(query) {
+        let term = term.as_str();
         let negate = term.starts_with('-');
         let term = if negate { &term[1..] } else { term };
         let ok = if term.starts_with('#') {
@@ -819,12 +882,16 @@ fn matches_query(note: &FakeNote, query: &str) -> bool {
             note.modified.starts_with(&today)
         } else if term == "@pinned" {
             note.pins.iter().any(|p| p == "global")
+        } else if term == "@wikilinks" {
+            note.content.contains("[[")
         } else if term.starts_with('@') {
             true
         } else {
-            note.content
-                .to_lowercase()
-                .contains(&term.trim_matches('"').to_lowercase())
+            // Bear matches nothing for a term with no letter or digit in it:
+            // `"[["` finds no note at all.
+            let needle = term.trim_matches('"').to_lowercase();
+            needle.chars().any(char::is_alphanumeric)
+                && note.content.to_lowercase().contains(&needle)
         };
         if ok == negate {
             return false;
@@ -867,11 +934,23 @@ fn cmd_search(
     Ok(())
 }
 
+/// While `<state>.hold-<id>` exists, a `cat` of that note does not return, so a
+/// test can decide which of two reads finishes first. Gives up after ten
+/// seconds, so a test that forgets to remove it fails instead of hanging.
+fn hold(id: &str) {
+    let gate = PathBuf::from(format!("{}.hold-{id}", state_path().display()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while gate.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn cmd_cat(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
     let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
-        return Err(fail(ctx.fmt, "not_found", "Note not found"));
+        return Err(fail(ctx.fmt, "not_found", not_found(target)));
     };
     let note = &state.notes[i];
+    hold(&note.id);
     if note.locked {
         return Err(fail(
             ctx.fmt,
@@ -889,7 +968,7 @@ fn cmd_cat(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
 
 fn cmd_show(ctx: &Ctx, state: &State, target: &Target) -> CmdResult {
     let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
-        return Err(fail(ctx.fmt, "not_found", "Note not found"));
+        return Err(fail(ctx.fmt, "not_found", not_found(target)));
     };
     let fields = parse_fields(ctx.fields, &["id", "title", "tags"], &[]);
     let row = row_for(&state.notes[i], &fields);
@@ -987,9 +1066,13 @@ fn cmd_create(
         Some(c) => unescape(c),
         None => read_stdin(),
     };
+    // Without a title Bear takes it from the first line after any front
+    // matter, and keeps the content as it is.
+    let derived = title.is_none();
+    let body_start = front_matter_end(&content);
     let title = match title {
         Some(t) => t.to_string(),
-        None => content
+        None => content[body_start..]
             .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("Untitled")
@@ -1002,22 +1085,31 @@ fn cmd_create(
         emit_rows(&[row_for(&state.notes[i], &fields)], &fields, ctx.fmt);
         return Ok(());
     }
-    let mut all_tags: Vec<String> = Vec::new();
-    for t in tags.unwrap_or("").split(',') {
-        let t = strip_tag(t);
+    // Tags the content already carries are not added again.
+    let mut inline: Vec<String> = Vec::new();
+    for caps in TAG_RE.captures_iter(&content).flatten() {
+        let t = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .map(|m| m.as_str().trim())
+            .unwrap_or("");
         if !t.is_empty() {
-            with_ancestors(&mut all_tags, &t);
+            with_ancestors(&mut inline, t);
         }
     }
-    let heading = format!("# {title}");
-    let body = match content.strip_prefix(heading.as_str()) {
-        Some(rest) => rest.trim_start_matches('\n').to_string(),
-        None => content.clone(),
-    };
-    let leaf_tags: Vec<&String> = all_tags
+    let mut all_tags = inline.clone();
+    let mut added: Vec<String> = Vec::new();
+    for t in tags.unwrap_or("").split(',') {
+        let t = strip_tag(t);
+        if !t.is_empty() && !inline.contains(&t) {
+            with_ancestors(&mut all_tags, &t);
+            with_ancestors(&mut added, &t);
+        }
+    }
+    let leaf_tags: Vec<&String> = added
         .iter()
         .filter(|t| {
-            !all_tags
+            !added
                 .iter()
                 .any(|o| o != *t && o.starts_with(&format!("{t}/")))
         })
@@ -1027,13 +1119,51 @@ fn cmd_create(
         .map(|t| display_tag(t))
         .collect::<Vec<_>>()
         .join(" ");
-    let mut full = format!("{heading}\n");
-    if tag_line.is_empty() {
+    let mut full = if derived {
+        // The tags go on the line after the title line.
+        let rest = &content[body_start..];
+        let skipped = rest.len() - rest.trim_start_matches(['\n', '\r', ' ', '\t']).len();
+        let title_end = rest[skipped..]
+            .find('\n')
+            .map_or(rest.len(), |n| skipped + n);
+        let mut full = content[..body_start + title_end].to_string();
         full.push('\n');
+        if !tag_line.is_empty() {
+            full.push_str(&format!("{tag_line}\n"));
+        }
+        let body = rest[title_end..].trim_start_matches('\n');
+        if !body.is_empty() {
+            full.push('\n');
+            full.push_str(body);
+        }
+        full
     } else {
-        full.push_str(&format!("{tag_line}\n\n"));
-    }
-    full.push_str(&body);
+        // Content whose first line Bear already reads as the title (a heading
+        // at any level, case-insensitive) is kept as it is; otherwise the
+        // title is written as a `# ` heading above it. Added tags go under the
+        // title. YAML front matter (a `---` block opening on the first line)
+        // stays on top; the title goes after it.
+        let (front, content) = crate::templates::split_front_matter(&content);
+        let (first, rest) = content.split_once('\n').unwrap_or((content, ""));
+        let first_title = first.trim_start_matches('#').trim();
+        let mut full = front.to_string();
+        if first_title.to_lowercase() == title.to_lowercase() {
+            full.push_str(&format!("{first}\n"));
+            if !tag_line.is_empty() {
+                full.push_str(&format!("{tag_line}\n"));
+            }
+            full.push_str(rest);
+        } else {
+            full.push_str(&format!("# {title}\n"));
+            if tag_line.is_empty() {
+                full.push('\n');
+            } else {
+                full.push_str(&format!("{tag_line}\n\n"));
+            }
+            full.push_str(content);
+        }
+        full
+    };
     if !full.ends_with('\n') {
         full.push('\n');
     }
@@ -1069,6 +1199,22 @@ fn cmd_create(
         println!("{}", tsv_row(values.iter()));
     }
     Ok(())
+}
+
+/// Where a YAML front matter block (a `---` fence opening on the first line)
+/// ends, or 0 when there is none.
+fn front_matter_end(content: &str) -> usize {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return 0;
+    };
+    let mut at = 4;
+    for line in rest.split_inclusive('\n') {
+        at += line.len();
+        if line.trim_end() == "---" {
+            return at;
+        }
+    }
+    0
 }
 
 fn cmd_overwrite(
@@ -1114,6 +1260,9 @@ fn cmd_overwrite(
         note.modified = now_iso();
     }
     save_state(state);
+    if PathBuf::from(format!("{}.overwrite-fails-after", state_path().display())).exists() {
+        return Err(fail_text("Lost touch with Bear before it answered", 1));
+    }
     Ok(())
 }
 
@@ -1131,40 +1280,10 @@ fn cmd_edit(
     };
     let find = unescape(find);
     let content = state.notes[i].content.clone();
-    let (mut start, mut end) = (0usize, content.len());
-    if let Some(section) = section {
-        let heading = unescape(section).trim().to_string();
-        let lines: Vec<&str> = content.split('\n').collect();
-        let level = heading.len() - heading.trim_start_matches('#').len();
-        let starts: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.trim() == heading)
-            .map(|(i, _)| i)
-            .collect();
-        if starts.len() != 1 {
-            return Err(fail_text(
-                if starts.is_empty() {
-                    "Section not found"
-                } else {
-                    "Section address is ambiguous"
-                },
-                1,
-            ));
-        }
-        let first = starts[0];
-        let mut last = lines.len();
-        for (j, line) in lines.iter().enumerate().skip(first + 1) {
-            if let Some(m) = HEADING_RE.captures(line)
-                && m[1].len() <= level
-            {
-                last = j;
-                break;
-            }
-        }
-        start = lines[..first].join("\n").len() + usize::from(first > 0);
-        end = lines[..last].join("\n").len();
-    }
+    let (start, end) = match section {
+        Some(section) => section_range(&content, section)?,
+        None => (0usize, content.len()),
+    };
     let region = &content[start..end];
     let hits = region.matches(find.as_str()).count();
     if hits == 0 {
@@ -1186,6 +1305,119 @@ fn cmd_edit(
     let note = &mut state.notes[i];
     note.content = format!("{}{}{}", &content[..start], region, &content[end..]);
     note.modified = now_iso();
+    save_state(state);
+    Ok(())
+}
+
+/// The byte range of the section a heading line (`## Tasks`) addresses: from
+/// its heading to the next heading of the same or a higher level.
+fn section_range(content: &str, section: &str) -> Result<(usize, usize), i32> {
+    let heading = unescape(section).trim().to_string();
+    let lines: Vec<&str> = content.split('\n').collect();
+    let level = heading.len() - heading.trim_start_matches('#').len();
+    // Only a heading line is an address; bearcli finds nothing for plain text.
+    if !(1..=6).contains(&level) {
+        return Err(fail_text("Section not found", 1));
+    }
+    let starts: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim() == heading)
+        .map(|(i, _)| i)
+        .collect();
+    if starts.len() != 1 {
+        return Err(fail_text(
+            if starts.is_empty() {
+                "Section not found"
+            } else {
+                "Section address is ambiguous"
+            },
+            1,
+        ));
+    }
+    let first = starts[0];
+    let mut last = lines.len();
+    for (j, line) in lines.iter().enumerate().skip(first + 1) {
+        if let Some(m) = HEADING_RE.captures(line)
+            && m[1].len() <= level
+        {
+            last = j;
+            break;
+        }
+    }
+    let start = lines[..first].join("\n").len() + usize::from(first > 0);
+    Ok((start, lines[..last].join("\n").len()))
+}
+
+/// Where the lines that close a note start: tag lines (`#tag`, not a
+/// `# heading`) and footnote definitions (`[^1]: …`), with the blank lines
+/// among them. The end of the note when it has none.
+fn bottom_block_start(content: &str) -> usize {
+    let closing = |line: &str| {
+        let line = line.trim();
+        let tag = line.starts_with('#')
+            && line[1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c != ' ' && c != '#');
+        tag || (line.starts_with("[^") && line.contains("]:"))
+    };
+    let mut start = content.len();
+    let mut offset = content.len();
+    for line in content.split_inclusive('\n').rev() {
+        offset -= line.len();
+        if closing(line) {
+            start = offset;
+        } else if !line.trim().is_empty() {
+            break;
+        }
+    }
+    start
+}
+
+/// `append`: add content at the end (or the beginning) of the note, or of one
+/// section. The content always ends on its own line, and blank lines between
+/// the section and the next heading stay where they were.
+fn cmd_append(
+    state: &mut State,
+    target: &Target,
+    content: Option<&str>,
+    position: &str,
+    section: Option<&str>,
+    no_update_modified: bool,
+) -> CmdResult {
+    let Some(i) = find_note(state, target.note_id.as_deref(), target.title.as_deref()) else {
+        return Err(fail_text("Note not found", 1));
+    };
+    let added = match content {
+        Some(c) => unescape(c),
+        None => read_stdin(),
+    };
+    let added = added.trim_end_matches('\n');
+    let current = state.notes[i].content.clone();
+    let (start, end) = match section {
+        Some(section) => section_range(&current, section)?,
+        None => (0, current.len()),
+    };
+    let at = if position == "beginning" {
+        // After the heading line of the section, or the title line of the note.
+        current[start..end].find('\n').map_or(end, |n| start + n)
+    } else if section.is_none() {
+        // Before tags placed at the bottom and footnote definitions.
+        current[..bottom_block_start(&current)].trim_end().len()
+    } else {
+        start + current[start..end].trim_end().len()
+    };
+    let lead = if at == 0 { "" } else { "\n" };
+    let mut updated = format!("{}{lead}{added}{}", &current[..at], &current[at..]);
+    if at == current.len() {
+        updated.push('\n');
+    }
+    let note = &mut state.notes[i];
+    note.content = updated;
+    if !no_update_modified {
+        note.modified = now_iso();
+    }
     save_state(state);
     Ok(())
 }
@@ -1325,7 +1557,8 @@ fn cmd_app(state: &State, cmd: AppCmd) -> CmdResult {
         .create(true)
         .open(log)
         .expect("writable .opened log");
-    let _ = writeln!(file, "{line}");
+    // One write, so a test reading the log never sees half a line.
+    let _ = file.write_all(format!("{line}\n").as_bytes());
     Ok(())
 }
 
@@ -1347,6 +1580,22 @@ pub fn run(argv: Vec<String>) -> i32 {
         fmt: &cli.format,
         fields: cli.fields.as_deref(),
     };
+    // Failure injection for tests: while the file named by
+    // $BJORN_FAKE_BEAR_FAIL_READ exists, every listing (a `list` that is not a
+    // `--count` probe, or a `search`) fails. The file stays, so which reload
+    // takes the failure is not a race with the background poll; the test
+    // removes it when it wants reads to work again.
+    let listing = match &cmd {
+        Cmd::List { listing, .. } => !listing.count,
+        Cmd::Search { .. } => true,
+        _ => false,
+    };
+    if listing
+        && let Some(flag) = std::env::var_os("BJORN_FAKE_BEAR_FAIL_READ").filter(|v| !v.is_empty())
+        && std::path::Path::new(&flag).exists()
+    {
+        return fail(ctx.fmt, "injected", "Injected failure");
+    }
     let mut state = load_state();
     let outcome = match cmd {
         Cmd::List { listing, tag } => cmd_list(&ctx, &state, &listing, tag.as_deref()),
@@ -1388,6 +1637,20 @@ pub fn run(argv: Vec<String>) -> i32 {
             &target,
             content.as_deref(),
             base.as_deref(),
+            no_update_modified,
+        ),
+        Cmd::Append {
+            target,
+            content,
+            position,
+            section,
+            no_update_modified,
+        } => cmd_append(
+            &mut state,
+            &target,
+            content.as_deref(),
+            &position,
+            section.as_deref(),
             no_update_modified,
         ),
         Cmd::Edit {
@@ -1445,6 +1708,18 @@ mod tests {
         assert!(!matches_query(&n, "#*/work"));
         assert!(matches_query(&n, "@pinned @whatever"));
         assert!(!matches_query(&n, "@untagged"));
+        assert!(matches_query(&n, "\"hello world\""));
+        assert!(!matches_query(&n, "\"world hello\""));
+        assert!(!matches_query(&n, "-\"hello world\""));
+        assert!(
+            !matches_query(&n, "\"[[\""),
+            "punctuation alone matches nothing"
+        );
+        assert!(!matches_query(&n, "@wikilinks"));
+        assert_eq!(
+            query_terms("a \"b c\" -\"d e\" f"),
+            vec!["a", "\"b c\"", "-\"d e\"", "f"]
+        );
     }
 
     #[test]
@@ -1509,5 +1784,42 @@ mod tests {
             .collect();
         // The Python regex stops a multi-word tag at the first space; the fake matches it.
         assert_eq!(found, vec!["work/sprint", "multi", "inline"]);
+    }
+
+    #[test]
+    fn hyphen_leading_values_parse_only_where_bearcli_takes_them() {
+        let parses = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("bearcli").chain(args.iter().copied())).is_ok()
+        };
+        assert!(parses(&["cat", "--format", "json", "--", "-x"]));
+        assert!(
+            !parses(&["cat", "-x"]),
+            "a hyphen-leading positional needs --"
+        );
+        assert!(parses(&[
+            "attachments",
+            "save",
+            "--filename=-a.png",
+            "--",
+            "N"
+        ]));
+        assert!(
+            !parses(&["attachments", "save", "--filename", "-a.png", "--", "N"]),
+            "a hyphen-leading value needs ="
+        );
+        assert!(!parses(&["edit", "--find", "- [ ] a", "--", "N"]));
+        assert!(parses(&[
+            "edit",
+            "--find=- [ ] a",
+            "--replace=- [x] a",
+            "--",
+            "N"
+        ]));
+        assert!(!parses(&["create", "-title"]));
+        assert!(parses(&["create", "--tags=-t", "--", "-title"]));
+        assert!(
+            parses(&["search", "--query", "-draft"]),
+            "bearcli documents this one"
+        );
     }
 }

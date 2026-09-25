@@ -1,0 +1,71 @@
+# Bjorn's config file. Copy it to ~/.config/bjorn/config.toml (or
+# $XDG_CONFIG_HOME/bjorn/config.toml), or point at it with --config PATH.
+# Every key is optional; the values shown are the defaults.
+
+# editor = "nvim"               # overrides $VISUAL / $EDITOR
+export_dir = "~/Downloads"      # where `x` proposes to write
+export_format = "md"            # preselected in the export picker: md | html | txt | rtf | pdf | textbundle
+poll_seconds = 5                # 0 disables the background refresh
+# workspace = "work"            # start scoped to this tag
+# bearcli = "/usr/local/bin/bearcli"  # default searches PATH, then Bear.app
+icon_style = "auto"             # auto | nerd | emoji | lucide | none
+
+# A built-in name (`bjorn --list-themes`), or the file name of a Bear
+# `.theme` file in ~/.config/bjorn/themes/ ("My Nord.theme" is "my-nord").
+theme = "red-graphite-dark"
+# mouse_pixels = true           # accepted so older config files still load; it has no effect
+
+[icons]                         # top-level tag -> Lucide icon name, or emoji:<glyph>
+# tech = "terminal"
+# school = "emoji:🎓"
+
+[reminders]                     # triage can push todos to Apple Reminders
+enabled = false
+list = ""                       # target list, e.g. "Bear"; remctl's default when empty
+due = "today"                   # due date for new reminders; "" for none
+remctl = ""                     # path to remctl; default searches PATH
+
+# Shell commands for `!` and `a`; see docs/actions.md. The menu's
+# "+ New action" row writes these for you.
+#
+# [[actions]]
+# name = "Copy as plain text"
+# command = "pbcopy"
+# format = "txt"                # md | html | txt | rtf | pdf | textbundle
+# confirm = false               # ask before running
+# timeout = 300                 # seconds; a captured command that overruns is killed
+# default = true                # what `!` runs
+# prompt = "Ask for what?"      # ask for a line of text first; the answer is $BJORN_ACTION_INPUT
+# interactive = false           # give the command the window and keyboard instead of capturing it
+# output = "toast"              # toast | append | new-note | replace: where stdout goes
+# section = "## Summary"        # with output = "append": the heading to add under
+
+# Daily notes are off by default. Uncomment [daily] to turn them on: then `D`
+# opens today's note and `bjorn capture "text"` adds a line to it. An empty
+# [daily] uses the defaults shown. `title` and `tag` are strftime formats (%-d
+# is the day without a leading 0). `title` must name one day (a year and a
+# day, no time), or Bjorn will not start while [daily] is on.
+# [daily]
+# title = "%B %-d, %Y (%A)"     # "September 19, 2026 (Saturday)"; the note is found by it
+# tag = "log/%Y/%m/%d"          # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace
+# template = "daily"            # templates/daily.md, else the built-in: ## title, tag, People, Topic, ---
+# capture_section = ""          # a heading like "## Inbox" (made at the end when missing); "" = end of note
+# capture_format = "* {{time}} {{text}}"
+
+# Dated sections: `s` adds today's section to the note under the cursor, `T`
+# lists every section written on one day. The values shown are the defaults.
+# [sections]
+# day_tag = "log/%Y/%m/%d"      # the day tag, a strftime format; defaults to [daily] tag when that names a day
+# heading_format = "%B %-d, %Y (%A)"  # the date heading; also how an existing section is recognized
+# insert = "before-first-dated-section"  # top | bottom | before-first-dated-section
+# template = """
+# ## {{heading}}
+# {{tag}}
+# * People:
+# * Topic:
+#
+# ---
+# """
+
+[templates]                     # `N` makes a note from one; copy config/templates/*.md to start
+# dir = "~/.config/bjorn/templates"

@@ -30,9 +30,12 @@ cd bjorn
 bjorn                 # or: cargo run --release --bin bjorn
 bjorn --tag work      # start scoped to a tag subtree
 bjorn --demo          # sample notes through the built-in fake bearcli, no Bear needed
+bjorn capture "call Ana"   # add a line to today's daily note, no TUI (needs [daily])
 ```
 
-`git pull && ./install.sh` is the update path.
+`git pull && ./install.sh` is the update path. It also installs the man page:
+`man bjorn` is the full reference — every flag, key, config key and file — and
+its source is [docs/bjorn.1](docs/bjorn.1) if you would rather read it here.
 
 ## Keys
 
@@ -42,8 +45,9 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `j` `k` `↑` `↓` | move within a pane; in the sidebar the cursor runs from the views into the tags; in the reader they scroll | `esc` | clear the search and its highlights |
 | `enter` | move into the reader for the highlighted note, at the first match while searching | `1`–`7` | Notes, Untagged, Todo, Today, Pinned, Archive, Trash |
 | `n` | new note (title, tags), then edit | `d` | move the note to the trash, after a confirm |
+| `D` | today's daily note, made from the daily template the first time; off until the config has `[daily]` (see [Daily notes and templates](#daily-notes-and-templates)) | `N` | new note from a template: pick one, then title and tags as for `n` |
 | `e` | edit in `$VISUAL` / `$EDITOR` | `u` | restore from Trash or Archive |
-| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle (`←` `→` pick, `enter` confirms) |
+| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle, PDF (`←` `→` pick, `enter` confirms) |
 | `b` | open in Bear.app | `!` / `a` | run the default action / open the action menu (see [Actions](#actions)) |
 | `w` | make the highlighted tag the workspace; again on it to leave | `W` | clear the workspace |
 | `f` | fold / unfold the highlighted tag's subtree | `F` | fold every tag, or unfold them all when all are folded |
@@ -51,6 +55,7 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `s` | add today's dated section to the note (see [Dated sections](#dated-sections)) | `T` | the day screen: every section written on one day |
 | `]` / `[` | next / previous match in the reader while searching | `r` | refresh now |
 | `o` | outline: the note's headings, indented by level; type to filter, `enter` scrolls there | `}` / `{` | next / previous heading in the reader |
+| `L` | the note's wiki links and backlinks; `enter` follows (see [Wiki links](#wiki-links)) | `backspace` / `alt+→` | back to the note a link was followed from / forward again (`ctrl+o`, `alt+←`, `alt+b` go back; `alt+f` goes forward) |
 | `?` | help (`esc` `q` `?` close it) | `q` | quit, after a confirm |
 
 The **workspace** is a tag subtree that scopes the whole app: the tag tree
@@ -87,6 +92,51 @@ already has: the cursor's neighbours are read ahead, a cold start keeps the
 bodies the preview listing had to read anyway, and only a body that has to
 come from bearcli waits out a 120 ms debounce. Holding `j` down scrolls the
 reader with the list. Every `bearcli` and `remctl` call has a 30 s timeout.
+
+## Wiki links
+
+Bear's `[[Note title]]` links are drawn in the theme's link color, without the
+brackets; click one to follow it, in the text or in a table. `[[Note
+title/Heading]]` lands on that heading (one inside a quote too), and `[[Note
+title|shown text]]` shows the text after the bar. Bear escapes punctuation
+that belongs to the title with a backslash (`\/`, `\#`), so a `\` before any
+ASCII punctuation is one, and `[[/Heading]]` points into the note itself.
+Some links carry a doubled escape (`[[Cloud Arch \\/ EA/Apr 19]]`, for the
+note `Cloud Arch / EA`); rather than guess the rule, a link is read as
+written first and then with each doubled escape taken as one, and the first
+reading that names a note wins. A link that escapes no `/` is also read
+whole first: `[[A/B testing]]` is the note `A/B testing` if there is one, and
+otherwise the heading `B testing` in `A`. Only when no reading names a note
+is creating one offered, under the first reading's title (`A/B testing`, so
+nothing the link says is dropped). Whatever is between the brackets is the title, markdown
+or not (`[[Q&A]]`, a backtick, `*`); brackets in a title work as long as they
+pair up (`[[[Draft] Plan]]`), but a title holding `]]` cannot be linked.
+Brackets inside code, inline or fenced, are left as written.
+
+`L` lists the links in the note (the first 1,000) and, below them, the notes
+that link to it, under a search box like the action menu's; `enter` follows.
+The backlinks come from a `bearcli search` for the phrase `[[Title`, with the
+title's `/` and `#` escaped as Bear writes them (a title needing that is
+searched for in both the single and the doubled form, and a title with a `/`
+also with the slash bare), in Notes and in the Archive (never the trash), run
+in the background, one search at a time. Bear matches a phrase as a prefix, so
+Bjorn parses every candidate's body and keeps only real links to this title:
+not `[[Title 2]]`, not a mention inside code. Each search reads at most 200
+candidates; when one hits that cap the list says it may be incomplete. A
+title too short or odd for a phrase (under three letters or digits before a
+`"`, `\` or `|`) is searched as `@wikilinks` instead, which covers every note
+holding a `[[`.
+
+A link resolves to the note with that exact title, ignoring case; when several
+share it, an active note wins over an archived one, which wins over one in the
+trash, and then the newest. A title no note has offers to create the note,
+then opens it in the editor as `n` does. When the target is outside the
+current list the list widens to the view that holds it (Notes, Archive or
+Trash), and a workspace that excludes it is cleared, with a toast. `backspace`
+(or `ctrl+o`, `alt+←`, `alt+b`) goes back to where you were, list, workspace,
+search and scroll included; `alt+→` (or `alt+f`) goes forward again. While the
+search box is open, `backspace` edits the query instead. `enter` in triage
+counts as a jump too.
 
 ## Dated sections
 
@@ -159,12 +209,20 @@ for — one containing a `"`, or shorter than six characters, such as `%d` on it
 own — the tag search runs alone, and heading-only notes are then found only if
 they also carry the tag.
 
-The template's placeholders are `{{date}}` (the `heading_format` date),
-`{{date:FMT}}` and `{{time:FMT}}` (any strftime pattern), `{{time}}` (`%H:%M`),
-`{{tag}}` (the day tag as Bear writes it, `#` and all) and `{{title}}` (the
-note's title). An unknown name is left as written, so a typo shows up in the
-note instead of vanishing. `config/sections/section.md` in this repo is the
-default, kept as a starting point to copy into `template` and edit.
+The template is filled in the way note templates are (see [Daily notes and
+templates](#daily-notes-and-templates)): `{{date}}` (ISO), `{{time}}` and
+`{{date:FMT}}`. It has three placeholders of its own: `{{heading}}` (today in
+`heading_format`), `{{tag}}` (the day tag as Bear writes it, `#` and all) and
+`{{title}}` (the note's title). The heading is a placeholder rather than a
+`{{date:FMT}}` because `heading_format` is also how `s` and `T` recognize a
+dated heading, so one setting writes it and finds it again. Anything else in
+braces is left as written, so a typo shows up in the note instead of
+vanishing. `config/sections/section.md` in this repo is the default, kept as
+a starting point to copy into `template` and edit.
+
+`day_tag` defaults to `[daily] tag` when `[daily]` is on and its tag names a
+whole day, so daily notes and dated sections share one time axis; otherwise
+it is `log/%Y/%m/%d`.
 
 ## Todo triage
 
@@ -179,23 +237,123 @@ in Bear.app at that section, `/` filters, `r` reloads, `esc` or `q` closes.
 With `[reminders] enabled = true` and [remctl](https://github.com/7robots/remctl)
 on your PATH, `a` also pushes marked items to Apple Reminders. Each reminder's
 notes carry the note's `bear://` link and a `bear-todo: <key>` line (the same
-scheme remtui uses, so reminders it created are recognised); on every load
+scheme remtui uses, so reminders it created are recognized); on every load
 they are read back and rows show ⏰ for an open reminder or ✓ for one you
 completed in Reminders, ready to `x` in Bear. Nothing is written into Bear when
 a reminder is added.
 
+## Daily notes and templates
+
+Daily notes are off until the config has a `[daily]` table. Bear has no
+daily notes of its own (its Today view is notes modified today), so Bjorn
+does not make any unless asked. An empty table turns them on with the
+defaults:
+
+```toml
+[daily]
+```
+
+Without it, `D` shows a hint instead of making a note, and `bjorn capture`
+and `bjorn today` refuse with the same message and a non-zero exit, without
+calling bearcli. Templates (`N`) work either way.
+
+`D` opens today's note, making it the first time. By default it is titled
+with the date as a second-level heading and tagged with a dated nested tag:
+
+```markdown
+## September 19, 2026 (Saturday)
+#log/2026/09/19
+* People:
+* Topic:
+
+---
+```
+
+The note is found by its title: `D` selects it when the snapshot already
+has it, and otherwise calls `bearcli create --if-not-exists -- "<title>"`,
+which returns the existing note or makes one from the daily template. Asking
+twice from Bjorn never makes a second note; two processes asking in the same
+instant could, and the duplicate-title warning would then say so. Bear reads
+the `## ` first line as the title and keeps it as written. If the note sits
+outside the workspace, the workspace is cleared to show it. A trashed or
+archived note with today's title is never reused; Bear makes a fresh one.
+Rename the note's heading in Bear and it is no longer today's note: the next
+`D` or capture makes a second one under the configured title.
+
+Because the title is the only link, `[daily] title` must name exactly one
+day: a year with a month and day (`%Y-%m-%d`), a year and day of the year
+(`%Y-%j`), or an ISO week date (`%G-W%V-%u`), and no time of day. A title
+that repeats (`%A`, `%B %-d`) would quietly reuse last week's or last year's
+note, so Bjorn refuses it at start with an error naming the key. The check
+runs only while `[daily]` is on; a commented-out table is never read.
+
+Capture from anywhere without opening the app:
+
+```sh
+bjorn capture "call Ana about the budget"   # the words, joined with spaces
+pbpaste | bjorn capture                     # or stdin when there are none (up to 1 MiB)
+bjorn capture -- "$text"                    # text that may start with a dash
+bjorn --demo capture "try it"               # flags go before the subcommand
+bjorn today                                 # prints: <id><TAB><title>
+```
+
+`capture` adds `* 14:05 call Ana about the budget` at the end of today's
+note, making the note first if needed. It prints nothing on success and
+exits non-zero with the reason on stderr otherwise: blank text, over 1 MiB
+on stdin, or an unknown flag. Control characters other than tab and newline
+are dropped from the text. `--config`, `--demo` and `--tag` belong before
+`capture` or `today`; after the subcommand any word starting with `-` is an
+error rather than text, so a script passing arbitrary text (a commit message
+from a hook, say) should write `bjorn capture -- "$text"`. Set
+`capture_section = "## Inbox"` to collect captures under that heading
+instead; it is matched ignoring case, and added at the end of the note the
+first time. It must be a heading line (`#` to `######`, a space, a name).
+`{{workspace}}` in `capture_format` is the config's `workspace`, or the tag
+given with `--tag` before the subcommand.
+
+A multi-line capture stays one entry: its blank lines are dropped and the
+lines after the first are indented past the bullet, so a pasted `## Foo` or
+`---` is text in that entry, not a heading or a rule in the note. The note
+is the one for the day the capture runs: a capture at 00:05 goes to the new
+day's note. With no words, `capture` reads stdin, and in a git hook that is
+git's own (a pre-push hook gets ref lines), so give the text as an argument
+there, or add `</dev/null`.
+
+`N` makes a note from a template: a Markdown file in the templates
+directory (`[templates] dir`, default `~/.config/bjorn/templates/`). Pick
+one in the search box, then settle the title and tags as for `n`. When a
+template starts with a heading (after any YAML front matter, which stays on
+top), its text is the proposed title, and the note keeps that heading level.
+`{{date}}`, `{{time}}`, `{{date:%A}}` (any strftime format), `{{title}}`,
+`{{tag}}` (the note's tags as Bear writes them) and `{{workspace}}` are
+filled in; anything else in braces stays as written. Files over 256 KiB or
+not UTF-8 are skipped; symlinks are followed. Meeting, 1:1, decision record
+and daily examples ship in `config/templates/`:
+
+```sh
+mkdir -p ~/.config/bjorn/templates
+cp config/templates/*.md ~/.config/bjorn/templates/
+```
+
+A `daily.md` there replaces the built-in daily layout (and is left out of
+`N`'s list); `{{tag}}` in it is the dated tag. A `daily.md` that exists but
+cannot be read is reported rather than replaced by the built-in layout.
+`template` can also name another file: `sub/day` is inside the templates
+directory, an absolute or `~/` path is taken as it is.
+
 ## Configuration
 
 `~/.config/bjorn/config.toml` (or `$XDG_CONFIG_HOME/bjorn/config.toml`), or
-`--config PATH`. Every key is optional:
+`--config PATH`. Every key is optional. The block below is a sample, not a
+list of defaults: each line says whether its value is the default or an example.
 
 ```toml
-editor = "nvim"               # overrides $VISUAL / $EDITOR
+editor = "nvim"               # example; unset falls back to $VISUAL, $EDITOR, vim
 export_dir = "~/Downloads"    # where `x` proposes to write
-export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle
+export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle | pdf
 poll_seconds = 5              # 0 disables the background refresh
-workspace = "work"            # start scoped to this tag
-bearcli = "/usr/local/bin/bearcli"  # optional; default searches PATH, then Bear.app
+workspace = "work"            # example; unset starts unscoped
+bearcli = "/usr/local/bin/bearcli"  # example; unset searches PATH, then Bear.app
 icon_style = "auto"           # auto | nerd | emoji | lucide | none
 theme = "red-graphite-dark"   # see Themes below; `bjorn --list-themes` prints the names
 
@@ -204,12 +362,12 @@ tech = "terminal"
 school = "emoji:🎓"
 
 [sections]                    # dated sections: `s` writes one, `T` lists a day
-day_tag = "log/%Y/%m/%d"      # the day tag, as a strftime pattern; the time axis
-heading_format = "%B %-d, %Y (%A)"   # the date heading, as a strftime pattern
+day_tag = "log/%Y/%m/%d"      # the day tag, as a strftime pattern; defaults to [daily] tag when that names a day
+heading_format = "%B %-d, %Y (%A)"   # the date heading, as a strftime pattern; also how one is recognized
 insert = "before-first-dated-section"  # top | bottom | before-first-dated-section; anything else warns at start-up
 # what `s` writes; the placeholders are listed under Dated sections
 template = """
-## {{date}}
+## {{heading}}
 {{tag}}
 * People:
 * Topic:
@@ -219,12 +377,24 @@ template = """
 
 [reminders]                   # triage can push todos to Apple Reminders
 enabled = false               # off by default
-list = "Bear"                 # target list; remctl's default when empty
+list = "Bear"                 # example; unset uses remctl's own default list
 due = "today"                 # due date for new reminders; "" for none
 remctl = ""                   # path to remctl; default searches PATH
 
-[[actions]]                   # shell commands for `!` and `a`; see Actions below
+[[actions]]                   # shell commands for `!` and `a`, output to a toast or back into Bear; see Actions below
+
+# [daily]                     # turns on `D` and `bjorn capture` (off without it); strftime formats
+# title = "%B %-d, %Y (%A)"   # the note is found by this title, so it must name one day
+# tag = "log/%Y/%m/%d"        # "" for none; "work/log/%Y/%m/%d" keeps it in a workspace
+# template = "daily"          # templates/daily.md, else the built-in layout
+# capture_section = ""        # a heading line, e.g. "## Inbox"; "" adds at the end of the note
+# capture_format = "* {{time}} {{text}}"
+
+[templates]
+dir = "~/.config/bjorn/templates"
 ```
+
+Every default is in [config/config.toml.example](config/config.toml.example).
 
 `mouse_pixels` and `--no-mouse-pixels` are accepted from older config files
 and ignored: the mouse always stays in cell mode.
@@ -269,14 +439,37 @@ bjorn --theme nord
 
 They are generated from the theme files inside Bear.app by
 `tools/bear_theme.py`, which maps Bear's keys onto the app's palette fields
-(page, sidebar, headers, cursor, links, code, tags). The toast colours come
-from the palette a theme is named after, or from Bear's highlighter colours
+(page, sidebar, headers, cursor, links, code, tags). The toast colors come
+from the palette a theme is named after, or from Bear's highlighter colors
 for Bear's own designs; text over the accent is chosen for contrast. When a
 Bear update adds a theme, `python3 tools/bear_theme.py > src/ui/palettes.rs`
 picks it up. `?` inside the app lists the names and marks the one in use.
 
 An unknown name in the config falls back to the default with a warning rather
 than stopping the app. An unknown `--theme` on the command line is an error.
+
+#### Your own themes
+
+Bjorn also reads Bear's `.theme` format from `~/.config/bjorn/themes/` (or
+`$XDG_CONFIG_HOME/bjorn/themes/`; with `--config`, from `themes/` beside that
+file). Drop a file there and name it with `--theme` or `theme =`:
+`My Nord.theme` is `my-nord`. Symlinks are followed, so a dotfile manager can
+link files into place. The file is JSON with `base`, `sidebar`, `notes` and
+`editor` sections; a value may be a `$section.key` reference, and
+`meta."base theme"` names a theme to inherit from, looked up in the same
+directory first and then among the built-in themes. Only
+`base.background color`, `base.text color` and `base.accent color` are
+required. `--list-themes` reports on stderr any file it skipped and why, and
+`--theme` naming a file that did not load says what is wrong with it.
+
+Bear's own theme files are Shiny Frog's and are not in this repository, but
+you can copy any of them out of Bear.app as a starting point; see
+[`config/themes/`](config/themes/README.md) for the path, a manifest of their
+hashes, and a few themes written for Bjorn. Give the copy a new name: a
+built-in name always wins over a file.
+
+[`config/config.toml.example`](config/config.toml.example) is a commented
+config file with every key at its default.
 
 ### Icons
 
@@ -320,7 +513,7 @@ command of yours: publish it, copy it, POST it, push it.
 [[actions]]
 name = "Publish to S3"
 command = 'aws s3 cp "$BJORN_NOTE_FILE" "s3://notes/$BJORN_NOTE_TITLE.html"'
-format = "html"        # md (default), html, txt, rtf, textbundle
+format = "html"        # md (default), html, txt, rtf, textbundle, pdf
 confirm = true         # ask first
 default = true         # this is what `!` runs
 
@@ -333,6 +526,18 @@ format = "txt"
 name = "Mail it to someone"
 command = 'mail -s "$BJORN_NOTE_TITLE" "$BJORN_ACTION_INPUT" < "$BJORN_NOTE_FILE"'
 prompt = "Send to which address"   # asks first, answer in $BJORN_ACTION_INPUT
+
+[[actions]]
+name = "Open a session"
+command = 'my-session "$BJORN_ACTION_INPUT"'
+prompt = "What should it do?"
+interactive = true                 # takes the window, like the editor does
+
+[[actions]]
+name = "Summarize"
+command = 'llm "Summarize this note in five bullet points."'
+output = "append"                  # toast (default), append, new-note, replace
+section = "## Summary"             # append under this heading
 ```
 
 `a` opens the action menu — a search box over your actions, filtered as you
@@ -347,7 +552,32 @@ rendered the way export renders it, written to a temp file the command gets
 as `$BJORN_NOTE_FILE` (and on stdin), with the title, id, tags and stamps in
 the environment; the file goes away when the command ends. The first line
 the command prints comes back as a toast, and a non-zero exit is reported
-with its stderr. Full reference: [docs/actions.md](docs/actions.md).
+with its stderr. With `output`, everything it prints goes back into Bear
+instead: appended to the note (or under one of its headings), as a new note,
+or in place of the note, hash-guarded and after asking. Empty output and a
+failed command never write. An action marked `interactive` instead takes the window and the
+keyboard in a pseudo-terminal until its command exits, for the ones that ask
+their own questions. Full reference: [docs/actions.md](docs/actions.md).
+
+A PDF is built in: `x` then `p` writes one, and `format = "pdf"` hands one to
+an action. It reads like Bear's own — A4, a light page whatever the theme is,
+the theme's own colors on the links and the list markers. Bjorn draws no page
+itself; it prints the HTML rendering with the first converter it finds —
+WeasyPrint on `PATH`, then a Chromium browser (`chromium`/`google-chrome` on
+`PATH`, then Chrome, Chromium, Brave, Edge or Vivaldi in `/Applications` or
+`~/Applications`), headless, with a throwaway profile and no network. macOS
+ships neither. Before printing, the note's body is parsed and rebuilt from an
+allowlist, so a note's inline HTML cannot make the converter fetch a remote URL
+or bake a local file into the PDF. Piping `format = "html"` to `weasyprint` or
+Chrome yourself skips that filter; use `pdf`.
+Details: [A PDF](docs/actions.md#a-pdf).
+
+Publishing to a [Hugo](https://gohugo.io) site is an action too:
+[`contrib/hugo-publish`](contrib/hugo-publish) writes the note as a post
+(a draft unless you pick the entry that publishes live), keeps its tags,
+wiki links and local links off the site, and never replaces a file it did
+not write. Bjorn itself stays free of Hugo code and network calls. Setup and
+what it guards: [Publish to Hugo](docs/actions.md#publish-to-hugo).
 
 ## Development
 
@@ -373,3 +603,7 @@ The plan and its status live in `docs/plans/bjorn-rust.md`; deferred work in
 
 Bjorn exists because of [Shiny Frog](https://shinyfrog.net) and Bear, and
 `bearcli` is what makes a terminal client possible at all. Thank you.
+
+Most of the built-in themes are color palettes derived from
+Bear's theme designs, which are Shiny Frog's. Their theme files are not
+included in this repository.

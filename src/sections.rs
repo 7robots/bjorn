@@ -26,7 +26,7 @@
 //! one. Blank lines directly around the insert point are collapsed to exactly
 //! one; nothing else in the note is touched.
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use regex::Regex;
 use serde_json::Value;
 use std::sync::LazyLock;
@@ -50,8 +50,6 @@ pub const SNIPPET_LIMIT: usize = 90;
 /// Shorter than this, a date heading is too common a string to search for.
 pub const MIN_PHRASE: usize = 6;
 
-static PLACEHOLDER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\{\{\s*([a-zA-Z]+)(?::([^}]*))?\s*\}\}").unwrap());
 static BULLET_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?").unwrap());
 static RULE_RE: LazyLock<Regex> =
@@ -120,22 +118,21 @@ impl Default for SectionsConfig {
     }
 }
 
-/// `date.format(fmt)` without the panic an invalid pattern would cause.
-fn format_date(date: NaiveDate, fmt: &str) -> Option<String> {
-    let when = date.and_time(NaiveTime::MIN);
-    format_time(when, fmt)
-}
-
-/// `when.format(fmt)`, or None for a pattern this cannot render.
+/// `date.format(fmt)` for `day_tag` and `heading_format`, or None for a
+/// pattern this cannot render.
 ///
-/// Two ways a pattern fails, and both have to be caught: a malformed one
-/// (`Item::Error`), and one that parses but has nothing to render from a naive
-/// time — `%Z` and `%z` want a time zone. The second only fails when the value
-/// is written, and `to_string()` turns that failure into a panic, so the text
-/// is written into a String by hand instead.
-fn format_time(when: NaiveDateTime, fmt: &str) -> Option<String> {
+/// This stays a date formatter rather than `templates::strftime`, which
+/// formats a zoned time: both patterns have to parse back into a
+/// `NaiveDate`, and a `%Z` or `%z` in one would render (as `+02:00`, say)
+/// into a heading or tag that never reads back as a day. On a naive date
+/// those two have nothing to render from, so they fail here, where `problem`
+/// can say so. They fail only when the value is written, and `to_string()`
+/// turns that failure into a panic, so the text is written into a String by
+/// hand; a malformed pattern (`Item::Error`) is caught before that.
+fn format_date(date: NaiveDate, fmt: &str) -> Option<String> {
     use std::fmt::Write as _;
 
+    let when = date.and_time(NaiveTime::MIN);
     let items: Vec<_> = chrono::format::StrftimeItems::new(fmt).collect();
     if items
         .iter()
@@ -146,6 +143,21 @@ fn format_time(when: NaiveDateTime, fmt: &str) -> Option<String> {
     let mut out = String::new();
     write!(out, "{}", when.format_with_items(items.into_iter())).ok()?;
     Some(out)
+}
+
+/// `when` as a local time, for `templates::render`. A wall-clock time the
+/// zone skips (the hour a daylight-saving change jumps over) has no local
+/// reading; the hour after it does, on the same date.
+fn local(when: NaiveDateTime) -> DateTime<Local> {
+    Local
+        .from_local_datetime(&when)
+        .earliest()
+        .or_else(|| {
+            Local
+                .from_local_datetime(&(when + chrono::Duration::hours(1)))
+                .earliest()
+        })
+        .unwrap_or_else(Local::now)
 }
 
 impl SectionsConfig {
@@ -193,26 +205,30 @@ impl SectionsConfig {
         NaiveDate::parse_from_str(text.trim(), &self.heading_format).ok()
     }
 
-    /// The template with its placeholders filled in:
-    /// `{{date}}`, `{{date:FMT}}`, `{{time}}`, `{{time:FMT}}`, `{{tag}}`,
-    /// `{{title}}`. An unknown name is left as written, so a typo shows up in
-    /// the note instead of silently vanishing.
+    /// The template with its placeholders filled in by `templates::render`,
+    /// the renderer note templates use, so both read the same way: `{{date}}`
+    /// (ISO), `{{time}}` (`%H:%M`) and `{{date:FMT}}` (any strftime pattern,
+    /// times included) from `when`; and three of this template's own:
+    /// `{{heading}}` (the date in `heading_format`), `{{tag}}` (the day tag as
+    /// Bear writes it) and `{{title}}` (the note's title). An unknown name, or
+    /// a `{{date:FMT}}` chrono cannot read, is left as written, so a typo
+    /// shows up in the note instead of silently vanishing.
+    ///
+    /// The heading is a placeholder of its own rather than a `{{date:FMT}}`
+    /// because `heading_format` is also what finds a dated section again
+    /// (`find_sections`, and the day screen's phrase search): one setting
+    /// writes and reads the heading, so the two cannot drift apart.
     pub fn render(&self, when: NaiveDateTime, note_title: &str) -> String {
         let date = when.date();
-        let body = PLACEHOLDER_RE.replace_all(&self.template, |caps: &regex::Captures| {
-            let name = caps[1].to_lowercase();
-            let arg = caps.get(2).map(|m| m.as_str());
-            match (name.as_str(), arg) {
-                ("date", None) => self.heading_text(date),
-                ("date", Some(fmt)) => format_date(date, fmt).unwrap_or_default(),
-                ("time", None) => format_time(when, "%H:%M").unwrap_or_default(),
-                ("time", Some(fmt)) => format_time(when, fmt).unwrap_or_default(),
-                ("tag", _) => self.day_tag_display(date),
-                ("title", _) => note_title.to_string(),
-                _ => caps[0].to_string(),
-            }
-        });
-        body.trim_end_matches('\n').to_string()
+        let heading = self.heading_text(date);
+        let tag = self.day_tag_display(date);
+        crate::templates::render(
+            &self.template,
+            &local(when),
+            &[("heading", &heading), ("tag", &tag), ("title", note_title)],
+        )
+        .trim_end_matches('\n')
+        .to_string()
     }
 }
 
@@ -708,13 +724,33 @@ mod tests {
     #[test]
     fn placeholders_cover_dates_times_tag_and_title() {
         let config = SectionsConfig {
-            template: "## {{date:%Y-%m-%d}} {{time}} {{tag}} {{title}} {{nonsense}}".into(),
+            template: "## {{heading}} {{date}} {{date:%d.%m.}} {{time}} {{date:%H.%M}} {{tag}} \
+                       {{title}} {{nonsense}}"
+                .into(),
             ..SectionsConfig::default()
         };
         assert_eq!(
             config.render(noon(2026, 9, 19), "Field Notes"),
-            "## 2026-09-19 12:30 #log/2026/09/19 Field Notes {{nonsense}}"
+            "## September 19, 2026 (Saturday) 2026-09-19 19.09. 12:30 12.30 #log/2026/09/19 \
+             Field Notes {{nonsense}}"
         );
+    }
+
+    #[test]
+    fn the_heading_placeholder_follows_heading_format() {
+        // `{{heading}}` is the one setting that also finds the section again,
+        // so a changed `heading_format` changes what is written and what is
+        // recognized together.
+        let config = SectionsConfig {
+            heading_format: "%Y-%m-%d (%a)".into(),
+            ..SectionsConfig::default()
+        };
+        let block = config.render(noon(2026, 9, 19), "T");
+        assert!(block.starts_with("## 2026-09-19 (Sat)\n"), "{block}");
+        let found = find_sections(&config, &format!("# T\n\n{block}\n"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].date, date(2026, 9, 19));
+        assert_eq!(found[0].heading, "## 2026-09-19 (Sat)");
     }
 
     #[test]
@@ -881,11 +917,17 @@ mod tests {
             assert_eq!(config.heading_phrase(date(2026, 9, 19)), "", "{fmt}");
             assert!(config.problem(date(2026, 9, 19)).is_some(), "{fmt}");
         }
+        // In the template a pattern chrono cannot read stays as typed, the
+        // way note templates treat it; `{{time:FMT}}` is not a placeholder
+        // (`{{date:FMT}}` takes time patterns too), so it stays as well.
         let config = SectionsConfig {
-            template: "## {{date:%Z}}|{{time:%z}}|end".into(),
+            template: "## {{date:%}}|{{time:%z}}|end".into(),
             ..SectionsConfig::default()
         };
-        assert_eq!(config.render(noon(2026, 9, 19), "T"), "## ||end");
+        assert_eq!(
+            config.render(noon(2026, 9, 19), "T"),
+            "## {{date:%}}|{{time:%z}}|end"
+        );
         let config = SectionsConfig {
             day_tag: "log/%Z".into(),
             ..SectionsConfig::default()
@@ -1153,7 +1195,7 @@ mod tests {
         // the section's body; that is the section's, not the note's.
         let config = SectionsConfig {
             insert: InsertPosition::Bottom,
-            template: "## {{date}}\n* People:\n{{tag}}".into(),
+            template: "## {{heading}}\n* People:\n{{tag}}".into(),
             ..SectionsConfig::default()
         };
         let body = "# T\n#t\n\n## September 12, 2026 (Saturday)\n* People: Ada\n#log/2026/09/12\n";

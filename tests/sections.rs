@@ -334,6 +334,8 @@ async fn enter_opens_the_note_at_that_section() {
     // section means scrolling to it.
     let mut h = Harness::new(fake.config(), Arc::new(fake.client()), None, (100, 14));
     h.load().await;
+    let before = h.app.reader.note.as_ref().map(|n| n.id.clone());
+    assert!(before.is_some() && before.as_deref() != Some("NOTE-FERRY"));
     open_day(&mut h).await;
     h.press("j");
     assert_eq!(
@@ -356,6 +358,11 @@ async fn enter_opens_the_note_at_that_section() {
         "the section's heading is the first line in the reader: {}",
         h.text()
     );
+
+    // A jump like following a link: backspace comes back.
+    h.press("backspace");
+    h.until(move |app| app.reader.note.as_ref().map(|n| n.id.clone()) == before)
+        .await;
 }
 
 #[tokio::test]
@@ -1027,7 +1034,7 @@ async fn a_scroll_waiting_on_a_note_that_cannot_be_read_is_dropped() {
     })
     .await;
     assert!(
-        h.app.pending_scroll.is_none(),
+        !h.app.jump_pending(),
         "a scroll that will never happen must not fire on the next note"
     );
 }
@@ -1104,7 +1111,7 @@ async fn enter_leaves_a_workspace_the_note_is_outside_of() {
         h.app
             .toast_messages()
             .iter()
-            .any(|m| m.contains("Left the workspace #home")),
+            .any(|m| m == "Workspace cleared"),
         "{:?}",
         h.app.toast_messages()
     );
@@ -1145,7 +1152,7 @@ async fn a_scroll_waiting_on_a_locked_note_is_dropped() {
 
     // A locked note is never read, so the scroll waiting on it would sit there
     // and fire on whichever note is drawn next.
-    h.app.pending_scroll = Some(("NOTE-SEALED".to_string(), "## Anything".to_string()));
+    h.app.land_on_section("NOTE-SEALED", "## Anything");
     let note = h.app.snapshot.by_id("NOTE-SEALED").unwrap().clone();
     h.app.schedule_preview(note, true, true);
     h.settle().await;
@@ -1154,5 +1161,5 @@ async fn a_scroll_waiting_on_a_locked_note_is_dropped() {
         "{:?}",
         h.app.reader.message()
     );
-    assert!(h.app.pending_scroll.is_none());
+    assert!(!h.app.jump_pending());
 }

@@ -315,6 +315,12 @@ async fn goto_a_note_outside_the_current_list() {
     h.until(|app| app.notes.current().is_some_and(|n| n.id == "NOTE-PLANNING"))
         .await;
     assert_eq!(h.app.selection.view, bjorn::model::View::All);
+    // The jump is a history entry: backspace returns to Untagged.
+    assert_eq!(h.app.back.len(), 1);
+    h.press("backspace");
+    h.until(|app| app.notes.current().is_some_and(|n| n.id == "NOTE-UNTAGGED"))
+        .await;
+    assert_eq!(h.app.selection.view, bjorn::model::View::Untagged);
 }
 
 #[tokio::test]
@@ -558,7 +564,7 @@ async fn enter_on_a_todo_whose_note_is_gone_says_so_and_changes_nothing() {
         h.app
             .toast_messages()
             .iter()
-            .any(|m| m.contains("no longer in the list")),
+            .any(|m| m.contains("no longer in Bear")),
         "{:?}",
         h.app.toast_messages()
     );

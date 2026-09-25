@@ -58,10 +58,9 @@ async fn visual_beats_editor_and_config_beats_both() {
     ]));
     h.load().await;
     h.press("e");
-    // The redirect creates the marker before `printf` writes into it.
-    h.until(|_| std::fs::read_to_string(&marker).is_ok_and(|s| !s.is_empty()))
+    // `>` creates the marker before `printf` writes it; wait for the text.
+    h.until(|_| std::fs::read_to_string(&marker).is_ok_and(|s| s == "visual"))
         .await;
-    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "visual");
     let configured = fake_editor(
         fake.dir.path(),
         "configured.sh",
@@ -345,12 +344,15 @@ async fn export_via_picker(h: &mut bjorn::harness::Harness, key: &str) -> std::p
     assert_eq!(h.app.overlay.as_ref().map(|o| o.name()), Some("Text"));
     let target = std::path::PathBuf::from(prefill(h));
     h.press("enter");
-    h.until(|_| target.exists()).await;
+    // The toast, not the path: a bundle's folder exists before its files do.
+    // It names the target, so an earlier export's toast does not count.
+    let done = format!("Exported to {}", target.display());
+    h.until(|app| app.toast_messages().contains(&done)).await;
     target
 }
 
 #[tokio::test]
-async fn x_exports_to_the_prefilled_path_and_can_be_cancelled() {
+async fn x_exports_to_the_prefilled_path_and_can_be_canceled() {
     let fake = Fake::new();
     let mut h = fake.harness();
     h.load().await;
@@ -389,16 +391,16 @@ async fn x_exports_to_the_prefilled_path_and_can_be_cancelled() {
             .to_string_lossy()
     );
     h.press("enter");
-    h.until(|_| Path::new(&path).exists()).await;
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.starts_with("# Sprint Planning\n#work/sprint\n"));
-    assert!(text.contains("- [ ] write the release notes"));
+    // The toast, not the path: the file exists before it is written.
     h.until(|app| {
         app.toast_messages()
             .iter()
             .any(|m| m.starts_with("Exported to"))
     })
     .await;
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# Sprint Planning\n#work/sprint\n"));
+    assert!(text.contains("- [ ] write the release notes"));
 }
 
 #[tokio::test]
@@ -500,6 +502,47 @@ async fn r_exports_rtf_and_rtfd_when_the_note_has_images() {
     assert!(
         names.iter().any(|n| n == "TXT.rtf") && names.iter().any(|n| n.ends_with(".png")),
         "{names:?}"
+    );
+}
+
+#[tokio::test]
+async fn p_exports_a_pdf_or_reports_the_missing_converter() {
+    let fake = Fake::new();
+    let mut h = fake.harness();
+    h.load().await;
+    let target = fake.config().export_dir.join("Sprint Planning.pdf");
+    h.press("x");
+    h.press("p");
+    h.press("enter");
+    // Neither converter ships with macOS, so the export has to say what it
+    // wants on a machine without one rather than fail blankly. A browser can
+    // take a while to start cold, so the wait is longer than the default.
+    let wanted = bjorn::export::Converter::find().is_some();
+    h.wait_until(
+        move |app| {
+            app.toast_messages().iter().any(|m| {
+                m.contains(if wanted {
+                    "Sprint Planning.pdf"
+                } else {
+                    "weasyprint"
+                })
+            })
+        },
+        std::time::Duration::from_secs(90),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
+    if !wanted {
+        assert!(!target.exists(), "nothing written without a converter");
+        return;
+    }
+    // The PDF is moved into place whole, so seeing the file means seeing all
+    // of it — a converter that dies halfway leaves the export directory alone.
+    let bytes = std::fs::read(&target).unwrap();
+    assert!(
+        bytes.starts_with(b"%PDF"),
+        "not a PDF: {:?}",
+        bytes.get(..8)
     );
 }
 

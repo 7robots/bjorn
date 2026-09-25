@@ -71,6 +71,22 @@ pub fn strip_control(text: &str) -> String {
         .collect()
 }
 
+/// Is `c` a bidirectional embedding, override or isolate control (U+202A to
+/// U+202E, U+2066 to U+2069)? Each reorders the text after it, so a title
+/// holding one can draw as something it is not ("Trojan Source").
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// `text` without bidi controls, for anything drawn as a label: a note's
+/// title and preview, a tag, a toast. ratatui already drops control
+/// characters (Cc) when it draws; these are format characters (Cf) and reach
+/// the terminal. The note body is left alone, where right-to-left writing
+/// may need them.
+pub fn strip_bidi(text: &str) -> String {
+    text.chars().filter(|c| !is_bidi_control(*c)).collect()
+}
+
 /// bearcli's timestamp shape: `2026-09-08T13:33:55Z`.
 pub fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -102,6 +118,20 @@ mod tests {
         assert!(which("sh").is_some());
         assert!(which("no-such-binary-xyz").is_none());
         assert!(which("/bin/sh").is_some());
+    }
+
+    #[test]
+    fn bidi_controls_are_stripped_and_other_text_kept() {
+        assert_eq!(strip_bidi("invoice\u{202E}fdp.exe"), "invoicefdp.exe");
+        assert_eq!(
+            strip_bidi("\u{2066}a\u{2067}b\u{2068}c\u{2069}\u{202A}\u{202B}\u{202C}\u{202D}"),
+            "abc"
+        );
+        // Marks that reorder nothing, and right-to-left text itself, stay.
+        assert_eq!(
+            strip_bidi("שלום \u{200F}x\u{200E}"),
+            "שלום \u{200F}x\u{200E}"
+        );
     }
 
     #[test]

@@ -71,6 +71,42 @@ impl Default for RemindersConfig {
     }
 }
 
+/// `[daily]`: the note `D` opens and `bjorn capture` writes to. `title` and
+/// `tag` are strftime formats for the day; `template` names a file in the
+/// templates directory (`daily` falls back to the built-in layout when there
+/// is no `daily.md`). These are the values a `[daily]` table starts from;
+/// without the table there are no daily notes at all (`Config::daily`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DailyConfig {
+    pub title: String,
+    pub tag: String,
+    pub template: String,
+    /// A heading line (`## Inbox`) for `bjorn capture` to add under, made at
+    /// the end of the note when missing; empty adds at the end of the note.
+    pub capture_section: String,
+    /// What one capture writes; `{{text}}` is what was captured.
+    pub capture_format: String,
+}
+
+pub const DEFAULT_DAILY_TEMPLATE: &str = "daily";
+
+impl Default for DailyConfig {
+    fn default() -> Self {
+        Self {
+            title: "%B %-d, %Y (%A)".into(),
+            tag: "log/%Y/%m/%d".into(),
+            template: DEFAULT_DAILY_TEMPLATE.into(),
+            capture_section: String::new(),
+            capture_format: "* {{time}} {{text}}".into(),
+        }
+    }
+}
+
+/// `[templates] dir`: where `N` and the daily note look for `*.md` templates.
+pub fn default_templates_dir() -> PathBuf {
+    config_dir().join("templates")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub editor: String,
@@ -81,7 +117,7 @@ pub struct Config {
     pub bearcli: String,
     pub icon_style: String,
     pub icons: BTreeMap<String, String>,
-    /// Palette name; see `ui::theme::THEMES`. An unknown name falls back to
+    /// Palette name; see `ui::theme::names`. An unknown name falls back to
     /// the default, so a typo never stops the app.
     pub theme: String,
     /// Accepted for compatibility with the Python Bjorn's config file. The
@@ -92,6 +128,11 @@ pub struct Config {
     pub sections: SectionsConfig,
     /// `[[actions]]` from the config file, in the order they are written.
     pub actions: Vec<Action>,
+    /// `None` unless the file has a `[daily]` table. Daily notes go beyond
+    /// what Bear itself has, so they are opt-in: an empty table turns them on
+    /// with the defaults.
+    pub daily: Option<DailyConfig>,
+    pub templates_dir: PathBuf,
     pub path: Option<PathBuf>,
 }
 
@@ -111,6 +152,8 @@ impl Default for Config {
             reminders: RemindersConfig::default(),
             sections: SectionsConfig::default(),
             actions: Vec::new(),
+            daily: None,
+            templates_dir: default_templates_dir(),
             path: None,
         }
     }
@@ -210,21 +253,88 @@ impl Config {
                 remctl: text(section.get("remctl"), "").trim().to_string(),
             };
         }
-        if let Some(Value::Table(section)) = data.get("sections") {
-            cfg.sections = parse_sections(section);
-        }
         cfg.actions = parse_actions(data.get("actions"));
+        if let Some(Value::Table(section)) = data.get("daily") {
+            let defaults = DailyConfig::default();
+            // An empty title or template would make a note nobody can find
+            // again, so those fall back; an empty tag means no tag.
+            let or_default = |key: &str, default: &str| {
+                let value = text(section.get(key), "").trim().to_string();
+                if value.is_empty() {
+                    default.to_string()
+                } else {
+                    value
+                }
+            };
+            let daily = DailyConfig {
+                title: or_default("title", &defaults.title),
+                tag: match section.get("tag") {
+                    None => defaults.tag,
+                    Some(value) => text(Some(value), "").trim().trim_matches('#').to_string(),
+                },
+                template: or_default("template", &defaults.template),
+                capture_section: text(section.get("capture_section"), "").trim().to_string(),
+                capture_format: or_default("capture_format", &defaults.capture_format),
+            };
+            // A title that repeats or drifts during the day finds the wrong
+            // note without any error, so it stops the load instead. Only
+            // here, where the table turns the feature on: a feature nobody
+            // enabled never stops Bjorn from starting.
+            if let Err(why) = crate::daily::check_title_format(&daily.title) {
+                anyhow::bail!("{}: {why}", target.display());
+            }
+            cfg.daily = Some(daily);
+        }
+        // After `[daily]`, whose tag is the day tag's default.
+        let day_tag = inherited_day_tag(cfg.daily.as_ref());
+        if let Some(Value::Table(section)) = data.get("sections") {
+            cfg.sections = parse_sections(section, &day_tag);
+        } else {
+            cfg.sections.day_tag = day_tag;
+        }
+        if let Some(Value::Table(section)) = data.get("templates") {
+            let dir = text(section.get("dir"), "").trim().to_string();
+            if !dir.is_empty() {
+                cfg.templates_dir = expand_tilde(&dir);
+            }
+        }
         Ok(cfg)
+    }
+}
+
+/// The day tag `[sections]` falls back to: `[daily] tag` when that names a
+/// whole day, so daily notes and dated sections share one time axis without
+/// saying it twice, else `log/%Y/%m/%d`. A daily tag without a full date in
+/// it (`daily`, say) is a fine tag for daily notes but no time axis, so it is
+/// passed over rather than left to make the day screen empty.
+fn inherited_day_tag(daily: Option<&DailyConfig>) -> String {
+    let default = SectionsConfig::default();
+    let Some(daily) = daily.filter(|d| !d.tag.trim().is_empty()) else {
+        return default.day_tag;
+    };
+    let candidate = SectionsConfig {
+        day_tag: daily.tag.clone(),
+        ..SectionsConfig::default()
+    };
+    let today = crate::model::today();
+    if candidate.date_of_tag(&candidate.day_tag_for(today)) == Some(today) {
+        candidate.day_tag
+    } else {
+        default.day_tag
     }
 }
 
 /// `[sections]`: the dated-section template, the day tag and the date heading
 /// (both strftime patterns), and where a new section goes. An empty or missing
 /// value keeps the built-in default, so a half-written block never stops the
-/// app — the same leniency the rest of the file gets. An `insert` it does not
-/// recognize keeps the default too, but is remembered so start-up can warn.
-fn parse_sections(section: &toml::Table) -> SectionsConfig {
-    let defaults = SectionsConfig::default();
+/// app — the same leniency the rest of the file gets; `day_tag`'s default is
+/// `inherited_day_tag`'s answer. An `insert` it does not recognize keeps the
+/// default too, but is remembered so start-up can warn.
+fn parse_sections(section: &toml::Table, day_tag: &str) -> SectionsConfig {
+    let defaults = SectionsConfig {
+        day_tag: day_tag.to_string(),
+        ..SectionsConfig::default()
+    };
     let read = |key: &str, fallback: &str| {
         let value = text(section.get(key), fallback);
         let trimmed = value.trim();
@@ -260,7 +370,8 @@ fn parse_sections(section: &toml::Table) -> SectionsConfig {
 }
 
 /// `[[actions]]`: a name and a shell command, plus the optional `format`,
-/// `confirm`, `timeout` and `default`. An entry without a name or a command is
+/// `confirm`, `prompt`, `interactive`, `timeout`, `default`, `output` and
+/// `section`. An entry without a name or a command is
 /// dropped rather than raised, so a half-written action never stops the app.
 fn parse_actions(value: Option<&Value>) -> Vec<Action> {
     let Some(Value::Array(entries)) = value else {
@@ -283,9 +394,24 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
         return None;
     }
     let name = text(entry.get("name"), "").trim().to_string();
-    let format = text(entry.get("format"), crate::export::DEFAULT_FORMAT)
-        .trim()
-        .to_lowercase();
+    // An unknown `format` is kept as written and stops the action from
+    // running, the way an unknown `output` does: falling back to Markdown would
+    // hand a command that expects HTML or a PDF's source the wrong file, and a
+    // form edit would then write "md" over the typo without a word.
+    let markdown = || crate::export::DEFAULT_FORMAT.to_string();
+    let (format, format_error) = match entry.get("format") {
+        None => (markdown(), None),
+        Some(Value::String(value)) => {
+            let id = value.trim().to_lowercase();
+            match crate::export::FORMATS.iter().find(|f| f.id == id) {
+                Some(known) => (known.id.to_string(), None),
+                // A blank one is no format at all, as a blank prompt is.
+                None if id.is_empty() => (markdown(), None),
+                None => (markdown(), Some(format!("{value:?}"))),
+            }
+        }
+        Some(other) => (markdown(), Some(other.to_string())),
+    };
     let timeout = match entry.get("timeout") {
         None => DEFAULT_TIMEOUT_SECONDS,
         Some(Value::Integer(i)) => (*i).max(1) as u64,
@@ -303,6 +429,26 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
         Some(Value::String(title)) if !title.trim().is_empty() => Some(title.trim().to_string()),
         _ => None,
     };
+    // An unknown `output` is kept as written and stops the action from running
+    // (`Action::misconfigured`): a typo must never send a command's output
+    // somewhere it was not meant to go, nor spend a paid call on nothing.
+    let (output, output_error) = match entry.get("output") {
+        None => (crate::actions::ActionOutput::Toast, None),
+        Some(Value::String(value)) => match crate::actions::ActionOutput::parse(value) {
+            Some(output) => (output, None),
+            None => (
+                crate::actions::ActionOutput::Toast,
+                Some(format!("{value:?}")),
+            ),
+        },
+        Some(other) => (crate::actions::ActionOutput::Toast, Some(other.to_string())),
+    };
+    let section = match entry.get("section") {
+        Some(Value::String(heading)) if !heading.trim().is_empty() => {
+            Some(heading.trim().to_string())
+        }
+        _ => None,
+    };
     Some(Action {
         name: if name.is_empty() {
             command.clone()
@@ -310,10 +456,14 @@ pub(crate) fn parse_action(entry: &toml::Table) -> Option<Action> {
             name
         },
         command,
-        // An unknown format falls back to Markdown, as `export_format` does.
-        format: crate::export::format_by_id(&format).id.to_string(),
+        format,
+        format_error,
         confirm: truthy(entry.get("confirm"), false),
         prompt,
+        interactive: truthy(entry.get("interactive"), false),
+        output,
+        section,
+        output_error,
         timeout: std::time::Duration::from_secs(timeout),
         default: truthy(entry.get("default"), false),
     })
@@ -490,6 +640,41 @@ mod tests {
     }
 
     #[test]
+    fn the_day_tag_defaults_to_the_daily_tag_when_that_names_a_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let day_tag = |text: &str| {
+            let path = write(&dir, text);
+            Config::load(Some(&path)).unwrap().sections.day_tag
+        };
+        // One time axis for daily notes and dated sections, said once.
+        assert_eq!(
+            day_tag("[daily]\ntag = \"#journal/%Y-%m-%d\"\n\n[sections]\n"),
+            "journal/%Y-%m-%d"
+        );
+        // Said in both places, `[sections]` wins; empty is no value.
+        assert_eq!(
+            day_tag(
+                "[daily]\ntag = \"journal/%Y-%m-%d\"\n\n[sections]\nday_tag = \"log/%Y/%m/%d\"\n"
+            ),
+            "log/%Y/%m/%d"
+        );
+        assert_eq!(
+            day_tag("[daily]\ntag = \"journal/%Y-%m-%d\"\n\n[sections]\nday_tag = \" \"\n"),
+            "journal/%Y-%m-%d"
+        );
+        // A daily tag that names no day, or none at all, is no time axis.
+        assert_eq!(
+            day_tag("[daily]\ntag = \"daily\"\n\n[sections]\n"),
+            "log/%Y/%m/%d"
+        );
+        assert_eq!(
+            day_tag("[daily]\ntag = \"\"\n\n[sections]\n"),
+            "log/%Y/%m/%d"
+        );
+        assert_eq!(day_tag("[sections]\n"), "log/%Y/%m/%d");
+    }
+
+    #[test]
     fn actions_are_read_in_order_with_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
@@ -522,6 +707,230 @@ mod tests {
                 .unwrap()
                 .actions
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn output_and_section_are_read_and_a_typo_is_kept_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[[actions]]\nname = \"Sum\"\ncommand = \"llm\"\noutput = \"append\"\nsection = \" ## Summary \"\n\n\
+             [[actions]]\nname = \"Typo\"\ncommand = \"llm\"\noutput = \"apend\"\nsection = \"\"\n\n\
+             [[actions]]\nname = \"Odd\"\ncommand = \"llm\"\noutput = 3\n\n\
+             [[actions]]\nname = \"Plain\"\ncommand = \"llm\"\n",
+        );
+        let actions = Config::load(Some(&path)).unwrap().actions;
+        use crate::actions::ActionOutput;
+        assert_eq!(actions[0].output, ActionOutput::Append);
+        assert_eq!(actions[0].section.as_deref(), Some("## Summary"));
+        assert_eq!(actions[0].output_error, None);
+        assert_eq!(actions[1].output, ActionOutput::Toast, "an unknown output");
+        assert_eq!(actions[1].output_error.as_deref(), Some("\"apend\""));
+        assert!(
+            actions[1]
+                .misconfigured()
+                .unwrap()
+                .contains("toast, append, new-note, replace"),
+            "the error lists what is valid"
+        );
+        assert_eq!(actions[1].section, None, "a blank section is none");
+        assert_eq!(
+            actions[2].output_error.as_deref(),
+            Some("3"),
+            "a non-string output"
+        );
+        assert_eq!(actions[3].output, ActionOutput::Toast);
+        assert_eq!(actions[3].output_error, None);
+    }
+
+    #[test]
+    fn an_unknown_format_is_kept_as_an_error_not_turned_into_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[[actions]]\nname = \"Print\"\ncommand = \"weasyprint\"\nformat = \"pfd\"\n\n\
+             [[actions]]\nname = \"Loud\"\ncommand = \"cat\"\nformat = \" HTML \"\n\n\
+             [[actions]]\nname = \"Blank\"\ncommand = \"cat\"\nformat = \"\"\n\n\
+             [[actions]]\nname = \"Odd\"\ncommand = \"cat\"\nformat = 3\n",
+        );
+        let actions = Config::load(Some(&path)).unwrap().actions;
+        assert_eq!(actions[0].format_error.as_deref(), Some("\"pfd\""));
+        assert!(
+            actions[0]
+                .misconfigured()
+                .unwrap()
+                .contains("format = \"pfd\" is not one of md, html"),
+            "{:?}",
+            actions[0].misconfigured()
+        );
+        assert_eq!(actions[1].format, "html", "case and spaces do not matter");
+        assert_eq!(actions[1].format_error, None);
+        assert_eq!(actions[2].format, "md", "a blank format is the default");
+        assert_eq!(actions[2].format_error, None);
+        assert_eq!(actions[3].format_error.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn daily_and_templates_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let defaults = Config::load(Some(&dir.path().join("nope.toml"))).unwrap();
+        assert_eq!(defaults.daily, None, "daily notes are off without [daily]");
+        assert!(defaults.templates_dir.ends_with("bjorn/templates"));
+        // An empty table turns them on with the defaults.
+        let path = write(&dir, "[daily]\n");
+        let on = Config::load(Some(&path)).unwrap().daily.unwrap();
+        assert_eq!(on, DailyConfig::default());
+        assert_eq!(on.title, "%B %-d, %Y (%A)");
+        assert_eq!(on.tag, "log/%Y/%m/%d");
+        let path = write(
+            &dir,
+            "[daily]\ntitle = \"%Y-%m-%d\"\ntag = \"#daily\"\ntemplate = \"\"\n\
+             capture_section = \" ## Inbox \"\ncapture_format = \"- {{text}}\"\n\
+             [templates]\ndir = \"~/tpl\"\n",
+        );
+        let cfg = Config::load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.daily.unwrap(),
+            DailyConfig {
+                title: "%Y-%m-%d".into(),
+                tag: "daily".into(),
+                template: "daily".into(),
+                capture_section: "## Inbox".into(),
+                capture_format: "- {{text}}".into(),
+            }
+        );
+        assert_eq!(cfg.templates_dir, home_dir().join("tpl"));
+        let path = write(&dir, "[daily]\ntag = \"\"\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().daily.unwrap().tag, "");
+        // Only a table turns them on.
+        let path = write(&dir, "daily = true\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().daily, None);
+    }
+
+    #[test]
+    fn a_daily_title_that_names_no_day_stops_the_load() {
+        let dir = tempfile::tempdir().unwrap();
+        for title in ["%A", "%B %-d", "%%d %Y", "Work log", "%F %H:%M"] {
+            let path = write(&dir, &format!("[daily]\ntitle = \"{title}\"\n"));
+            let err = format!("{:#}", Config::load(Some(&path)).unwrap_err());
+            assert!(
+                err.contains(&path.display().to_string())
+                    && err.contains(&format!("[daily] title {title:?} does not name one day")),
+                "{err}"
+            );
+        }
+        // An empty title falls back to the default, which names a day.
+        let path = write(&dir, "[daily]\ntitle = \" \"\n");
+        assert_eq!(
+            Config::load(Some(&path)).unwrap().daily.unwrap().title,
+            DailyConfig::default().title
+        );
+    }
+
+    /// The one-day check belongs to the feature: with `[daily]` left
+    /// commented out, as the example config has it, the same title is never
+    /// read and Bjorn starts.
+    #[test]
+    fn a_daily_title_is_only_checked_when_daily_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "# [daily]\n# title = \"%A\"\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().daily, None);
+        let path = write(&dir, "[daily]\ntitle = \"%A\"\n");
+        assert!(Config::load(Some(&path)).is_err());
+    }
+
+    /// `config/config.toml.example` shows the defaults; loading it must give
+    /// exactly what no config file gives.
+    #[test]
+    fn the_example_config_is_the_defaults() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example");
+        let cfg = Config::load(Some(&path)).unwrap();
+        assert_eq!(Config { path: None, ..cfg }, Config::default());
+    }
+
+    /// Every TOML key the parser looks up, read from the parser's source: a
+    /// key is read straight off a table (`data.get("theme")`) or through the
+    /// `[daily]` arm's `or_default("title", ...)` or `parse_sections`'
+    /// `read("day_tag", ...)`. A new helper of that kind has to be named
+    /// here, which is why the count is asserted.
+    fn keys_the_parser_reads() -> Vec<String> {
+        const CALLS: &[&str] = &["get", "or_default", "read"];
+        let source = include_str!("config.rs");
+        let source = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let bytes = source.as_bytes();
+        let mut keys = Vec::new();
+        for call in CALLS {
+            let needle = format!("{call}(\"");
+            let mut from = 0usize;
+            while let Some(at) = source[from..].find(&needle) {
+                let start = from + at;
+                from = start + needle.len();
+                // Not `budget("…")`: the call name must stand on its own.
+                let before = bytes[..start].iter().next_back().copied();
+                if before.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                    continue;
+                }
+                let Some(end) = source[from..].find('"') else {
+                    continue;
+                };
+                let key = &source[from..from + end];
+                if !key.is_empty()
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                {
+                    keys.push(key.to_string());
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        assert!(
+            keys.len() > 25,
+            "only {} config keys parsed out of src/config.rs; has a new helper \
+             been added that CALLS does not name?",
+            keys.len()
+        );
+        keys
+    }
+
+    /// The keys the example config writes, commented out or not: `key = ...`
+    /// and `[table]` / `[[table]]` lines, after any leading `#`.
+    fn keys_in_the_example(example: &str) -> std::collections::BTreeSet<String> {
+        example
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start().trim_start_matches('#').trim_start();
+                if line.starts_with('[') {
+                    let end = line.find(']')?;
+                    Some(line[..end].trim_matches('[').trim().to_string())
+                } else {
+                    let (key, _) = line.split_once('=')?;
+                    let key = key.trim();
+                    (!key.is_empty() && !key.contains(char::is_whitespace)).then(|| key.to_string())
+                }
+            })
+            .collect()
+    }
+
+    /// The README promises every default is in the example, so a key the
+    /// parser reads must be written there, at least as a commented line.
+    #[test]
+    fn every_key_the_parser_reads_is_in_the_example_config() {
+        let example = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example"),
+        )
+        .unwrap();
+        let written = keys_in_the_example(&example);
+        let missing: Vec<String> = keys_the_parser_reads()
+            .into_iter()
+            .filter(|key| !written.contains(key))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "config/config.toml.example does not show these keys from src/config.rs: {}",
+            missing.join(", ")
         );
     }
 

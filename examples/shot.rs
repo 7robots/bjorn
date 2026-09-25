@@ -100,6 +100,10 @@ async fn main() {
         h.press("space");
         h.settle().await;
     }
+    if screen == "links" {
+        h.press("L");
+        h.settle().await;
+    }
     if screen == "edit-action" {
         h.press("a");
         h.key(

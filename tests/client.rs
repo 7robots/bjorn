@@ -361,3 +361,125 @@ fn fake_remctl_round_trip() {
     let out = run(&["add", "--list", "Nope", "--", "x"]);
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[tokio::test]
+async fn append_and_create_from_content_send_the_text_verbatim() {
+    let fake = Fake::new();
+    let client = fake.client();
+    // A literal backslash-n must reach Bear as typed: the text goes on stdin,
+    // not through --content, which bearcli reads escapes in.
+    client
+        .append("NOTE-READING", "a \\n stays\n", None)
+        .await
+        .unwrap();
+    let body = client.cat("NOTE-READING").await.unwrap().content;
+    assert!(body.ends_with("- Book 120\na \\n stays\n"), "{body}");
+
+    client
+        .append("NOTE-PLANNING", "- [ ] under tasks\n", Some("## Tasks"))
+        .await
+        .unwrap();
+    let body = client.cat("NOTE-PLANNING").await.unwrap().content;
+    assert!(
+        body.contains("sunset date\n- [ ] under tasks\n\n## Notes"),
+        "{body}"
+    );
+    assert!(
+        client
+            .append("NOTE-PLANNING", "x\n", Some("## Nowhere"))
+            .await
+            .is_err()
+    );
+
+    let (id, title) = client
+        .create_from_content(&["work".to_string()], "# From stdout\n\nbody\n")
+        .await
+        .unwrap();
+    assert_eq!(title, "From stdout");
+    assert_eq!(
+        client.cat(&id).await.unwrap().content,
+        "# From stdout\n#work\n\nbody\n"
+    );
+}
+
+#[tokio::test]
+async fn append_at_the_end_goes_before_bottom_tags_and_footnotes() {
+    let fake = Fake::new();
+    let client = fake.client();
+    let before = client.cat("NOTE-READING").await.unwrap();
+    client
+        .overwrite(
+            "NOTE-READING",
+            "# Reading Queue\n\nA claim.[^1]\n\n#home #books\n\n[^1]: The source.\n",
+            &before.hash,
+        )
+        .await
+        .unwrap();
+    client
+        .append("NOTE-READING", "Added.\n", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.cat("NOTE-READING").await.unwrap().content,
+        "# Reading Queue\n\nA claim.[^1]\nAdded.\n\n#home #books\n\n[^1]: The source.\n"
+    );
+}
+
+#[tokio::test]
+async fn trashed_notes_never_use_up_the_backlink_cap() {
+    let fake = Fake::new();
+    let client = fake.client();
+    client.search_ids("seed", "all").await.unwrap();
+    // More trashed notes linking to Sprint Planning than one search reads, all
+    // newer than the live ones, so a search over every location would fill
+    // its cap with them first.
+    let path = fake.state();
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let notes = state["notes"].as_array_mut().unwrap();
+    let trashed = notes
+        .iter()
+        .find(|n| n["id"] == "NOTE-TRASHED")
+        .unwrap()
+        .clone();
+    for k in 0..bjorn::wiki::BACKLINK_LIMIT + 50 {
+        let mut copy = trashed.clone();
+        copy["id"] = format!("TRASHED-{k}").into();
+        copy["modified"] = "2027-01-01T00:00:00Z".into();
+        notes.push(copy);
+    }
+    std::fs::write(&path, state.to_string()).unwrap();
+
+    let (rows, capped) = client.backlink_rows("Sprint Planning").await.unwrap();
+    assert!(!capped, "the trash did not count toward the cap");
+    let ids: Vec<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
+    assert!(ids.contains(&"NOTE-GARDEN"), "{ids:?}");
+    assert!(ids.contains(&"NOTE-ARCHIVED"), "{ids:?}");
+    assert!(
+        rows.iter().all(|r| r["location"] != "trash"),
+        "nothing is read from the trash: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_title_that_looks_like_an_option_is_a_title() {
+    let fake = Fake::new();
+    let client = fake.client();
+    let id = client
+        .create("--tags=x", &["real".to_string()], "")
+        .await
+        .unwrap();
+    let snap = client.snapshot().await.unwrap();
+    let note = snap.by_id(&id).unwrap();
+    assert_eq!(note.title, "--tags=x");
+    assert_eq!(note.tags, vec!["real"]);
+    let (again, _) = client.create_if_missing("--tags=x", &[], "").await.unwrap();
+    assert_eq!(again, id);
+    // Without `--` the fake refuses it, as bearcli does.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fake-bearcli"))
+        .args(["create", "-x"])
+        .env("BJORN_FAKE_BEAR_STATE", fake.state())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+}

@@ -3,6 +3,7 @@
 //! The reader's styled rendering lives in `ui`; this module holds the pure
 //! text transformations shared by the notes list, the exports and the fakes.
 
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use fancy_regex::Regex as FancyRegex;
@@ -29,14 +30,25 @@ pub static TASK_OPEN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\s*(?:[-*+]|\d+[.)])\s+)\[ \](\s+|$)").unwrap());
 pub static TASK_DONE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\s*(?:[-*+]|\d+[.)])\s+)\[[xX]\](\s+|$)").unwrap());
-pub static HIGHLIGHT_RE: LazyLock<FancyRegex> =
-    LazyLock::new(|| FancyRegex::new(r"==(?=\S)(.+?)(?<=\S)==").unwrap());
-pub static UNDERLINE_RE: LazyLock<FancyRegex> =
-    LazyLock::new(|| FancyRegex::new(r"(?<![~\w])~(?=\S)([^~\n]+?)(?<=\S)~(?![~\w])").unwrap());
+// The inline marks below run on every line of every note the reader draws, so
+// they use the linear-time `regex` crate. The lookaround forms they replace
+// (`==(?=\S)(.+?)(?<=\S)==` and friends) ran on fancy-regex, whose
+// `replace_all` panics once a search passes its backtracking limit: a single
+// long line, with or without markup, was enough to take the UI down.
 
-static INLINE_MARKUP_RE: LazyLock<FancyRegex> = LazyLock::new(|| {
-    FancyRegex::new(r"\*|__|==|`|~~|(?<![~\w])~(?=\S)|(?<=\S)~(?![~\w])").unwrap()
-});
+/// `==text==`, with the text flush against both markers as Bear requires: no
+/// space just inside either `==`, and nothing empty between them. The lazy
+/// `??` keeps the shortest highlight, as the lookaround form did.
+pub static HIGHLIGHT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"==(\S(?:.*?\S)??)==").unwrap());
+/// A `~text~` underline candidate; `underline_spans` checks the characters on
+/// either side, which the `regex` crate cannot look at.
+static UNDERLINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"~[^~\s](?:[^~\n]*[^~\s])?~").unwrap());
+/// Inline markers; a single `~` is only one where `strip_inline_markup` says so.
+static INLINE_MARKUP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\*|__|==|`|~~|~").unwrap());
+static TILDE_OR_WORD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[~\w]$").unwrap());
 static BLOCK_MARKUP_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)\[([ xX])\]|^\s*(?:[-*+]|\d+[.)])\s+|^#{1,6}\s+|^>\s*").unwrap()
 });
@@ -100,7 +112,63 @@ pub fn strip_inline_markup(line: &str) -> String {
             format!("{} <{}>", &caps[1], &caps[2])
         }
     });
-    INLINE_MARKUP_RE.replace_all(&line, "").into_owned()
+    INLINE_MARKUP_RE
+        .replace_all(&line, |caps: &regex::Captures| {
+            let mark = caps.get(0).unwrap();
+            if mark.as_str() != "~" {
+                return String::new();
+            }
+            // A lone `~` goes when it could open an underline (nothing
+            // word-like before it, text after) or close one (text before,
+            // nothing word-like after).
+            let before = line[..mark.start()].chars().next_back();
+            let after = line[mark.end()..].chars().next();
+            let opens = !tilde_or_word(before) && after.is_some_and(|c| !c.is_whitespace());
+            let closes = before.is_some_and(|c| !c.is_whitespace()) && !tilde_or_word(after);
+            if opens || closes {
+                String::new()
+            } else {
+                "~".to_string()
+            }
+        })
+        .into_owned()
+}
+
+/// Is `c` a `~` or a word character (`\w`, so Unicode letters, digits, marks
+/// and connector punctuation)? None, the edge of the line, is neither.
+fn tilde_or_word(c: Option<char>) -> bool {
+    c.is_some_and(|c| TILDE_OR_WORD_RE.is_match(c.encode_utf8(&mut [0; 4])))
+}
+
+/// Every `~underline~` in `line` rewritten as `open` + text + `close`. An
+/// underline is a `~` with no `~` or word character before it, text flush
+/// against both markers and no newline or `~` inside, and a closing `~` with
+/// no `~` or word character after it, so `~/path` and `a~b~c` stay as written.
+pub fn underline_spans<'a>(line: &'a str, open: &str, close: &str) -> Cow<'a, str> {
+    let mut out = String::new();
+    let mut last = 0;
+    let mut pos = 0;
+    while let Some(m) = UNDERLINE_RE.find_at(line, pos) {
+        let before = line[..m.start()].chars().next_back();
+        let after = line[m.end()..].chars().next();
+        if tilde_or_word(before) || tilde_or_word(after) {
+            // Retry from the next character, as a search with lookarounds
+            // would: the closing `~` may open an underline of its own.
+            pos = m.start() + 1;
+            continue;
+        }
+        out.push_str(&line[last..m.start()]);
+        out.push_str(open);
+        out.push_str(&m.as_str()[1..m.len() - 1]);
+        out.push_str(close);
+        last = m.end();
+        pos = last;
+    }
+    if last == 0 {
+        return Cow::Borrowed(line);
+    }
+    out.push_str(&line[last..]);
+    Cow::Owned(out)
 }
 
 fn task_boxes(line: &str) -> String {
@@ -232,6 +300,106 @@ mod tests {
         assert_eq!(
             strip_inline_markup("![](Front%20bed.png)"),
             "[image: Front bed.png]"
+        );
+    }
+
+    /// Every string up to `len` characters over `alphabet`.
+    fn all_strings(alphabet: &[char], len: usize) -> Vec<String> {
+        let mut out = vec![String::new()];
+        let mut layer = vec![String::new()];
+        for _ in 0..len {
+            layer = layer
+                .iter()
+                .flat_map(|s| {
+                    alphabet.iter().map(move |c| {
+                        let mut s = s.clone();
+                        s.push(*c);
+                        s
+                    })
+                })
+                .collect();
+            out.extend(layer.iter().cloned());
+        }
+        out
+    }
+
+    #[test]
+    fn the_linear_marks_match_the_lookaround_patterns_they_replace() {
+        // The patterns as they were on fancy-regex, kept here as the reference
+        // the linear forms must agree with on every short line.
+        let highlight = FancyRegex::new(r"==(?=\S)(.+?)(?<=\S)==").unwrap();
+        let underline = FancyRegex::new(r"(?<![~\w])~(?=\S)([^~\n]+?)(?<=\S)~(?![~\w])").unwrap();
+        let markup = FancyRegex::new(r"\*|__|==|`|~~|(?<![~\w])~(?=\S)|(?<=\S)~(?![~\w])").unwrap();
+        for line in all_strings(&['=', '~', 'a', ' ', '.', '\n'], 6) {
+            assert_eq!(
+                HIGHLIGHT_RE.replace_all(&line, "<mark>$1</mark>"),
+                highlight.replace_all(&line, "<mark>$1</mark>"),
+                "highlight {line:?}"
+            );
+            assert_eq!(
+                underline_spans(&line, "<u>", "</u>"),
+                underline.replace_all(&line, "<u>$1</u>"),
+                "underline {line:?}"
+            );
+            assert_eq!(
+                strip_inline_markup(&line),
+                markup.replace_all(&line, ""),
+                "markup {line:?}"
+            );
+        }
+        for line in [
+            "é~ü~",
+            "_~a~",
+            "~a~_",
+            "·~a~",
+            "a ~é~ b",
+            "==🔴red==",
+            "*x* ~~y~~ `z`",
+        ] {
+            assert_eq!(
+                underline_spans(line, "<u>", "</u>"),
+                underline.replace_all(line, "<u>$1</u>"),
+                "underline {line:?}"
+            );
+            assert_eq!(
+                strip_inline_markup(line),
+                markup.replace_all(line, ""),
+                "markup {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_highlight_needs_text_flush_against_both_markers() {
+        let mark = |s: &str| HIGHLIGHT_RE.replace_all(s, "<mark>$1</mark>").into_owned();
+        assert_eq!(mark("==🔴red=="), "<mark>🔴red</mark>");
+        assert_eq!(mark("==a=="), "<mark>a</mark>");
+        assert_eq!(
+            mark("==a b== and ==c=="),
+            "<mark>a b</mark> and <mark>c</mark>"
+        );
+        assert_eq!(mark("==🔴red =="), "==🔴red ==");
+        assert_eq!(mark("== red=="), "== red==");
+        assert_eq!(mark("===="), "====");
+        assert_eq!(mark("==a\nb=="), "==a\nb==");
+    }
+
+    #[test]
+    fn a_long_line_neither_panics_nor_stalls_the_inline_marks() {
+        // Each of these made fancy-regex's `replace_all` panic.
+        let stutter = "==a ".repeat(1000);
+        assert_eq!(
+            HIGHLIGHT_RE.replace_all(&stutter, "<mark>$1</mark>"),
+            stutter
+        );
+        let plain = "x".repeat(1 << 20);
+        assert_eq!(strip_inline_markup(&plain), plain);
+        assert_eq!(underline_spans(&plain, "<u>", "</u>"), plain);
+        let tildes = "a ~".repeat(100_000);
+        assert_eq!(underline_spans(&tildes, "<u>", "</u>"), tildes);
+        assert_eq!(
+            strip_inline_markup(&"~a~ ".repeat(50_000)),
+            "a ".repeat(50_000)
         );
     }
 

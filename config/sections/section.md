@@ -1,4 +1,4 @@
-## {{date}}
+## {{heading}}
 {{tag}}
 * People:
 * Topic:
