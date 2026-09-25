@@ -2893,23 +2893,20 @@ impl App {
         let generation = self.backlinks_gen;
         let client = self.client.clone();
         let tx = self.tx.clone();
+        let (title, id) = (note.title.clone(), note.id.clone());
+        let search = tokio::spawn(async move {
+            client.backlink_rows(&title).await.map(|(rows, capped)| {
+                wiki::backlinks(&rows, capped, &title, &id, crate::ui::markdown::wiki_links)
+            })
+        });
+        // The search runs in a task of its own, so a panic in it still
+        // answers: without an answer `backlinks_running` never clears, and
+        // every later `L` would wait on it for good.
         tokio::spawn(async move {
-            let result = client
-                .backlink_rows(&note.title)
-                .await
-                .map(|(rows, capped)| {
-                    wiki::backlinks(
-                        &rows,
-                        capped,
-                        &note.title,
-                        &note.id,
-                        crate::ui::markdown::wiki_links,
-                    )
-                });
             let _ = tx.send(Msg::Backlinks {
                 generation,
                 note_id: note.id,
-                result,
+                result: search_outcome(search.await),
             });
         });
     }
@@ -3000,6 +2997,20 @@ impl App {
             self.start_backlinks(next);
         }
     }
+}
+
+/// A spawned search's answer, with a panic or cancellation in the task
+/// turned into an error the Links list can show.
+fn search_outcome<T>(
+    joined: Result<Result<T, BearError>, tokio::task::JoinError>,
+) -> Result<T, BearError> {
+    joined.unwrap_or_else(|err| {
+        Err(BearError::new(if err.is_panic() {
+            "The backlink search failed unexpectedly."
+        } else {
+            "The backlink search was canceled."
+        }))
+    })
 }
 
 // -- triage ------------------------------------------------------------------------
@@ -3278,5 +3289,30 @@ impl App {
             triage.unmark(&keys);
             self.triage_load();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_panicking_backlink_search_still_answers() {
+        let search = tokio::spawn(async {
+            if true {
+                panic!("the search blew up");
+            }
+            Ok::<(), BearError>(())
+        });
+        let err = search_outcome(search.await).expect_err("a panic is an error");
+        assert_eq!(err.message, "The backlink search failed unexpectedly.");
+
+        let search = tokio::spawn(std::future::pending::<Result<(), BearError>>());
+        search.abort();
+        let err = search_outcome(search.await).expect_err("a cancel is an error");
+        assert_eq!(err.message, "The backlink search was canceled.");
+
+        let search = tokio::spawn(async { Ok::<u8, BearError>(7) });
+        assert_eq!(search_outcome(search.await).ok(), Some(7));
     }
 }
