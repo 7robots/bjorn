@@ -305,8 +305,8 @@ pub struct Toast {
 impl Toast {
     pub fn new(title: &str, message: &str, severity: Severity, timeout: Duration) -> Toast {
         Toast {
-            title: title.to_string(),
-            message: message.to_string(),
+            title: crate::util::strip_bidi(title),
+            message: crate::util::strip_bidi(message),
             severity,
             expires: Instant::now() + timeout,
         }

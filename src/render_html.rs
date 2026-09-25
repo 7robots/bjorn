@@ -15,8 +15,8 @@ use ratatui::style::Color;
 use regex::Regex;
 
 use crate::render::{
-    HIGHLIGHT_RE, TASK_DONE_RE, TASK_OPEN_RE, UNDERLINE_RE, is_fence, is_tag_line, percent_decode,
-    tags_in_line,
+    HIGHLIGHT_RE, TASK_DONE_RE, TASK_OPEN_RE, is_fence, is_tag_line, percent_decode, tags_in_line,
+    underline_spans,
 };
 use crate::ui::theme::Theme;
 
@@ -384,11 +384,11 @@ fn marks(text: &str, line_start: bool) -> String {
     } else {
         text.to_string()
     };
-    let text = HIGHLIGHT_RE.replace_all(&text, |caps: &fancy_regex::Captures<'_, str>| {
+    let text = HIGHLIGHT_RE.replace_all(&text, |caps: &regex::Captures| {
         let (color, inner) = highlight_color(&caps[1]);
         format!("<mark class=\"{color}\">{inner}</mark>")
     });
-    let text = UNDERLINE_RE.replace_all(&text, "<u>$1</u>");
+    let text = underline_spans(&text, "<u>", "</u>");
     let owned = text.into_owned();
     NOTE_LINK_RE
         .replace_all(&owned, |caps: &regex::Captures| {
@@ -555,6 +555,15 @@ mod tests {
 | Panel | Qty |\n|---|---|\n| Roof | 6 |\n\n\
 > a quote with `code`\n\n```\n- [ ] not a task ==nor a highlight==\n```\n\n\
 See [REV](https://www.revrobotics.com) and ![the frame](Front%20bed.png).\n";
+
+    #[test]
+    fn a_long_line_exports_without_panicking() {
+        // fancy-regex's `replace_all` panicked on both.
+        let stutter = "==a ".repeat(1000);
+        assert_eq!(prepare(&stutter), format!("{stutter}\n"));
+        let long = "x".repeat(1 << 20);
+        assert!(render_body(&long, &HashMap::new(), &HashMap::new()).contains(&long));
+    }
 
     #[test]
     fn prepare_turns_bear_marks_into_inline_html_outside_fences() {

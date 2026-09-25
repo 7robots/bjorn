@@ -389,6 +389,9 @@ impl Sidebar {
                 )
             }
         };
+        // A tag name is the library's text; a bidi control in it would
+        // reorder the row.
+        let label = crate::util::strip_bidi(&label);
         let used = UnicodeWidthStr::width(label.as_str()) + count.len() + tail.len();
         let pad = width.saturating_sub(used).max(1);
         let mut spans = vec![Span::styled(label, base)];
