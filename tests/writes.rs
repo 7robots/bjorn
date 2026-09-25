@@ -503,6 +503,47 @@ async fn r_exports_rtf_and_rtfd_when_the_note_has_images() {
 }
 
 #[tokio::test]
+async fn p_exports_a_pdf_or_reports_the_missing_converter() {
+    let fake = Fake::new();
+    let mut h = fake.harness();
+    h.load().await;
+    let target = fake.config().export_dir.join("Sprint Planning.pdf");
+    h.press("x");
+    h.press("p");
+    h.press("enter");
+    // Neither converter ships with macOS, so the export has to say what it
+    // wants on a machine without one rather than fail blankly. A browser can
+    // take a while to start cold, so the wait is longer than the default.
+    let wanted = bjorn::export::Converter::find().is_some();
+    h.wait_until(
+        move |app| {
+            app.toast_messages().iter().any(|m| {
+                m.contains(if wanted {
+                    "Sprint Planning.pdf"
+                } else {
+                    "weasyprint"
+                })
+            })
+        },
+        std::time::Duration::from_secs(90),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
+    if !wanted {
+        assert!(!target.exists(), "nothing written without a converter");
+        return;
+    }
+    // The PDF is moved into place whole, so seeing the file means seeing all
+    // of it — a converter that dies halfway leaves the export directory alone.
+    let bytes = std::fs::read(&target).unwrap();
+    assert!(
+        bytes.starts_with(b"%PDF"),
+        "not a PDF: {:?}",
+        bytes.get(..8)
+    );
+}
+
+#[tokio::test]
 async fn b_exports_a_textbundle_with_assets_and_rewritten_links() {
     let fake = Fake::new();
     let mut h = fake.harness();
