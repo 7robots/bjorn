@@ -84,11 +84,11 @@ command = 'curl -sf -X POST https://example.test/notes -H "Content-Type: text/ma
 |---|---|---|
 | `name` | the command | what the palette shows and the toast reports |
 | `command` | — | required; run through `sh -c`, so pipes, `&&` and redirection all work |
-| `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`. Any other value stops the action before it runs, so a typo is never handed a Markdown file instead |
+| `format` | `md` | how the note is rendered first: `md`, `html`, `txt`, `rtf`, `textbundle`, `pdf`. Any other value stops the action before it runs, so a typo is never handed a Markdown file instead |
 | `confirm` | `false` | ask before running. Worth setting on anything that publishes or deletes |
 | `prompt` | — | ask for one line of text first and pass it as `$BJORN_ACTION_INPUT`. The value is the prompt's title (`prompt = "Which bucket"`). A blank one is no prompt at all |
 | `interactive` | `false` | give the command the window and the keyboard in a pty, instead of capturing its output. For anything that talks back |
-| `timeout` | `300` | seconds (five minutes); a command that overruns is killed and reported. Not applied to an `interactive` action, which runs until you quit it |
+| `timeout` | `300` | seconds (five minutes); a command that overruns is killed and reported. Not applied to an `interactive` action, which runs until you quit it. It covers the command, not the rendering before it: `format = "pdf"` gives the converter up to 60s of its own first |
 | `output` | `toast` | where stdout goes: `toast` (its first line, as today), `append` (to the end of the note), `new-note`, or `replace` (the note's whole text; always asks first, and needs `format = "md"`). Any other value stops the action before it runs, so a typo neither writes nor runs. See [Sending the output to Bear](#sending-the-output-to-bear) |
 | `section` | — | with `output = "append"`: the heading to add under, written as it is in the note (`"## Summary"`). Blank or absent appends to the end of the note. Set on any other `output`, it stops the action from running |
 | `default` | `false` | the action `!` runs. With exactly one action configured, that one is the default whether or not it says so |
@@ -262,8 +262,10 @@ after the note (`Sprint Planning.md`), and it is deleted as soon as the command
 ends.
 
 - **stdin** — the note's text in the chosen format. A TextBundle is a folder, so
-  stdin gets its `text.md`. An `interactive` action is the exception: its stdin
-  is the terminal, so it reads the note from `"$BJORN_NOTE_FILE"`.
+  stdin gets its `text.md`; `pdf` puts the PDF's own bytes there, which a
+  command that expects text should not read. An `interactive` action is the
+  exception: its stdin is the terminal, so it reads the note from
+  `"$BJORN_NOTE_FILE"`.
 - `BJORN_NOTE_FILE` — the full path to that file. Quote it; titles have spaces.
 - `BJORN_ACTION_INPUT` — what `prompt` collected; empty when the action has no
   prompt, and empty when the prompt was answered with nothing.
@@ -278,34 +280,29 @@ shell function or an alias, put it in a script and call the script.
 
 ## A PDF
 
-`bearcli` does not export, and Bjorn has no PDF writer: nothing in it draws a
-page, and a converter that did would be the first thing it could not do on its
-own. The HTML export is the way there. It carries a print stylesheet — A4 (what
-Bear's own PDF export uses), a white page whatever the theme's background is,
-headings kept with the text under them, and the theme's colors on the links
-and the list markers, the way Bear puts its own on its PDF — so an HTML-to-PDF
-converter is all an action needs. Neither of these ships with macOS.
+PDF is a format of its own: `x` then `p` in the export picker writes one to a
+file you choose, and `format = "pdf"` hands one to an action. `bearcli` does
+not export and nothing in Bjorn draws a page, so the HTML rendering, on A4
+(what Bear's own PDF export uses) and always on a white page, is printed by a
+converter already on the machine. Bjorn uses the first of these it finds:
+
+1. **WeasyPrint**, `weasyprint` on `PATH` (`pipx install weasyprint`, or
+   `uv tool install weasyprint`). It runs no scripts and needs no browser.
+2. **A Chromium browser, run headless**: `chromium`, `google-chrome` or
+   `google-chrome-stable` on `PATH`, then Google Chrome, Chromium, Brave,
+   Microsoft Edge or Vivaldi in `/Applications` or `~/Applications`. It gets a
+   throwaway profile, so the print never sees your cookies and does not fail
+   because the browser is already open, and no network: no hostname resolves
+   and anything else meets a dead proxy.
+
+macOS ships neither. Without one, the export says so and writes nothing.
 
 ```toml
 [[actions]]
 name = "Save as PDF to Desktop"
-command = 'out="$HOME/Desktop/$(basename "$BJORN_NOTE_FILE" .html).pdf"; weasyprint "$BJORN_NOTE_FILE" "$out" 2>/dev/null && echo "saved $out"'
-format = "html"
-timeout = 120
+command = 'cp "$BJORN_NOTE_FILE" "$HOME/Desktop/" && echo "saved to Desktop"'
+format = "pdf"
 ```
-
-```toml
-[[actions]]
-name = "Save as PDF to Desktop (Chrome)"
-command = 'out="$HOME/Desktop/$(basename "$BJORN_NOTE_FILE" .html).pdf"; profile="$(mktemp -d)"; cp "$BJORN_NOTE_FILE" note.html && "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --user-data-dir="$profile" --host-resolver-rules="MAP * ~NOTFOUND" --proxy-server="127.0.0.1:1" --proxy-bypass-list="<-loopback>" --disable-remote-fonts --no-pdf-header-footer --print-to-pdf="$out" "file://$PWD/note.html" >/dev/null 2>&1; rm -rf "$profile"; [ -s "$out" ] && echo "saved $out"'
-format = "html"
-timeout = 120
-```
-
-`weasyprint` (`pipx install weasyprint`, or `uv tool install weasyprint`) reads
-the page directly; headless Chrome is already on most Macs and renders the CSS
-the way the browser you preview in does. Attachments are embedded in the HTML
-as `data:` URIs, so the PDF carries the note's images either way.
 
 What comes across: Bear's colored highlights (it writes the color as a
 circle at the front of the run, which becomes the highlight's color rather
@@ -317,37 +314,27 @@ engine Bjorn does not carry, and the icon Bear draws inside a callout. And
 WeasyPrint paints form controls itself, so a ticked task's box is its own
 square there, where Chrome draws Bear's rounded one.
 
-Three details in those commands are load-bearing:
+**The built-in path filters the note; piping `format = "html"` to a converter
+yourself does not.** A note is not always one you wrote — an import, a web
+clip, a note someone shared — and its inline HTML reaches the page as written.
+A converter fetches what that page points at: a remote image tells somebody the
+note was printed, and a local one (`<img src="/Users/you/…">`) bakes a file off
+your disk into a PDF that is usually about to be sent on. WeasyPrint has no
+flag to stop it, and a browser's network switches do not cover `file:`. So
+before the converter sees it, Bjorn parses the note's body and rebuilds it from
+an allowlist: no scripts, styles, frames, objects or SVG, no relative or
+`bear:` links, and an image only when it is a PNG, JPEG, GIF, WebP, BMP or TIFF
+already embedded as a `data:` URI. Attachments are embedded that way by then,
+so nothing that was going to print is lost, and the note's own words (a `url(`
+in a sentence, `<img>` in a code block) are text and come through untouched.
+An action with `format = "html"` gets the unfiltered page — right for
+publishing HTML, wrong as a PDF recipe.
 
-- **The name comes from the file, not the title.** `$BJORN_NOTE_TITLE` is the
-  title verbatim — a note called `Q1/Q2 plan` would send the PDF to a directory
-  that does not exist. The temp file's name is already sanitized, so
-  `basename "$BJORN_NOTE_FILE" .html` is the safe stem.
-- **Chrome gets a copy at a plain path.** `#` and `%` survive the filename
-  sanitizing and mean something else inside a URL, so `file://$BJORN_NOTE_FILE`
-  can quietly print the wrong page — and Chrome still exits 0. The temp
-  directory is the command's working directory; copying to `note.html` first
-  sidesteps it.
-- **Chrome gets its own throwaway profile, and nowhere to go.** A note can
-  contain inline HTML, and a converter renders it. `--user-data-dir` keeps the
-  render away from your logged-in profile and its cookies (and stops the action
-  failing when Chrome is already open), and it is deleted afterwards.
-  `--host-resolver-rules` stops any hostname resolving; `--proxy-server` points
-  what is left at a dead port, because a URL written as a bare IP address never
-  goes near the resolver. Between them a note that carries a tracking pixel or
-  a script has nowhere to send anything, on top of the page's own policy,
-  which stops the script running at all.
+An attachment in a format neither converter can be trusted with (SVG, HEIC,
+a PDF) prints as an empty frame.
 
-The HTML is the note as written: any HTML inside the note reaches the page
-unchanged. The page carries a Content-Security-Policy that lets nothing run
-and nothing load except its own styles and its embedded images, and Chrome
-(like any browser you open the export in) honors it. WeasyPrint does not read
-the policy. It runs no scripts, but it fetches whatever the note's HTML points
-at, and there is no flag to stop it: a remote URL is fetched, and so is a local
-file — `<img src="/Users/you/…">` bakes that file into the PDF, and
-`<link rel="attachment" href="…">` attaches it whole — which then goes wherever
-you send the PDF. Use WeasyPrint only for notes you wrote yourself; print
-anything else with Chrome.
+The converter gets up to 60 seconds before it is killed; an action's own
+`timeout` starts after that, when the PDF is written.
 
 ## What comes back
 

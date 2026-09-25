@@ -43,7 +43,7 @@ bjorn --demo          # sample notes through the built-in fake bearcli, no Bear 
 | `enter` | move into the reader for the highlighted note, at the first match while searching | `1`–`7` | Notes, Untagged, Todo, Today, Pinned, Archive, Trash |
 | `n` | new note (title, tags), then edit | `d` | move the note to the trash, after a confirm |
 | `e` | edit in `$VISUAL` / `$EDITOR` | `u` | restore from Trash or Archive |
-| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle (`←` `→` pick, `enter` confirms) |
+| `p` | toggle the global pin | `x` | export: Markdown, HTML, text, RTF, TextBundle, PDF (`←` `→` pick, `enter` confirms) |
 | `b` | open in Bear.app | `!` / `a` | run the default action / open the action menu (see [Actions](#actions)) |
 | `w` | make the highlighted tag the workspace; again on it to leave | `W` | clear the workspace |
 | `f` | fold / unfold the highlighted tag's subtree | `F` | fold every tag, or unfold them all when all are folded |
@@ -159,7 +159,7 @@ a reminder is added.
 ```toml
 editor = "nvim"               # overrides $VISUAL / $EDITOR
 export_dir = "~/Downloads"    # where `x` proposes to write
-export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle
+export_format = "md"          # preselected in the export picker: md | html | txt | rtf | textbundle | pdf
 poll_seconds = 5              # 0 disables the background refresh
 workspace = "work"            # start scoped to this tag
 bearcli = "/usr/local/bin/bearcli"  # optional; default searches PATH, then Bear.app
@@ -273,7 +273,7 @@ command of yours: publish it, copy it, POST it, push it.
 [[actions]]
 name = "Publish to S3"
 command = 'aws s3 cp "$BJORN_NOTE_FILE" "s3://notes/$BJORN_NOTE_TITLE.html"'
-format = "html"        # md (default), html, txt, rtf, textbundle
+format = "html"        # md (default), html, txt, rtf, textbundle, pdf
 confirm = true         # ask first
 default = true         # this is what `!` runs
 
@@ -334,6 +334,17 @@ Publishing to a [Hugo](https://gohugo.io) site is an action too:
 wiki links and local links off the site, and never replaces a file it did
 not write. Bjorn itself stays free of Hugo code and network calls. Setup and
 what it guards: [Publish to Hugo](docs/actions.md#publish-to-hugo).
+
+A PDF is built in: `x` then `p` writes one, and `format = "pdf"` hands one to
+an action. Bjorn draws no page itself; it prints the HTML rendering with the
+first converter it finds — WeasyPrint on `PATH`, then a Chromium browser
+(`chromium`/`google-chrome` on `PATH`, then Chrome, Chromium, Brave, Edge or
+Vivaldi in `/Applications` or `~/Applications`), headless, with a throwaway
+profile and no network. macOS ships neither. Before printing, the note's body
+is parsed and rebuilt from an allowlist, so a note's inline HTML cannot make
+the converter fetch a remote URL or bake a local file into the PDF. Piping
+`format = "html"` to `weasyprint` or Chrome yourself skips that filter; use
+`pdf`. Details: [A PDF](docs/actions.md#a-pdf).
 
 ## Development
 
