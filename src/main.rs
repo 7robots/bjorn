@@ -27,6 +27,9 @@ struct Cli {
     /// start scoped to this tag as the workspace (overrides config)
     #[arg(long, value_name = "TAG")]
     tag: Option<String>,
+    /// open this note at start: its tag path and title, as `work/sprint/Sprint Planning`, or just the title
+    #[arg(long, value_name = "TAG/TITLE")]
+    note: Option<String>,
     /// config file to read instead of the default (before a subcommand); `.theme` files are then read from `themes/` beside it
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -231,6 +234,9 @@ async fn main() -> anyhow::Result<()> {
     let client = Arc::new(BearClient::new(command).with_preview_cache(cache));
     let environ: std::collections::HashMap<String, String> = std::env::vars().collect();
     let (mut app, mut rx) = App::new(config, client, cli.tag.as_deref(), environ);
+    if let Some(path) = cli.note.as_deref() {
+        app.open_on_start(path);
+    }
     if cli.demo {
         app.remctl = Some(Arc::new(bjorn::reminders::RemctlClient::new(vec![
             sibling("fake-remctl")?.to_string_lossy().into_owned(),

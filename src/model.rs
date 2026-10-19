@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use chrono::{Local, NaiveDate};
 
 use crate::bear::{Location, Note, Snapshot, normalize_tag};
+use crate::wiki::same_title;
 
 /// Sidebar entries above the tag tree, in Bear's order plus Pinned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -119,6 +120,34 @@ pub fn today() -> NaiveDate {
 
 pub fn in_workspace(note: &Note, workspace: &str) -> bool {
     workspace.is_empty() || note.has_tag(workspace)
+}
+
+/// The note `--note` names: `tag/path/Title`, or a bare title. Titles can
+/// hold `/` too, so every split is tried: the part before a `/` is a tag the
+/// note carries (or a parent of one) and the rest its title, compared as wiki
+/// links compare titles. When several notes match, an active note beats an
+/// archived one, which beats one in the trash, and then the most recently
+/// modified wins.
+pub fn find_by_path<'a>(snapshot: &'a Snapshot, path: &str) -> Option<&'a Note> {
+    let path = path.trim();
+    let mut splits = vec![(String::new(), path)];
+    for (i, _) in path.match_indices('/') {
+        splits.push((normalize_tag(&path[..i]), &path[i + 1..]));
+    }
+    let rank = |n: &Note| match n.location {
+        Location::Notes => 0,
+        Location::Archive => 1,
+        Location::Trash => 2,
+    };
+    snapshot
+        .notes
+        .iter()
+        .filter(|note| {
+            splits
+                .iter()
+                .any(|(tag, title)| same_title(&note.title, title) && note.has_tag(tag))
+        })
+        .min_by_key(|n| (rank(n), Reverse(n.modified)))
 }
 
 pub fn matches_view(note: &Note, view: View, today: NaiveDate) -> bool {
@@ -485,5 +514,70 @@ mod tests {
         assert_eq!(sel.describe(), "#x · search");
         assert_eq!(View::Trash.hotkey(), '7');
         assert_eq!(View::from_value("todo"), Some(View::Todo));
+    }
+
+    #[test]
+    fn find_by_path_takes_a_tag_path_and_a_title() {
+        let snapshot = Snapshot::new(vec![
+            mk(
+                "1",
+                "Plan",
+                &["work", "work/sprint"],
+                "2026-09-08T12:00:00Z",
+                &[],
+                0,
+                Location::Notes,
+            ),
+            mk(
+                "2",
+                "Plan",
+                &["home"],
+                "2026-09-09T12:00:00Z",
+                &[],
+                0,
+                Location::Notes,
+            ),
+            mk(
+                "3",
+                "A/B testing",
+                &["work"],
+                "2026-09-01T12:00:00Z",
+                &[],
+                0,
+                Location::Notes,
+            ),
+            mk(
+                "4",
+                "Plan",
+                &["work"],
+                "2026-09-10T12:00:00Z",
+                &[],
+                0,
+                Location::Archive,
+            ),
+            mk(
+                "5",
+                "Design",
+                &["work", "work/CAD and Design"],
+                "2026-09-01T12:00:00Z",
+                &[],
+                0,
+                Location::Notes,
+            ),
+        ]);
+        let id = |path: &str| find_by_path(&snapshot, path).map(|n| n.id.clone());
+        assert_eq!(id("work/sprint/Plan").as_deref(), Some("1"));
+        assert_eq!(id("#work/sprint/plan").as_deref(), Some("1"));
+        assert_eq!(id("home/Plan").as_deref(), Some("2"));
+        // A parent tag matches too; the active note beats the newer archived one.
+        assert_eq!(id("work/Plan").as_deref(), Some("1"));
+        // A bare title ignores tags; the newest active note wins.
+        assert_eq!(id("Plan").as_deref(), Some("2"));
+        assert_eq!(id("work/A/B testing").as_deref(), Some("3"));
+        assert_eq!(id("A/B testing").as_deref(), Some("3"));
+        assert_eq!(id("#work/CAD and Design#/Design").as_deref(), Some("5"));
+        assert_eq!(id("work/CAD and Design/Design").as_deref(), Some("5"));
+        assert_eq!(id("home/sprint/Plan"), None);
+        assert_eq!(id("work/Nothing"), None);
     }
 }

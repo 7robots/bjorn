@@ -966,3 +966,27 @@ async fn control_characters_in_a_link_never_reach_a_row() {
     h.draw();
     assert!(!h.text().contains('\u{1b}'), "{}", h.text());
 }
+
+#[tokio::test]
+async fn note_on_the_command_line_opens_at_start() {
+    let fake = Fake::new();
+    // Scoped to #work, which the note is not under: the workspace is cleared.
+    let mut h = fake.harness_with(fake.config(), Some("work"));
+    h.app.open_on_start("home/garden/Garden Plan");
+    h.until(|app| reader_on(app, "NOTE-GARDEN")).await;
+    assert_eq!(h.app.focus, Pane::Reader);
+    assert_eq!(h.app.selection.workspace, "");
+}
+
+#[tokio::test]
+async fn note_on_the_command_line_that_is_missing_is_reported() {
+    let fake = Fake::new();
+    let mut h = fake.harness();
+    h.app.open_on_start("work/Nowhere");
+    h.until(|app| {
+        app.toast_messages()
+            .iter()
+            .any(|m| m.contains("No note at “work/Nowhere”"))
+    })
+    .await;
+}

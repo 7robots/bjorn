@@ -28,7 +28,9 @@ use crate::export::{
     FORMATS, Format, default_export_path, export_note, extension_for, format_by_id,
 };
 use crate::icons::IconSet;
-use crate::model::{Selection, View, duplicate_titles, in_workspace, select_notes, today};
+use crate::model::{
+    Selection, View, duplicate_titles, find_by_path, in_workspace, select_notes, today,
+};
 use crate::pty::PtySession;
 use crate::reminders::{
     RemctlClient, Status, join as join_reminders, remctl_found, resolve_remctl,
@@ -344,6 +346,8 @@ pub struct App {
     pending_edit: Option<String>,
     /// A note to select and show once the reload has it (today's, after `D`).
     pending_reveal: Option<String>,
+    /// `--note`'s `tag/path/Title`, opened once the first snapshot is in.
+    pending_open: Option<String>,
     /// The triage screen while it is up; it covers the three columns.
     pub triage: Option<Triage>,
     pub remctl: Option<Arc<RemctlClient>>,
@@ -442,6 +446,7 @@ impl App {
             session_gen: 0,
             pending_edit: None,
             pending_reveal: None,
+            pending_open: None,
             triage: None,
             remctl,
             reminders_notice_shown: false,
@@ -477,6 +482,12 @@ impl App {
             );
         }
         (app, rx)
+    }
+
+    /// Open the note at `path` (`tag/path/Title`, or a bare title) once the
+    /// first snapshot is in; for `--note`. Call before `start`.
+    pub fn open_on_start(&mut self, path: &str) {
+        self.pending_open = Some(path.to_string());
     }
 
     /// Kick off the first load and the poll timer.
@@ -668,6 +679,19 @@ impl App {
                 self.notify(&format!("Today: “{title}”"), Duration::from_secs(3));
             } else {
                 self.notify(GONE_FROM_THE_LIST, Duration::from_secs(5));
+            }
+        }
+        if let Some(path) = self.pending_open.take() {
+            match find_by_path(&self.snapshot, &path).map(|n| n.id.clone()) {
+                Some(id) => {
+                    self.reveal(&id);
+                }
+                None => self.notify_titled(
+                    "--note",
+                    &format!("No note at “{}”.", strip_control(&path)),
+                    Severity::Error,
+                    Duration::from_secs(10),
+                ),
             }
         }
     }

@@ -29,6 +29,7 @@ cd bjorn
 ./install.sh          # builds --release, puts a `bjorn` launcher in ~/bin
 bjorn                 # or: cargo run --release --bin bjorn
 bjorn --tag work      # start scoped to a tag subtree
+bjorn --note "work/sprint/Sprint Planning"   # open a note by tag path and title
 bjorn --demo          # sample notes through the built-in fake bearcli, no Bear needed
 bjorn capture "call Ana"   # add a line to today's daily note, no TUI (needs [daily])
 ```

@@ -67,6 +67,15 @@ in the config file. A leading
 .B #
 is optional.
 .TP
+.BI \-\-note " TAG/TITLE"
+Open this note when the notes load: its tag path, a slash, and its title, as in
+.BR "work/sprint/Sprint Planning" ,
+or the title alone. A parent tag will do, titles compare ignoring case, and a
+title may itself hold a slash. When several notes match, an active note wins
+over an archived one, then one in the trash, then the most recently modified.
+A workspace that leaves the note out is cleared. No match is reported in the
+app rather than stopping it.
+.TP
 .BI \-\-config " PATH"
 Read this config file instead of
 .IR $XDG_CONFIG_HOME/bjorn/config.toml .
