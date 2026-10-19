@@ -4578,7 +4578,11 @@ impl App {
                 if let Some(row) = day.current_row().cloned() {
                     self.close_day();
                     // A jump like following a link: `backspace` comes back.
-                    self.push_history();
+                    // A note that is gone is no jump, and leaves the history
+                    // as it was.
+                    if self.snapshot.by_id(&row.note_id).is_some() {
+                        self.push_history();
+                    }
                     self.goto_section(&row.note_id, &row.heading);
                 }
             }

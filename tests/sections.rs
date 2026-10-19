@@ -898,6 +898,7 @@ async fn enter_on_a_note_that_is_gone_says_so_and_changes_nothing() {
     .await;
     let cursor = h.app.notes.cursor;
     assert_eq!(cursor, Some(1));
+    let (back, forward) = (h.app.back.clone(), h.app.forward.clone());
 
     open_day(&mut h).await;
     // A row for a note no snapshot has ever held.
@@ -918,6 +919,11 @@ async fn enter_on_a_note_that_is_gone_says_so_and_changes_nothing() {
     assert_eq!(h.app.notes.cursor, cursor, "and so did the cursor");
     assert_eq!(h.app.selection.tag, "home", "and the selection");
     assert_eq!(h.app.notes.titles(), vec!["Garden Plan", "Reading Queue"]);
+    assert_eq!(
+        h.app.back, back,
+        "and the history: backspace has nothing new to undo"
+    );
+    assert_eq!(h.app.forward, forward);
 }
 
 #[tokio::test]
