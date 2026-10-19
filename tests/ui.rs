@@ -8,6 +8,7 @@ use std::time::Duration;
 use bjorn::app::Pane;
 use bjorn::model::View;
 use bjorn::render::OPEN_BOX;
+use bjorn::ui::note_list::ROW_HEIGHT;
 use bjorn::ui::sidebar::Row;
 use bjorn::ui::theme;
 use common::{Fake, titles};
@@ -22,6 +23,9 @@ async fn three_columns_load_and_render_first_note() {
         vec![
             "Sprint Planning",
             "Garden Plan",
+            "Field Notes",
+            "Ferry Timetable",
+            "Trail Journal",
             "Reading Queue",
             "CAD and Design",
             "Loose Thought"
@@ -41,7 +45,7 @@ async fn three_columns_load_and_render_first_note() {
     assert!(text.contains("#work/sprint"), "{text}");
     let screen = h.text();
     assert!(screen.contains("BJORN"));
-    assert!(screen.contains("Notes · 5"));
+    assert!(screen.contains("Notes · 8"));
     assert!(screen.contains("Sprint Planning"));
     assert!(screen.contains("TAGS"));
     assert!(screen.contains("▮▮▮"));
@@ -116,9 +120,12 @@ async fn sidebar_counts_match_the_snapshot() {
             c[&View::Archive],
             c[&View::Trash]
         ),
-        (5, 1, 2, 1, 2, 1, 1)
+        (8, 1, 2, 1, 2, 1, 1)
     );
-    assert_eq!(h.app.sidebar.tag_roots(), vec!["home", "work"]);
+    assert_eq!(
+        h.app.sidebar.tag_roots(),
+        vec!["home", "journal", "log", "survey", "trail", "work"]
+    );
 }
 
 #[tokio::test]
@@ -139,7 +146,7 @@ async fn mouse_click_selects_and_focuses() {
     let mut h = fake.harness();
     h.load().await;
     let rows = h.app.rects.notes_rows;
-    h.click(rows.x + 2, rows.y + 4 * 2 + 1);
+    h.click(rows.x + 2, rows.y + 5 * ROW_HEIGHT as u16 + 1);
     h.until(|app| {
         app.reader
             .note
@@ -378,7 +385,7 @@ async fn w_scopes_and_big_w_clears() {
         .await;
     h.press("W");
     h.until(|app| app.selection.workspace.is_empty()).await;
-    assert_eq!(titles(&h).len(), 5);
+    assert_eq!(titles(&h).len(), 8);
     assert_eq!(h.app.sidebar.header(), "BJORN");
 }
 
@@ -436,7 +443,7 @@ async fn w_again_leaves_the_workspace() {
     assert!(["home", ""].contains(&h.app.sidebar.highlighted_tag().as_str()));
     h.press("w");
     h.until(|app| app.selection.workspace.is_empty()).await;
-    assert_eq!(titles(&h).len(), 5);
+    assert_eq!(titles(&h).len(), 8);
     h.app.set_focus(Pane::Sidebar);
     h.app.sidebar.move_to_tag("work");
     h.press("enter");
@@ -487,12 +494,10 @@ async fn folds_survive_entering_and_leaving_a_workspace() {
     h.press("w");
     h.until(|app| app.selection.workspace.is_empty()).await;
     let roots = h.app.sidebar.tag_roots();
-    assert_eq!(
-        roots
-            .iter()
-            .map(|r| h.app.sidebar.is_expanded(r))
-            .collect::<Vec<_>>(),
-        vec![false, false]
+    assert!(roots.len() >= 2, "{roots:?}");
+    assert!(
+        roots.iter().all(|r| !h.app.sidebar.is_expanded(r)),
+        "every root stays folded: {roots:?}"
     );
     h.app.sidebar.set_expanded("work", true);
     client
@@ -503,12 +508,16 @@ async fn folds_survive_entering_and_leaving_a_workspace() {
     h.until(|app| app.snapshot.notes.iter().any(|n| n.title == "Another"))
         .await;
     let roots = h.app.sidebar.tag_roots();
-    assert_eq!(
+    assert!(
+        h.app.sidebar.is_expanded("work"),
+        "the fold set by hand survives the reload: {roots:?}"
+    );
+    assert!(
         roots
             .iter()
-            .map(|r| h.app.sidebar.is_expanded(r))
-            .collect::<Vec<_>>(),
-        vec![false, true]
+            .filter(|r| *r != "work")
+            .all(|r| !h.app.sidebar.is_expanded(r)),
+        "and the rest stay folded: {roots:?}"
     );
 }
 
@@ -586,6 +595,9 @@ async fn number_keys_switch_views() {
             vec![
                 "Sprint Planning",
                 "Garden Plan",
+                "Field Notes",
+                "Ferry Timetable",
+                "Trail Journal",
                 "Reading Queue",
                 "CAD and Design",
                 "Loose Thought",
@@ -598,7 +610,7 @@ async fn number_keys_switch_views() {
         let index = key.parse::<usize>().unwrap() - 1;
         assert_eq!(h.app.selection.view, View::ALL[index]);
     }
-    assert_eq!(h.app.notes.header, "Notes · 5");
+    assert_eq!(h.app.notes.header, "Notes · 8");
     assert_eq!(h.app.sidebar.highlighted_view(), Some(View::All));
 }
 

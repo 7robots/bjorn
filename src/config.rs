@@ -10,6 +10,7 @@ use anyhow::Context;
 use toml::Value;
 
 use crate::actions::{Action, DEFAULT_TIMEOUT_SECONDS};
+use crate::sections::{InsertPosition, SectionsConfig};
 use crate::util::{expand_tilde, home_dir, which};
 
 pub const APP_NAME: &str = "bjorn";
@@ -123,6 +124,12 @@ pub struct Config {
     /// Rust build never negotiates pixel mouse reporting, so it has no effect.
     pub mouse_pixels: bool,
     pub reminders: RemindersConfig,
+    /// `[sections]`: the dated-section template and the day-tag time axis.
+    /// `None` unless the file has a `[sections]` table: `s` rewrites the note
+    /// under the cursor and `T` goes beyond what Bear itself shows, so both
+    /// are opt-in the way daily notes are, and an empty table turns them on
+    /// with the defaults.
+    pub sections: Option<SectionsConfig>,
     /// `[[actions]]` from the config file, in the order they are written.
     pub actions: Vec<Action>,
     /// `None` unless the file has a `[daily]` table. Daily notes go beyond
@@ -147,6 +154,7 @@ impl Default for Config {
             theme: crate::ui::theme::DEFAULT_THEME.into(),
             mouse_pixels: true,
             reminders: RemindersConfig::default(),
+            sections: None,
             actions: Vec::new(),
             daily: None,
             templates_dir: default_templates_dir(),
@@ -281,6 +289,13 @@ impl Config {
             }
             cfg.daily = Some(daily);
         }
+        // After `[daily]`, whose tag is the day tag's default. Only a
+        // `[sections]` table turns dated sections on; without one its keys
+        // are never read, so an unused feature cannot warn at start-up.
+        if let Some(Value::Table(section)) = data.get("sections") {
+            let day_tag = inherited_day_tag(cfg.daily.as_ref());
+            cfg.sections = Some(parse_sections(section, &day_tag));
+        }
         if let Some(Value::Table(section)) = data.get("templates") {
             let dir = text(section.get("dir"), "").trim().to_string();
             if !dir.is_empty() {
@@ -288,6 +303,74 @@ impl Config {
             }
         }
         Ok(cfg)
+    }
+}
+
+/// The day tag `[sections]` falls back to: `[daily] tag` when that names a
+/// whole day, so daily notes and dated sections share one time axis without
+/// saying it twice, else `log/%Y/%m/%d`. A daily tag without a full date in
+/// it (`daily`, say) is a fine tag for daily notes but no time axis, so it is
+/// passed over rather than left to make the day screen empty.
+fn inherited_day_tag(daily: Option<&DailyConfig>) -> String {
+    let default = SectionsConfig::default();
+    let Some(daily) = daily.filter(|d| !d.tag.trim().is_empty()) else {
+        return default.day_tag;
+    };
+    let candidate = SectionsConfig {
+        day_tag: daily.tag.clone(),
+        ..SectionsConfig::default()
+    };
+    let today = crate::model::today();
+    if candidate.date_of_tag(&candidate.day_tag_for(today)) == Some(today) {
+        candidate.day_tag
+    } else {
+        default.day_tag
+    }
+}
+
+/// `[sections]`: the dated-section template, the day tag and the date heading
+/// (both strftime patterns), and where a new section goes. An empty or missing
+/// value keeps the built-in default, so a half-written block never stops the
+/// app — the same leniency the rest of the file gets; `day_tag`'s default is
+/// `inherited_day_tag`'s answer. An `insert` it does not recognize keeps the
+/// default too, but is remembered so start-up can warn.
+fn parse_sections(section: &toml::Table, day_tag: &str) -> SectionsConfig {
+    let defaults = SectionsConfig {
+        day_tag: day_tag.to_string(),
+        ..SectionsConfig::default()
+    };
+    let read = |key: &str, fallback: &str| {
+        let value = text(section.get(key), fallback);
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            fallback.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let (insert, unknown_insert) = {
+        let raw = read("insert", defaults.insert.as_str());
+        match InsertPosition::parse(&raw) {
+            Some(position) => (position, None),
+            None => (defaults.insert, Some(raw)),
+        }
+    };
+    SectionsConfig {
+        // The template keeps its own leading and trailing whitespace trimmed
+        // but nothing inside it: the blank line before the rule is the shape.
+        template: {
+            // Missing and empty alike keep the default exactly as shipped.
+            let raw = text(section.get("template"), "");
+            if raw.trim().is_empty() {
+                defaults.template.clone()
+            } else {
+                raw.trim_matches('\n').to_string()
+            }
+        },
+        day_tag: read("day_tag", &defaults.day_tag),
+        heading_format: read("heading_format", &defaults.heading_format),
+        insert,
+        unknown_insert,
     }
 }
 
@@ -519,6 +602,101 @@ mod tests {
     }
 
     #[test]
+    fn sections_block_is_read_and_falls_back_key_by_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[sections]\ntemplate = \"\"\"\n## {{date}}\n{{tag}}\n\"\"\"\nday_tag = \" journal/%Y-%m-%d \"\n\
+             heading_format = \"%Y-%m-%d\"\ninsert = \"Top\"\n",
+        );
+        let cfg = Config::load(Some(&path)).unwrap().sections.unwrap();
+        assert_eq!(cfg.template, "## {{date}}\n{{tag}}");
+        assert_eq!(cfg.day_tag, "journal/%Y-%m-%d");
+        assert_eq!(cfg.heading_format, "%Y-%m-%d");
+        assert_eq!(cfg.insert, InsertPosition::Top);
+        assert_eq!(cfg.unknown_insert, None);
+        assert_eq!(
+            cfg.problem(chrono::NaiveDate::from_ymd_opt(2026, 9, 19).unwrap()),
+            None
+        );
+
+        // A misspelled position keeps the default and is named at start-up.
+        let path = write(&dir, "[sections]\ninsert = \"Botom\"\n");
+        let cfg = Config::load(Some(&path)).unwrap().sections.unwrap();
+        assert_eq!(cfg.insert, InsertPosition::BeforeFirstDatedSection);
+        assert_eq!(cfg.unknown_insert.as_deref(), Some("Botom"));
+        let problem = cfg
+            .problem(chrono::NaiveDate::from_ymd_opt(2026, 9, 19).unwrap())
+            .unwrap();
+        assert!(problem.contains("insert = \"Botom\""), "{problem}");
+
+        // An empty value is no value: the default stands.
+        let path = write(&dir, "[sections]\ntemplate = \"\"\nday_tag = \"\"\n");
+        assert_eq!(
+            Config::load(Some(&path)).unwrap().sections,
+            Some(SectionsConfig::default())
+        );
+    }
+
+    #[test]
+    fn dated_sections_are_off_without_a_sections_table() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Config::default().sections, None);
+        assert_eq!(
+            Config::load(Some(&dir.path().join("nope.toml")))
+                .unwrap()
+                .sections,
+            None
+        );
+        // An empty table turns them on with the defaults.
+        let path = write(&dir, "[sections]\n");
+        assert_eq!(
+            Config::load(Some(&path)).unwrap().sections,
+            Some(SectionsConfig::default())
+        );
+        // A commented-out table is no table, and neither is a stray key.
+        let path = write(&dir, "# [sections]\n# insert = \"Botom\"\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().sections, None);
+        let path = write(&dir, "sections = true\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().sections, None);
+    }
+
+    #[test]
+    fn the_day_tag_defaults_to_the_daily_tag_when_that_names_a_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let day_tag = |text: &str| {
+            let path = write(&dir, text);
+            Config::load(Some(&path)).unwrap().sections.unwrap().day_tag
+        };
+        // One time axis for daily notes and dated sections, said once.
+        assert_eq!(
+            day_tag("[daily]\ntag = \"#journal/%Y-%m-%d\"\n\n[sections]\n"),
+            "journal/%Y-%m-%d"
+        );
+        // Said in both places, `[sections]` wins; empty is no value.
+        assert_eq!(
+            day_tag(
+                "[daily]\ntag = \"journal/%Y-%m-%d\"\n\n[sections]\nday_tag = \"log/%Y/%m/%d\"\n"
+            ),
+            "log/%Y/%m/%d"
+        );
+        assert_eq!(
+            day_tag("[daily]\ntag = \"journal/%Y-%m-%d\"\n\n[sections]\nday_tag = \" \"\n"),
+            "journal/%Y-%m-%d"
+        );
+        // A daily tag that names no day, or none at all, is no time axis.
+        assert_eq!(
+            day_tag("[daily]\ntag = \"daily\"\n\n[sections]\n"),
+            "log/%Y/%m/%d"
+        );
+        assert_eq!(
+            day_tag("[daily]\ntag = \"\"\n\n[sections]\n"),
+            "log/%Y/%m/%d"
+        );
+        assert_eq!(day_tag("[sections]\n"), "log/%Y/%m/%d");
+    }
+
+    #[test]
     fn actions_are_read_in_order_with_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
@@ -695,10 +873,11 @@ mod tests {
 
     /// Every TOML key the parser looks up, read from the parser's source: a
     /// key is read straight off a table (`data.get("theme")`) or through the
-    /// `[daily]` arm's `or_default("title", ...)`. A new helper of that kind
-    /// has to be named here, which is why the count is asserted.
+    /// `[daily]` arm's `or_default("title", ...)` or `parse_sections`'
+    /// `read("day_tag", ...)`. A new helper of that kind has to be named
+    /// here, which is why the count is asserted.
     fn keys_the_parser_reads() -> Vec<String> {
-        const CALLS: &[&str] = &["get", "or_default"];
+        const CALLS: &[&str] = &["get", "or_default", "read"];
         let source = include_str!("config.rs");
         let source = source.split("#[cfg(test)]").next().unwrap_or(source);
         let bytes = source.as_bytes();

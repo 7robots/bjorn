@@ -142,11 +142,12 @@ fn config_parser(source: &str) -> &str {
 }
 
 /// Every TOML key the parser looks up. The parser reads each key straight off
-/// a table (`data.get("theme")`, `entry.get("command")`). A helper that wraps
-/// the lookup and takes the key as its first argument has to be named in
-/// `CALLS` too, which is why the count is asserted below.
+/// a table (`data.get("theme")`, `entry.get("command")`) or through a helper
+/// that takes the key as its first argument (`read("day_tag", ...)` in
+/// `parse_sections`). Such a helper has to be named in `CALLS` too, which is
+/// why the count is asserted below.
 fn config_keys(source: &str) -> Vec<String> {
-    const CALLS: &[&str] = &["get"];
+    const CALLS: &[&str] = &["get", "read"];
     let source = config_parser(source);
     let bytes = source.as_bytes();
     let mut keys = Vec::new();
@@ -245,6 +246,7 @@ fn the_page_has_its_sections_and_no_trailing_whitespace() {
         "VIEWS AND THE WORKSPACE",
         "SEARCH",
         "WIKI LINKS",
+        "DATED SECTIONS AND THE DAY VIEW",
         "TODO TRIAGE",
         "EXPORT",
         "ACTIONS",
