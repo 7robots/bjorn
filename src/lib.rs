@@ -7,6 +7,7 @@ pub mod actions;
 pub mod app;
 pub mod bear;
 pub mod config;
+pub mod craft;
 pub mod daily;
 pub mod editor;
 pub mod export;

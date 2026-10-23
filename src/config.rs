@@ -137,6 +137,8 @@ pub struct Config {
     /// with the defaults.
     pub daily: Option<DailyConfig>,
     pub templates_dir: PathBuf,
+    /// `[craft]`: use a Craft space instead of Bear. Off unless `enabled`.
+    pub craft: crate::craft::CraftConfig,
     pub path: Option<PathBuf>,
 }
 
@@ -158,6 +160,7 @@ impl Default for Config {
             actions: Vec::new(),
             daily: None,
             templates_dir: default_templates_dir(),
+            craft: crate::craft::CraftConfig::default(),
             path: None,
         }
     }
@@ -295,6 +298,24 @@ impl Config {
         if let Some(Value::Table(section)) = data.get("sections") {
             let day_tag = inherited_day_tag(cfg.daily.as_ref());
             cfg.sections = Some(parse_sections(section, &day_tag));
+        }
+        if let Some(Value::Table(section)) = data.get("craft") {
+            let defaults = crate::craft::CraftConfig::default();
+            cfg.craft = crate::craft::CraftConfig {
+                enabled: truthy(section.get("enabled"), false),
+                api_url: text(section.get("api_url"), "").trim().to_string(),
+                api_key: text(section.get("api_key"), "").trim().to_string(),
+                op_account: text(section.get("op_account"), "").trim().to_string(),
+                archive_folder: text(section.get("archive_folder"), "")
+                    .trim()
+                    .trim_matches('#')
+                    .trim_matches('/')
+                    .to_string(),
+                refresh_seconds: match section.get("refresh_seconds") {
+                    Some(Value::Integer(i)) if *i > 0 => *i as u64,
+                    _ => defaults.refresh_seconds,
+                },
+            };
         }
         if let Some(Value::Table(section)) = data.get("templates") {
             let dir = text(section.get("dir"), "").trim().to_string();

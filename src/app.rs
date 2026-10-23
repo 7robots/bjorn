@@ -407,6 +407,7 @@ impl App {
         // unknown name keeps the default: the config file is shared with the
         // Python Bjorn, which knows themes this build does not.
         let theme_known = crate::ui::theme::set(&config.theme);
+        crate::ui::set_craft(client.is_craft());
         if !theme_known {
             crate::ui::theme::set(crate::ui::theme::DEFAULT_THEME);
         }

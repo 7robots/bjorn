@@ -32,6 +32,25 @@ pub const SIDEBAR_WIDTH: u16 = 28;
 pub const NOTES_WIDTH: u16 = 36;
 
 /// Footer entries: key, label. Grows as phases land.
+/// Set when the library is a Craft space, so labels that name Bear name
+/// Craft instead.
+static CRAFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_craft(on: bool) {
+    CRAFT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A label as this library calls it: Bear's name swapped for Craft's.
+pub fn library_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if CRAFT.load(std::sync::atomic::Ordering::Relaxed) && text.contains("Bear") {
+        text.replace("Bear.app", "Craft")
+            .replace("Bear", "Craft")
+            .into()
+    } else {
+        text.into()
+    }
+}
+
 pub const FOOTER: &[(&str, &str)] = &[
     ("q", "Quit"),
     ("?", "Help"),
@@ -772,7 +791,10 @@ fn draw_footer_entries(frame: &mut Frame, area: Rect, entries: &[(&str, &str)]) 
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (key, label) in entries {
         spans.push(Span::styled(format!(" {key} "), key_style));
-        spans.push(Span::styled(format!("{label} "), label_style));
+        spans.push(Span::styled(
+            format!("{} ", library_text(label)),
+            label_style,
+        ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -789,11 +811,11 @@ fn draw_toasts(frame: &mut Frame, app: &App, area: Rect) {
         let mut lines: Vec<Line<'static>> = Vec::new();
         if !toast.title.is_empty() {
             lines.push(Line::from(Span::styled(
-                toast.title.clone(),
+                library_text(&toast.title).into_owned(),
                 Style::default().add_modifier(Modifier::BOLD),
             )));
         }
-        lines.push(Line::from(toast.message.clone()));
+        lines.push(Line::from(library_text(&toast.message).into_owned()));
         let text_width = width.saturating_sub(4).max(1) as usize;
         let text_rows: usize = lines
             .iter()

@@ -25,6 +25,18 @@ list = ""                       # target list, e.g. "Bear"; remctl's default whe
 due = "today"                   # due date for new reminders; "" for none
 remctl = ""                     # path to remctl; default searches PATH
 
+# Use a Craft space instead of Bear: documents are notes, folders are tags.
+# Make an API link in Craft (Settings > Integrations > Craft Connect). Either
+# value may be an op:// reference, read with `op read` at start-up;
+# $BJORN_CRAFT_URL and $BJORN_CRAFT_KEY override them.
+[craft]
+enabled = false
+api_url = ""                    # https://connect.craft.do/links/…/api/v1
+api_key = ""                    # the link's key; "" for a link without one
+op_account = ""                 # 1Password account for op:// values
+archive_folder = ""             # folder that stands for Bear's Archive; "" for none
+refresh_seconds = 30            # how often titles, dates and folders are re-read
+
 # Shell commands for `!` and `a`; see docs/actions.md. The menu's
 # "+ New action" row writes these for you.
 #

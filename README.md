@@ -351,6 +351,35 @@ cannot be read is reported rather than replaced by the built-in layout.
 `template` can also name another file: `sub/day` is inside the templates
 directory, an absolute or `~/` path is taken as it is.
 
+## Craft
+
+Bjorn can be a client for a [Craft](https://www.craft.do) space instead of
+Bear. It's off by default; turn it on in the config:
+
+```toml
+[craft]
+enabled = true
+api_url = "op://Employee/Craft API Key/hostname"   # or the link itself
+api_key = "op://Employee/Craft API Key/credential" # read with `op read`
+op_account = "harvard.1password.com"
+# archive_folder = "archive"   # a folder to stand for Bear's Archive
+```
+
+Make the API link in Craft under Settings → Integrations → Craft Connect.
+Craft documents become notes and folders become tags, so the sidebar shows
+the folder tree. A note reads as `# Title` followed by its blocks as markdown,
+with `[Title](block://id)` links shown as `[[Title]]` and callouts as quotes.
+Editing a note writes back only the blocks that changed, so the rest keep
+their comments and history. A new note goes in the folder its first tag names.
+`d` sends a document to Craft's trash, and `b` opens it in the Craft app.
+Sub-pages, collections and whiteboards show up as placeholder lines and are
+never written. Pins are stored by Bjorn, because Craft has no pins.
+
+Craft allows about 100 API requests a minute, so the first start takes a
+couple of minutes to learn which folder each document is in. It then fills in
+note bodies in the background at a few a minute. Everything is cached on disk,
+so later starts are instant. See `CRAFT` in `man bjorn` for the details.
+
 ## Configuration
 
 `~/.config/bjorn/config.toml` (or `$XDG_CONFIG_HOME/bjorn/config.toml`), or

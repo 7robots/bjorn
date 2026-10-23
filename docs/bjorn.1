@@ -848,6 +848,67 @@ list;
 in it is the dated tag. Meeting, one\-on\-one, decision and daily examples ship
 in
 .IR config/templates/ .
+.SH CRAFT
+With
+.B [craft] enabled = true
+Bjorn reads and writes a Craft space through the Craft Connect API instead of
+Bear. Make an API link in Craft (Settings, Integrations, Craft Connect) and put
+its URL and key in
+.IR [craft] ,
+or
+.B op://
+references to them. Everything else works as it does with Bear, mapped this
+way:
+.IP \(bu 2
+A document is a note:
+.B # Title
+then its blocks as markdown, a blank line between blocks and none inside a
+list. A change to the first line renames the document.
+.IP \(bu 2
+Folders are tags. A note's tags are its folder and the folders above it, so the
+sidebar is the folder tree; Unsorted documents are untagged. A new note goes in
+the folder its first tag names, made (with any missing parents) if needed.
+.IP \(bu 2
+An edit is written block by block: the new text is split into blocks and lined
+up against the old ones, and only blocks that changed are written, inserted or
+deleted, so the rest keep their comments and history. Edits are hash\-guarded
+as with Bear.
+.IP \(bu 2
+Links to other documents,
+.BR [Title](block://id) ,
+read as
+.B [[Title]]
+and are written back as links when exactly one document has that title.
+Callouts read as quotes and stay callouts when edited as quotes; highlights read
+as
+.BR ==text== .
+.IP \(bu 2
+Sub\-pages, collections, whiteboards and files show as one placeholder line
+and are never written: deleting the line leaves the block in Craft.
+.IP \(bu 2
+Craft's trash is the Trash.
+.B Restore
+puts a document back in the folder it left. Craft has no archive;
+.I archive_folder
+names a folder to stand for one.
+.IP \(bu 2
+Pins are kept by Bjorn, in
+.IR craft\-pins.json .
+.IP \(bu 2
+.B b
+opens the document in the Craft app, at the section when there is one.
+.PP
+Craft allows about 100 requests a minute and reading a document is one, so
+Bjorn reads the library a little at a time. Titles, dates and the folder tree
+are read every
+.I refresh_seconds
+(three requests). Which folder each document is in is learned by listing
+folders, about two minutes for a large space the first time and then only the
+folders whose counts changed. Bodies are read when a note is opened and, in the
+background, a few a minute until all are cached. All of it is kept on disk, so
+only the first start is slow to fill in tags, previews, todo counts and
+full\-text search; until a body is cached, a text search also asks Craft's
+search, which returns its top 20.
 .SH EXPORT
 .B x
 writes the note under the cursor to a file you pick, in the format chosen in
@@ -1376,6 +1437,39 @@ Path to
 .BR remctl .
 Default: empty, which searches
 .BR $PATH .
+.SS [craft]
+Use a Craft space instead of Bear; see
+.BR CRAFT .
+.TP
+.I enabled
+Default:
+.BR false .
+.TP
+.I api_url
+The API link, for example
+.IR https://connect.craft.do/links/.../api/v1 ,
+or an
+.B op://
+reference to it.
+.TP
+.I api_key
+The link's key, or an
+.B op://
+reference to it; empty for a link without one.
+.TP
+.I op_account
+The 1Password account
+.B op read
+uses for
+.B op://
+values. Default: empty, op's own default.
+.TP
+.I archive_folder
+A folder path that stands for Bear's Archive. Default: empty, no archive.
+.TP
+.I refresh_seconds
+How often titles, dates and folders are re\-read. Default:
+.BR 30 .
 .SS [daily]
 Present, even empty, turns daily notes on; absent, they are off. See
 .BR "DAILY NOTES AND TEMPLATES" .
@@ -1549,6 +1643,14 @@ draws Nerd Font glyphs.
 Read by the bundled fakes that
 .B \-\-demo
 and the test suite run. They have no effect on a real run.
+.TP
+.B $BJORN_CRAFT_URL
+.TQ
+.B $BJORN_CRAFT_KEY
+Override
+.I [craft] api_url
+and
+.IR api_key .
 .SH FILES
 .TP
 .I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/config.toml
@@ -1579,6 +1681,17 @@ Derived state only: deleting it costs one slow start.
 The same, for
 .B \-\-demo
 runs, so the sample library never stands in for the real one.
+.TP
+.I ${XDG_CACHE_HOME:\-~/.cache}/bjorn/craft\-<hash>.json
+With
+.IR [craft] :
+titles, folders and bodies of the Craft space, one file per API link. Derived
+state only: deleting it costs one slow start.
+.TP
+.I ${XDG_CONFIG_HOME:\-~/.config}/bjorn/craft\-pins.json
+With
+.IR [craft] :
+the pins, which Craft does not keep.
 .TP
 .I ${XDG_DATA_HOME:\-~/.local/share}/bjorn/bin/
 Where
@@ -1746,8 +1859,11 @@ Everything goes through
 which ships inside Bear.app, and the editor, the pty, Apple Reminders and the
 export writers are all built against macOS.
 .IP \(bu 2
-.B The binary makes no network calls.
-There is no HTTP client in it. Anything that has to reach the network \(em a
+.B The binary makes no network calls, except to Craft.
+With
+.I [craft]
+enabled it talks to the Craft API and nothing else. Anything else that has to
+reach the network \(em a
 model, an upload, a deploy, a commit \(em is an action you configure, running
 with your credentials and your environment. Bjorn does not sandbox an action
 and does not parse it.

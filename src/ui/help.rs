@@ -232,7 +232,7 @@ fn heading_line(text: &str) -> Line<'static> {
 /// every continuation line hangs under the first word of the description.
 fn push_row(out: &mut Vec<Line<'static>>, key: &str, text: &str, width: usize) {
     let hang = INDENT + KEY_WIDTH + 2;
-    let body = wrap(text, width.saturating_sub(hang));
+    let body = wrap(&super::library_text(text), width.saturating_sub(hang));
     let mut first = true;
     for row in body {
         let lead = if first {

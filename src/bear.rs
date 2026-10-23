@@ -508,6 +508,8 @@ impl Runner for ProcessRunner {
 /// Shells out to bearcli. One instance per app; writes are serialized.
 pub struct BearClient {
     runner: Box<dyn Runner>,
+    /// Set when the library is a Craft space: every call goes there instead.
+    craft: Option<Arc<crate::craft::CraftStore>>,
     write_lock: tokio::sync::Mutex<()>,
     /// note id -> (modification stamp, preview). Bodies make up nine tenths of
     /// a `list` with content, so a snapshot lists metadata only and fetches
@@ -530,7 +532,7 @@ pub struct BearClient {
 /// rename each other's half-written file into place. The temporary is created
 /// 0600 with `O_EXCL`, so nothing already sitting at its name, a symlink
 /// included, is written through.
-fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
@@ -567,11 +569,30 @@ impl BearClient {
     pub fn from_runner(runner: Box<dyn Runner>) -> BearClient {
         BearClient {
             runner,
+            craft: None,
             write_lock: tokio::sync::Mutex::new(()),
             previews: Mutex::new(HashMap::new()),
             preview_cache: None,
             preview_cache_written: Mutex::new(None),
         }
+    }
+
+    /// A client for a Craft space instead of Bear.
+    pub fn craft(store: crate::craft::CraftStore) -> BearClient {
+        Self::craft_store(Arc::new(store))
+    }
+
+    pub fn craft_store(store: Arc<crate::craft::CraftStore>) -> BearClient {
+        let mut client = Self::from_runner(Box::new(ProcessRunner {
+            command: vec![DEFAULT_COMMAND.into()],
+            envs: Vec::new(),
+        }));
+        client.craft = Some(store);
+        client
+    }
+
+    pub fn is_craft(&self) -> bool {
+        self.craft.is_some()
     }
 
     /// Keep previews in `path` between runs, and read whatever is there now.
@@ -627,6 +648,9 @@ impl BearClient {
     /// Is there anything new to write? Polling takes a snapshot every few
     /// seconds and an unchanged library must not rewrite the file each time.
     pub fn preview_cache_dirty(&self) -> bool {
+        if let Some(craft) = &self.craft {
+            return craft.dirty();
+        }
         self.preview_cache.is_some()
             && *self.preview_cache_written.lock().unwrap() != Some(self.preview_signature())
     }
@@ -634,6 +658,9 @@ impl BearClient {
     /// Write the previews out, if a cache path was given. Called after a
     /// snapshot; a failure is not worth reporting, the next run just runs cold.
     pub fn save_preview_cache(&self) {
+        if let Some(craft) = &self.craft {
+            return craft.save();
+        }
         let Some(path) = self.preview_cache.as_ref() else {
             return;
         };
@@ -667,6 +694,9 @@ impl BearClient {
     }
 
     pub fn describe(&self) -> String {
+        if let Some(craft) = &self.craft {
+            return craft.describe();
+        }
         self.runner.describe()
     }
 
@@ -743,6 +773,9 @@ impl BearClient {
     /// modification stamp changed: a `cat` each for a few, one content-bearing
     /// `list` for many.
     pub async fn snapshot(&self) -> Result<Snapshot> {
+        if let Some(craft) = &self.craft {
+            return craft.snapshot().await;
+        }
         let mut rows: Vec<Value> = Vec::new();
         let mut stale: Vec<Value> = Vec::new();
         let mut previews: HashMap<String, String> = HashMap::new();
@@ -868,6 +901,9 @@ impl BearClient {
     /// Two ~20 ms bearcli calls, run together: enough to know whether a full
     /// `snapshot` is worth taking.
     pub async fn probe(&self) -> Result<Probe> {
+        if let Some(craft) = &self.craft {
+            return craft.probe().await;
+        }
         let (count_rows, latest) = tokio::join!(
             self.run(
                 &["list", "--location", "all", "--count", "--format", "json"],
@@ -908,6 +944,10 @@ impl BearClient {
 
     /// Ids matching a Bear search query, in bearcli's order.
     pub async fn search_ids(&self, query: &str, location: &str) -> Result<Vec<String>> {
+        if let Some(craft) = &self.craft {
+            let rows = craft.search_rows(query.trim(), location, None).await?;
+            return Ok(rows.iter().map(|r| text_of(r.get("id"))).collect());
+        }
         let query = query.trim();
         if query.is_empty() {
             return Ok(Vec::new());
@@ -944,6 +984,24 @@ impl BearClient {
     /// any hit it. Bear's phrase match is a prefix match, so `wiki::backlinks`
     /// checks each body before any is shown.
     pub async fn backlink_rows(&self, title: &str) -> Result<(Vec<Value>, bool)> {
+        if let Some(craft) = &self.craft {
+            let mut rows: Vec<Value> = Vec::new();
+            let mut capped = false;
+            for query in crate::wiki::backlink_queries(title) {
+                for location in ["notes", "archive"] {
+                    let found = craft
+                        .search_rows(&query, location, Some(crate::wiki::BACKLINK_LIMIT))
+                        .await?;
+                    capped |= found.len() >= crate::wiki::BACKLINK_LIMIT;
+                    for row in found {
+                        if !rows.iter().any(|r| r.get("id") == row.get("id")) {
+                            rows.push(row);
+                        }
+                    }
+                }
+            }
+            return Ok((rows, capped));
+        }
         let limit = crate::wiki::BACKLINK_LIMIT.to_string();
         let mut rows: Vec<Value> = Vec::new();
         let mut capped = false;
@@ -981,6 +1039,9 @@ impl BearClient {
     }
 
     pub async fn cat(&self, note_id: &str) -> Result<NoteContent> {
+        if let Some(craft) = &self.craft {
+            return craft.cat(note_id).await;
+        }
         let payload = self
             .run(&["cat", "--format", "json", "--", note_id], true, None)
             .await?;
@@ -1011,6 +1072,15 @@ impl BearClient {
     /// Raw rows for every active note with an open todo, optionally only under
     /// a tag. Content included; `todos::scan_rows` turns them into items.
     pub async fn todo_rows(&self, workspace: &str) -> Result<Vec<Value>> {
+        if let Some(craft) = &self.craft {
+            let ws = normalize_tag(workspace);
+            let query = if ws.is_empty() {
+                "@todo".to_string()
+            } else {
+                format!("@todo {}", display_tag(&ws))
+            };
+            return craft.search_rows(&query, "notes", None).await;
+        }
         let ws = normalize_tag(workspace);
         let query = if ws.is_empty() {
             "@todo".to_string()
@@ -1051,6 +1121,25 @@ impl BearClient {
     /// query runs once over every location and `sections::scan_day_rows` drops
     /// the trash, which is one bearcli process per query instead of two.
     pub async fn day_rows(&self, tag: &str, phrase: &str) -> Result<Vec<Value>> {
+        if let Some(craft) = &self.craft {
+            let tag = normalize_tag(tag);
+            let mut out: Vec<Value> = Vec::new();
+            let mut queries: Vec<String> = Vec::new();
+            if !tag.is_empty() {
+                queries.push(display_tag(&tag));
+            }
+            if !phrase.is_empty() {
+                queries.push(format!("\"{phrase}\""));
+            }
+            for query in queries {
+                for row in craft.search_rows(&query, "all", None).await? {
+                    if !out.iter().any(|r| r.get("id") == row.get("id")) {
+                        out.push(row);
+                    }
+                }
+            }
+            return Ok(out);
+        }
         let tag = normalize_tag(tag);
         let mut queries: Vec<String> = Vec::new();
         if !tag.is_empty() {
@@ -1093,6 +1182,10 @@ impl BearClient {
     /// The note's attachment filenames, as they appear in its markdown links
     /// (before percent-encoding).
     pub async fn attachments(&self, note_id: &str) -> Result<Vec<String>> {
+        if let Some(craft) = &self.craft {
+            let _ = (craft, note_id);
+            return Ok(Vec::new());
+        }
         let rows = self
             .run(
                 &[
@@ -1120,6 +1213,12 @@ impl BearClient {
     /// One attachment's bytes. bearcli refuses a TTY for this; stdout is a pipe
     /// here, so it always answers.
     pub async fn attachment(&self, note_id: &str, filename: &str) -> Result<Vec<u8>> {
+        if let Some(craft) = &self.craft {
+            let _ = (craft, note_id);
+            return Err(BearError::new(format!(
+                "Craft notes have no attachment {filename}"
+            )));
+        }
         let output = self
             .spawn(
                 &[
@@ -1148,6 +1247,9 @@ impl BearClient {
     }
 
     pub async fn tags(&self) -> Result<Vec<String>> {
+        if let Some(craft) = &self.craft {
+            return Ok(craft.tag_list());
+        }
         let rows = self
             .run(&["tags", "list", "--format", "json"], true, None)
             .await?;
@@ -1210,6 +1312,9 @@ impl BearClient {
         content: &str,
         if_not_exists: bool,
     ) -> Result<(String, String, Location)> {
+        if let Some(craft) = &self.craft {
+            return craft.create(title, tags, content, if_not_exists).await;
+        }
         let mut args: Vec<String> = vec!["create".into()];
         if if_not_exists {
             args.push("--if-not-exists".into());
@@ -1259,6 +1364,9 @@ impl BearClient {
     /// Add `content` to the end of a note, or of the section under the heading
     /// `section`. The text goes on stdin, so none of it is read as an escape.
     pub async fn append(&self, note_id: &str, content: &str, section: Option<&str>) -> Result<()> {
+        if let Some(craft) = &self.craft {
+            return craft.append(note_id, content, section).await;
+        }
         let mut args: Vec<String> = vec!["append".into()];
         if let Some(section) = section.filter(|s| !s.trim().is_empty()) {
             // One argument, so a heading that starts with `-` is never an option.
@@ -1273,6 +1381,9 @@ impl BearClient {
     /// A note's title and location (`notes`, `archive`, `trash`), read fresh:
     /// what a write checks just before it goes, and what it reads after.
     pub async fn title_and_location(&self, note_id: &str) -> Result<(String, String)> {
+        if let Some(craft) = &self.craft {
+            return craft.title_and_location(note_id).await;
+        }
         let payload = self
             .run(
                 &[
@@ -1303,6 +1414,9 @@ impl BearClient {
 
     /// Replace a note's whole content, guarded by the hash from `cat`.
     pub async fn overwrite(&self, note_id: &str, content: &str, base: &str) -> Result<()> {
+        if let Some(craft) = &self.craft {
+            return craft.overwrite(note_id, content, base).await;
+        }
         let _guard = self.write_lock.lock().await;
         self.run(
             &["overwrite", &format!("--base={base}"), "--", note_id],
@@ -1314,6 +1428,9 @@ impl BearClient {
     }
 
     pub async fn trash(&self, note_id: &str) -> Result<()> {
+        if let Some(craft) = &self.craft {
+            return craft.trash(note_id).await;
+        }
         let _guard = self.write_lock.lock().await;
         self.run(&["trash", "--", note_id], false, None)
             .await
@@ -1321,6 +1438,9 @@ impl BearClient {
     }
 
     pub async fn restore(&self, note_id: &str) -> Result<()> {
+        if let Some(craft) = &self.craft {
+            return craft.restore(note_id).await;
+        }
         let _guard = self.write_lock.lock().await;
         self.run(&["restore", "--", note_id], false, None)
             .await
@@ -1328,6 +1448,9 @@ impl BearClient {
     }
 
     pub async fn archive(&self, note_id: &str) -> Result<()> {
+        if let Some(craft) = &self.craft {
+            return craft.archive(note_id).await;
+        }
         let _guard = self.write_lock.lock().await;
         self.run(&["archive", "--", note_id], false, None)
             .await
@@ -1335,6 +1458,9 @@ impl BearClient {
     }
 
     pub async fn pin(&self, note_id: &str, target: &str) -> Result<()> {
+        if let Some(craft) = &self.craft {
+            return craft.pin(note_id, target, true);
+        }
         let _guard = self.write_lock.lock().await;
         self.run(&["pin", "add", "--", note_id, target], false, None)
             .await
@@ -1342,6 +1468,9 @@ impl BearClient {
     }
 
     pub async fn unpin(&self, note_id: &str, target: &str) -> Result<()> {
+        if let Some(craft) = &self.craft {
+            return craft.pin(note_id, target, false);
+        }
         let _guard = self.write_lock.lock().await;
         self.run(&["pin", "remove", "--", note_id, target], false, None)
             .await
@@ -1356,6 +1485,9 @@ impl BearClient {
         replace: &str,
         section: &str,
     ) -> Result<()> {
+        if let Some(craft) = &self.craft {
+            return craft.edit(note_id, find, replace, section).await;
+        }
         let mut args: Vec<String> = vec!["edit".into()];
         if !section.is_empty() {
             args.push(format!("--section={}", escape_flag(section)));
@@ -1414,6 +1546,9 @@ impl BearClient {
     /// own. A note's headings are user text, so they are never an argv entry
     /// of their own; the id follows `--`.
     pub async fn open_in_app(&self, note_id: &str, header: &str) -> Result<()> {
+        if let Some(craft) = &self.craft {
+            return craft.open_in_app(note_id, header).await;
+        }
         let mut args = vec!["app".to_string(), "open".to_string()];
         if !header.is_empty() {
             args.push(format!("--header={header}"));

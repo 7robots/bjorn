@@ -110,6 +110,14 @@ fn capture_text(words: Vec<String>) -> Result<String, String> {
 }
 
 /// `bjorn today`: find or make today's note and print its id and title.
+/// The client for `[craft]`: secrets read now, so a locked 1Password stops
+/// the start with a message instead of a blank library.
+fn craft_client(config: &Config) -> anyhow::Result<BearClient> {
+    let store = bjorn::craft::CraftStore::connect(&config.craft)
+        .map_err(|why| anyhow::anyhow!("craft: {why}"))?;
+    Ok(BearClient::craft(store))
+}
+
 async fn today(client: &BearClient, config: &Config) -> Result<(), String> {
     let daily = bjorn::daily::today(config, &chrono::Local::now())?;
     let id = bjorn::daily::ensure(client, &daily)
@@ -172,7 +180,11 @@ async fn main() -> anyhow::Result<()> {
         } else {
             resolve_bearcli(&config.bearcli)
         };
-        let client = BearClient::new(vec![bearcli]);
+        let client = if config.craft.enabled && !cli.demo {
+            craft_client(&config)?
+        } else {
+            BearClient::new(vec![bearcli])
+        };
         // `{{workspace}}` in capture_format follows `--tag` like the app does.
         if let Some(tag) = cli.tag.as_deref() {
             config.workspace = bjorn::bear::normalize_tag(tag);
@@ -231,7 +243,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         bjorn::config::preview_cache_path()
     };
-    let client = Arc::new(BearClient::new(command).with_preview_cache(cache));
+    let client = Arc::new(if config.craft.enabled && !cli.demo {
+        craft_client(&config)?
+    } else {
+        BearClient::new(command).with_preview_cache(cache)
+    });
     let environ: std::collections::HashMap<String, String> = std::env::vars().collect();
     let (mut app, mut rx) = App::new(config, client, cli.tag.as_deref(), environ);
     if let Some(path) = cli.note.as_deref() {
