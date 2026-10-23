@@ -125,6 +125,10 @@ struct State {
     /// Templates are not notes.
     #[serde(default)]
     templates: HashSet<String>,
+    /// Every folder walked and every body read at least once: the first
+    /// index is done, and no progress is shown again.
+    #[serde(default)]
+    indexed: bool,
     /// Read back just after Bjorn wrote them: current under whatever stamp
     /// the next listing gives them.
     #[serde(skip)]
@@ -172,6 +176,33 @@ impl State {
             .get(id)
             .filter(|b| b.stamp == doc.modified)
             .map(|b| b.content.as_str())
+    }
+
+    /// (done, total) of the first index: folders walked plus bodies read,
+    /// out of folders plus documents. `None` once it has finished.
+    fn indexing(&mut self) -> Option<(usize, usize)> {
+        if self.indexed || !self.listed {
+            return None;
+        }
+        let folders: Vec<&Folder> = self.folders.iter().filter(|f| f.id != "trash").collect();
+        let walked = folders
+            .iter()
+            .filter(|f| self.walked.get(&f.id) == Some(&f.count))
+            .count();
+        let docs: Vec<&String> = self
+            .docs
+            .iter()
+            .filter(|(id, d)| !d.trashed && !self.templates.contains(*id))
+            .map(|(id, _)| id)
+            .collect();
+        let read = docs.iter().filter(|id| self.body(id).is_some()).count();
+        let (done, total) = (walked + read, folders.len() + docs.len());
+        if done >= total {
+            self.indexed = true;
+            self.touch();
+            return None;
+        }
+        Some((done, total))
     }
 
     fn touch(&mut self) {
@@ -592,7 +623,9 @@ impl CraftStore {
             .into_iter()
             .filter_map(|id| state.body(&id).map(|b| (id.clone(), b.to_string())))
             .collect();
-        Ok(Snapshot::with_bodies(notes, bodies))
+        let mut snapshot = Snapshot::with_bodies(notes, bodies);
+        snapshot.indexing = state.indexing();
+        Ok(snapshot)
     }
 
     fn location(&self, state: &State, id: &str, d: &Doc) -> Location {

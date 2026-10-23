@@ -309,7 +309,11 @@ impl Reader {
             meta.push(format!("tasks {}/{}", note.done, note.todos + note.done));
         }
         if !note.pins.is_empty() {
-            meta.push(format!("pinned {}", note.pins.join(", ")));
+            meta.push(if super::is_craft() {
+                "starred".to_string()
+            } else {
+                format!("pinned {}", note.pins.join(", "))
+            });
         }
         self.meta = meta.join(" · ");
     }

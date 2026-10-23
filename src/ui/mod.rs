@@ -40,15 +40,56 @@ pub fn set_craft(on: bool) {
     CRAFT.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// A label as this library calls it: Bear's name swapped for Craft's.
+pub fn is_craft() -> bool {
+    CRAFT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Bear's words for what Craft calls something else, whole words only.
+const CRAFT_WORDS: [(&str, &str); 9] = [
+    ("Untagged", "Unsorted"),
+    ("untagged", "unsorted"),
+    ("Pinned", "Starred"),
+    ("pinned", "starred"),
+    ("Unpinned", "Unstarred"),
+    ("unpin", "unstar"),
+    ("pins", "stars"),
+    ("Pin", "Star"),
+    ("pin", "star"),
+];
+
+/// A label as this library calls it: Bear's name swapped for Craft's, and
+/// Bear's pins and Untagged for Craft's stars and Unsorted. A search
+/// operator (`@pinned`) is left alone: that is what is typed.
 pub fn library_text(text: &str) -> std::borrow::Cow<'_, str> {
-    if CRAFT.load(std::sync::atomic::Ordering::Relaxed) && text.contains("Bear") {
-        text.replace("Bear.app", "Craft")
-            .replace("Bear", "Craft")
-            .into()
-    } else {
-        text.into()
+    if !is_craft() {
+        return text.into();
     }
+    let mut out = text.replace("Bear.app", "Craft").replace("Bear", "Craft");
+    out = out.replace("the global pin", "the star");
+    for (bear, craft) in CRAFT_WORDS {
+        out = replace_word(&out, bear, craft);
+    }
+    if out == text { text.into() } else { out.into() }
+}
+
+/// `text` with every whole-word `word` (not after `@` or `#`) made `with`.
+fn replace_word(text: &str, word: &str, with: &str) -> String {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '@' || c == '#';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(word) {
+        let before = rest[..at].chars().next_back().or(out.chars().next_back());
+        let after = rest[at + word.len()..].chars().next();
+        out.push_str(&rest[..at]);
+        if before.is_some_and(is_word) || after.is_some_and(is_word) {
+            out.push_str(word);
+        } else {
+            out.push_str(with);
+        }
+        rest = &rest[at + word.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 pub const FOOTER: &[(&str, &str)] = &[
@@ -136,7 +177,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.editing.is_some() {
         draw_footer_entries(frame, footer, EDITING_FOOTER);
     } else {
-        draw_footer(frame, footer);
+        draw_footer(frame, footer, app.snapshot.indexing);
     }
     app.rects = rects;
 
@@ -769,8 +810,33 @@ fn draw_triage(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect) {
+/// The key hints, and while a Craft library is first read, how far it got.
+fn draw_footer(frame: &mut Frame, area: Rect, indexing: Option<(usize, usize)>) {
     draw_footer_entries(frame, area, FOOTER);
+    let Some((done, total)) = indexing else {
+        return;
+    };
+    let pct = done * 100 / total.max(1);
+    let filled = pct / 10;
+    let gauge = format!(
+        " Indexing Craft {}{} {pct}% ",
+        "▰".repeat(filled),
+        "▱".repeat(10 - filled)
+    );
+    let width = gauge.chars().count() as u16;
+    if area.width < width + 20 {
+        return;
+    }
+    let hints = Rect {
+        x: area.x + area.width - width,
+        y: area.y + area.height.saturating_sub(1),
+        width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(gauge, theme::footer_key())),
+        hints,
+    );
 }
 
 /// The footer is two rows: a rule separating it from the columns, then the key hints.
@@ -1776,4 +1842,24 @@ fn draw_links(frame: &mut Frame, area: Rect, view: LinksView) {
     )));
     frame.render_widget(Paragraph::new(lines), inner);
     field_cursor(frame, view.field, inner.x + 2, inner.y, width as u16);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_word;
+
+    #[test]
+    fn craft_words_replace_whole_words_only() {
+        assert_eq!(replace_word("Pin failed", "Pin", "Star"), "Star failed");
+        assert_eq!(
+            replace_word("1 – 7 Pinned, Trash", "Pinned", "Starred"),
+            "1 – 7 Starred, Trash"
+        );
+        assert_eq!(
+            replace_word("@pinned  @todo", "pinned", "starred"),
+            "@pinned  @todo"
+        );
+        assert_eq!(replace_word("spinning pin", "pin", "star"), "spinning star");
+        assert_eq!(replace_word("pin pin", "pin", "star"), "star star");
+    }
 }

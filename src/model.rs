@@ -52,8 +52,12 @@ impl View {
         View::ALL.iter().copied().find(|v| v.value() == value)
     }
 
+    /// As the sidebar names it; a Craft library calls Untagged and Pinned
+    /// by Craft's names.
     pub fn label(self) -> &'static str {
         match self {
+            View::Untagged if crate::ui::is_craft() => "Unsorted",
+            View::Pinned if crate::ui::is_craft() => "Starred",
             View::All => "Notes",
             View::Untagged => "Untagged",
             View::Todo => "Todo",

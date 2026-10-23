@@ -317,6 +317,11 @@ impl Config {
                 },
             };
         }
+        // A Craft library has its own default look; a theme named in the
+        // file still wins.
+        if cfg.craft.enabled && data.get("theme").is_none() {
+            cfg.theme = crate::ui::theme::CRAFT_THEME.into();
+        }
         if let Some(Value::Table(section)) = data.get("templates") {
             let dir = text(section.get("dir"), "").trim().to_string();
             if !dir.is_empty() {
@@ -547,6 +552,18 @@ mod tests {
         assert_eq!(cfg.workspace, "");
         assert_eq!(cfg.export_dir, home_dir().join("Downloads"));
         assert_eq!(cfg.theme, crate::ui::theme::DEFAULT_THEME);
+    }
+
+    #[test]
+    fn craft_has_its_own_default_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "[craft]\nenabled = true\n");
+        assert_eq!(
+            Config::load(Some(&path)).unwrap().theme,
+            crate::ui::theme::CRAFT_THEME
+        );
+        let path = write(&dir, "theme = \"nord\"\n[craft]\nenabled = true\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().theme, "nord");
     }
 
     #[test]

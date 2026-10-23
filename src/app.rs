@@ -658,7 +658,14 @@ impl App {
         // The cold listing reads every body to build the previews; keeping
         // them means the reader never waits for bearcli again this session.
         let bodies = std::mem::take(&mut snapshot.bodies);
+        let indexed = self.snapshot.indexing.is_some() && snapshot.indexing.is_none();
         self.snapshot = snapshot;
+        if indexed {
+            self.notify(
+                "Craft is indexed: every note is searchable.",
+                Duration::from_secs(5),
+            );
+        }
         self.rebuild_title_index();
         self.loaded = true;
         // The previews this snapshot settled on are worth the next launch not

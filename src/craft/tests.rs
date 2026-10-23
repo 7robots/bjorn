@@ -416,3 +416,27 @@ async fn pins_are_kept_by_bjorn() {
     );
     assert!(again.state.lock().unwrap().docs.contains_key(&w.plan));
 }
+
+#[tokio::test]
+async fn the_first_index_reports_progress_until_it_is_done() {
+    let w = world();
+    w.store.refresh(&Shared(w.craft.clone())).await.unwrap();
+    let (done, total) = w
+        .store
+        .snapshot()
+        .await
+        .unwrap()
+        .indexing
+        .expect("indexing");
+    assert!(done < total, "{done} of {total}");
+    w.cycle().await;
+    assert_eq!(w.store.snapshot().await.unwrap().indexing, None);
+    // Once done, a note new in Craft does not bring the gauge back.
+    w.craft
+        .space
+        .lock()
+        .unwrap()
+        .add_doc("Fresh", "unsorted", "new");
+    w.store.refresh(&Shared(w.craft.clone())).await.unwrap();
+    assert_eq!(w.store.snapshot().await.unwrap().indexing, None);
+}

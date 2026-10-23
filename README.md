@@ -373,12 +373,15 @@ Editing a note writes back only the blocks that changed, so the rest keep
 their comments and history. A new note goes in the folder its first tag names.
 `d` sends a document to Craft's trash, and `b` opens it in the Craft app.
 Sub-pages, collections and whiteboards show up as placeholder lines and are
-never written. Pins are stored by Bjorn, because Craft has no pins.
+never written. Untagged is called Unsorted and Pinned is called Starred, as
+Craft names them; the stars are kept by Bjorn. A Craft library starts in the
+`catppuccin-macchiato` theme unless the config names another.
 
 Craft allows about 100 API requests a minute, so the first start takes a
 couple of minutes to learn which folder each document is in. It then fills in
 note bodies in the background at a few a minute. Everything is cached on disk,
-so later starts are instant. See `CRAFT` in `man bjorn` for the details.
+so later starts are instant. Until that first index is done, the footer shows
+how far it has got. See `CRAFT` in `man bjorn` for the details.
 
 ## Configuration
 

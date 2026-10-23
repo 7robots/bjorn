@@ -377,6 +377,9 @@ pub struct Snapshot {
     /// again. Empty on the warm path, which lists metadata only. The stamp to
     /// key them by is the note's own, so take it from `notes`.
     pub bodies: Vec<(String, String)>,
+    /// (done, total) while a library is still being read for the first
+    /// time; `None` once it has been, and always for Bear.
+    pub indexing: Option<(usize, usize)>,
     index: HashMap<String, usize>,
 }
 
@@ -395,6 +398,7 @@ impl Snapshot {
             notes,
             taken_at: Some(Utc::now()),
             bodies,
+            indexing: None,
             index,
         }
     }

@@ -892,8 +892,17 @@ puts a document back in the folder it left. Craft has no archive;
 .I archive_folder
 names a folder to stand for one.
 .IP \(bu 2
-Pins are kept by Bjorn, in
+Untagged is called
+.B Unsorted
+and Pinned is called
+.BR Starred ,
+as Craft names them. The stars are kept by Bjorn, in
 .IR craft\-pins.json .
+.IP \(bu 2
+Without a
+.I theme
+in the config, a Craft library is drawn in
+.IR catppuccin\-macchiato .
 .IP \(bu 2
 .B b
 opens the document in the Craft app, at the section when there is one.
@@ -909,6 +918,11 @@ background, a few a minute until all are cached. All of it is kept on disk, so
 only the first start is slow to fill in tags, previews, todo counts and
 full\-text search; until a body is cached, a text search also asks Craft's
 search, which returns its top 20.
+.PP
+Until every folder has been listed and every body read once, the footer shows
+.B Indexing Craft
+with a gauge, and a notice says when it is done. Later changes are read without
+it.
 .SH EXPORT
 .B x
 writes the note under the cursor to a file you pick, in the format chosen in

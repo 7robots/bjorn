@@ -302,6 +302,10 @@ pub const THEMES: &[Theme] = &[
 /// before the config is read gets this one.
 pub const DEFAULT_THEME: &str = "red-graphite-dark";
 
+/// The default for a Craft library: Catppuccin's blues and mauves, near
+/// Craft's own blue, purple and pink.
+pub const CRAFT_THEME: &str = "catppuccin-macchiato";
+
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
